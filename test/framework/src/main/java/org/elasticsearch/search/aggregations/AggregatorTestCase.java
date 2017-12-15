@@ -27,6 +27,7 @@ import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.AssertingIndexSearcher;
 import org.apache.lucene.search.Collector;
 import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.QueryCache;
 import org.apache.lucene.search.QueryCachingPolicy;
@@ -60,7 +61,6 @@ import org.elasticsearch.indices.breaker.CircuitBreakerService;
 import org.elasticsearch.indices.breaker.NoneCircuitBreakerService;
 import org.elasticsearch.indices.fielddata.cache.IndicesFieldDataCache;
 import org.elasticsearch.mock.orig.Mockito;
-import org.elasticsearch.search.aggregations.bucket.MultiBucketsAggregation;
 import org.elasticsearch.search.fetch.FetchPhase;
 import org.elasticsearch.search.fetch.subphase.DocValueFieldsFetchSubPhase;
 import org.elasticsearch.search.fetch.subphase.FetchSourceSubPhase;
@@ -99,17 +99,19 @@ public abstract class AggregatorTestCase extends ESTestCase {
     protected AggregatorFactory<?> createAggregatorFactory(AggregationBuilder aggregationBuilder,
                                                            IndexSearcher indexSearcher,
                                                            MappedFieldType... fieldTypes) throws IOException {
-        return createAggregatorFactory(aggregationBuilder, indexSearcher, createIndexSettings(),
+        return createAggregatorFactory(new MatchAllDocsQuery(), aggregationBuilder, indexSearcher, createIndexSettings(),
             new MultiBucketConsumer(DEFAULT_MAX_BUCKETS), fieldTypes);
     }
 
     /** Create a factory for the given aggregation builder. */
-    protected AggregatorFactory<?> createAggregatorFactory(AggregationBuilder aggregationBuilder,
+    protected AggregatorFactory<?> createAggregatorFactory(Query query,
+                                                           AggregationBuilder aggregationBuilder,
                                                            IndexSearcher indexSearcher,
                                                            IndexSettings indexSettings,
                                                            MultiBucketConsumer bucketConsumer,
                                                            MappedFieldType... fieldTypes) throws IOException {
         SearchContext searchContext = createSearchContext(indexSearcher, indexSettings);
+        when(searchContext.query()).thenReturn(query);
         CircuitBreakerService circuitBreakerService = new NoneCircuitBreakerService();
         when(searchContext.aggregations())
             .thenReturn(new SearchContextAggregations(AggregatorFactories.EMPTY, bucketConsumer));
@@ -142,32 +144,35 @@ public abstract class AggregatorTestCase extends ESTestCase {
     protected <A extends Aggregator> A createAggregator(AggregationBuilder aggregationBuilder,
                                                         IndexSearcher indexSearcher,
                                                         MappedFieldType... fieldTypes) throws IOException {
-        return createAggregator(aggregationBuilder, indexSearcher, createIndexSettings(),
+        return createAggregator(new MatchAllDocsQuery(), aggregationBuilder, indexSearcher, createIndexSettings(),
             new MultiBucketConsumer(DEFAULT_MAX_BUCKETS), fieldTypes);
     }
 
-    protected <A extends Aggregator> A createAggregator(AggregationBuilder aggregationBuilder,
+    protected <A extends Aggregator> A createAggregator(Query query,
+                                                        AggregationBuilder aggregationBuilder,
                                                         IndexSearcher indexSearcher,
                                                         IndexSettings indexSettings,
                                                         MappedFieldType... fieldTypes) throws IOException {
-        return createAggregator(aggregationBuilder, indexSearcher, indexSettings,
+        return createAggregator(query, aggregationBuilder, indexSearcher, indexSettings,
             new MultiBucketConsumer(DEFAULT_MAX_BUCKETS), fieldTypes);
     }
 
-    protected <A extends Aggregator> A createAggregator(AggregationBuilder aggregationBuilder,
+    protected <A extends Aggregator> A createAggregator(Query query,
+                                                        AggregationBuilder aggregationBuilder,
                                                         IndexSearcher indexSearcher,
                                                         MultiBucketConsumer bucketConsumer,
                                                         MappedFieldType... fieldTypes) throws IOException {
-        return createAggregator(aggregationBuilder, indexSearcher, createIndexSettings(), bucketConsumer, fieldTypes);
+        return createAggregator(query, aggregationBuilder, indexSearcher, createIndexSettings(), bucketConsumer, fieldTypes);
     }
 
-    protected <A extends Aggregator> A createAggregator(AggregationBuilder aggregationBuilder,
+    protected <A extends Aggregator> A createAggregator(Query query,
+                                                        AggregationBuilder aggregationBuilder,
                                                         IndexSearcher indexSearcher,
                                                         IndexSettings indexSettings,
                                                         MultiBucketConsumer bucketConsumer,
                                                         MappedFieldType... fieldTypes) throws IOException {
         @SuppressWarnings("unchecked")
-        A aggregator = (A) createAggregatorFactory(aggregationBuilder, indexSearcher, indexSettings, bucketConsumer, fieldTypes)
+        A aggregator = (A) createAggregatorFactory(query, aggregationBuilder, indexSearcher, indexSettings, bucketConsumer, fieldTypes)
             .create(null, true);
         return aggregator;
     }
@@ -262,7 +267,7 @@ public abstract class AggregatorTestCase extends ESTestCase {
                                                                              int maxBucket,
                                                                              MappedFieldType... fieldTypes) throws IOException {
         MultiBucketConsumer bucketConsumer = new MultiBucketConsumer(maxBucket);
-        C a = createAggregator(builder, searcher, bucketConsumer, fieldTypes);
+        C a = createAggregator(query, builder, searcher, bucketConsumer, fieldTypes);
         a.preCollection();
         searcher.search(query, a);
         a.postCollection();
@@ -310,11 +315,11 @@ public abstract class AggregatorTestCase extends ESTestCase {
         Query rewritten = searcher.rewrite(query);
         Weight weight = searcher.createWeight(rewritten, true, 1f);
         MultiBucketConsumer bucketConsumer = new MultiBucketConsumer(maxBucket);
-        C root = createAggregator(builder, searcher, bucketConsumer, fieldTypes);
+        C root = createAggregator(query, builder, searcher, bucketConsumer, fieldTypes);
 
         for (ShardSearcher subSearcher : subSearchers) {
             MultiBucketConsumer shardBucketConsumer = new MultiBucketConsumer(maxBucket);
-            C a = createAggregator(builder, subSearcher, shardBucketConsumer, fieldTypes);
+            C a = createAggregator(query, builder, subSearcher, shardBucketConsumer, fieldTypes);
             a.preCollection();
             subSearcher.search(weight, a);
             a.postCollection();

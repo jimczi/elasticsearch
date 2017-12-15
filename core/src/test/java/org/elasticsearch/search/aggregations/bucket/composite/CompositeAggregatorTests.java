@@ -21,12 +21,16 @@ package org.elasticsearch.search.aggregations.bucket.composite;
 
 import org.apache.lucene.analysis.MockAnalyzer;
 import org.apache.lucene.document.Document;
+import org.apache.lucene.document.Field;
+import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
+import org.apache.lucene.document.StringField;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.RandomIndexWriter;
+import org.apache.lucene.index.Term;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.Query;
@@ -34,6 +38,7 @@ import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.SortedNumericSortField;
 import org.apache.lucene.search.SortedSetSortField;
+import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.LuceneTestCase;
@@ -116,11 +121,11 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             )
         );
         final Sort sort = new Sort(new SortedSetSortField("keyword", false));
-        testSearchCase(new MatchAllDocsQuery(), sort, dataset,
+        testSearchCase(sort, dataset,
             () -> {
                 TermsValuesSourceBuilder terms = new TermsValuesSourceBuilder("keyword")
                     .field("keyword");
-                return new CompositeAggregationBuilder("name", Collections.singletonList(terms));
+                return new CompositeAggregationBuilder("name", Collections.singletonList(terms)).size(3);
             }, (result) -> {
                 assertEquals(3, result.getBuckets().size());
                 assertEquals("{keyword=a}", result.getBuckets().get(0).getKeyAsString());
@@ -132,12 +137,12 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), sort, dataset,
+        testSearchCase(sort, dataset,
             () -> {
                 TermsValuesSourceBuilder terms = new TermsValuesSourceBuilder("keyword")
                     .field("keyword");
                 return new CompositeAggregationBuilder("name", Collections.singletonList(terms))
-                    .aggregateAfter(Collections.singletonMap("keyword", "a"));
+                    .aggregateAfter(Collections.singletonMap("keyword", "a")).size(2);
             }, (result) -> {
                 assertEquals(2, result.getBuckets().size());
                 assertEquals("{keyword=c}", result.getBuckets().get(0).getKeyAsString());
@@ -160,12 +165,12 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             )
         );
         final Sort sort = new Sort(new SortedSetSortField("keyword", true));
-        testSearchCase(new MatchAllDocsQuery(), sort, dataset,
+        testSearchCase(sort, dataset,
             () -> {
                 TermsValuesSourceBuilder terms = new TermsValuesSourceBuilder("keyword")
                     .field("keyword")
                     .order(SortOrder.DESC);
-                return new CompositeAggregationBuilder("name", Collections.singletonList(terms));
+                return new CompositeAggregationBuilder("name", Collections.singletonList(terms)).size(3);
             }, (result) -> {
                 assertEquals(3, result.getBuckets().size());
                 assertEquals("{keyword=a}", result.getBuckets().get(2).getKeyAsString());
@@ -177,13 +182,13 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), sort, dataset,
+        testSearchCase(sort, dataset,
             () -> {
                 TermsValuesSourceBuilder terms = new TermsValuesSourceBuilder("keyword")
                     .field("keyword")
                     .order(SortOrder.DESC);
                 return new CompositeAggregationBuilder("name", Collections.singletonList(terms))
-                    .aggregateAfter(Collections.singletonMap("keyword", "c"));
+                    .aggregateAfter(Collections.singletonMap("keyword", "c")).size(2);
 
             }, (result) -> {
                 assertEquals(1, result.getBuckets().size());
@@ -205,11 +210,11 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             )
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () -> {
                 TermsValuesSourceBuilder terms = new TermsValuesSourceBuilder("keyword")
                     .field("keyword");
-                return new CompositeAggregationBuilder("name", Collections.singletonList(terms));
+                return new CompositeAggregationBuilder("name", Collections.singletonList(terms)).size(5);
 
             }, (result) -> {
                     assertEquals(5, result.getBuckets().size());
@@ -226,12 +231,12 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                 }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () -> {
                 TermsValuesSourceBuilder terms = new TermsValuesSourceBuilder("keyword")
                     .field("keyword");
                 return new CompositeAggregationBuilder("name", Collections.singletonList(terms))
-                    .aggregateAfter(Collections.singletonMap("keyword", "b"));
+                    .aggregateAfter(Collections.singletonMap("keyword", "b")).size(3);
 
             }, (result) -> {
                 assertEquals(3, result.getBuckets().size());
@@ -257,12 +262,12 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             )
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () -> {
                 TermsValuesSourceBuilder terms = new TermsValuesSourceBuilder("keyword")
                     .field("keyword")
                     .order(SortOrder.DESC);
-                return new CompositeAggregationBuilder("name", Collections.singletonList(terms));
+                return new CompositeAggregationBuilder("name", Collections.singletonList(terms)).size(5);
 
             }, (result) -> {
                 assertEquals(5, result.getBuckets().size());
@@ -279,13 +284,13 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () -> {
                 TermsValuesSourceBuilder terms = new TermsValuesSourceBuilder("keyword")
                     .field("keyword")
                     .order(SortOrder.DESC);
                 return new CompositeAggregationBuilder("name", Collections.singletonList(terms))
-                    .aggregateAfter(Collections.singletonMap("keyword", "c"));
+                    .aggregateAfter(Collections.singletonMap("keyword", "c")).size(2);
 
             }, (result) -> {
                 assertEquals(2, result.getBuckets().size());
@@ -314,13 +319,13 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             new SortedSetSortField("keyword", false),
             new SortedNumericSortField("long", SortField.Type.LONG)
         );
-        testSearchCase(new MatchAllDocsQuery(), sort, dataset,
+        testSearchCase(sort, dataset,
             () -> new CompositeAggregationBuilder("name",
                     Arrays.asList(
                         new TermsValuesSourceBuilder("keyword").field("keyword"),
                         new TermsValuesSourceBuilder("long").field("long")
                     )
-            ),
+            ).size(4),
             (result) -> {
                 assertEquals(4, result.getBuckets().size());
                 assertEquals("{keyword=a, long=0}", result.getBuckets().get(0).getKeyAsString());
@@ -334,14 +339,14 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), sort, dataset,
+        testSearchCase(sort, dataset,
             () -> new CompositeAggregationBuilder("name",
                     Arrays.asList(
                         new TermsValuesSourceBuilder("keyword").field("keyword"),
                         new TermsValuesSourceBuilder("long").field("long")
                     )
                 ).aggregateAfter(createAfterKey("keyword", "a", "long", 100L)
-            ),
+            ).size(2),
             (result) -> {
                 assertEquals(2, result.getBuckets().size());
                 assertEquals("{keyword=c, long=100}", result.getBuckets().get(0).getKeyAsString());
@@ -369,14 +374,14 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             new SortedSetSortField("keyword", true),
             new SortedNumericSortField("long", SortField.Type.LONG, true)
         );
-        testSearchCase(new MatchAllDocsQuery(), sort, dataset,
+        testSearchCase(sort, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
                         new TermsValuesSourceBuilder("keyword").field("keyword").order(SortOrder.DESC),
                         new TermsValuesSourceBuilder("long").field("long").order(SortOrder.DESC)
                     )
-                ),
+                ).size(4),
             (result) -> {
                 assertEquals(4, result.getBuckets().size());
                 assertEquals("{keyword=a, long=0}", result.getBuckets().get(3).getKeyAsString());
@@ -390,14 +395,14 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), sort, dataset,
+        testSearchCase(sort, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
                         new TermsValuesSourceBuilder("keyword").field("keyword").order(SortOrder.DESC),
                         new TermsValuesSourceBuilder("long").field("long").order(SortOrder.DESC)
                     )).aggregateAfter(createAfterKey("keyword", "d", "long", 10L)
-                ), (result) -> {
+                ).size(3), (result) -> {
                 assertEquals(3, result.getBuckets().size());
                 assertEquals("{keyword=a, long=0}", result.getBuckets().get(2).getKeyAsString());
                 assertEquals(1L, result.getBuckets().get(2).getDocCount());
@@ -422,13 +427,13 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             )
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
                         new TermsValuesSourceBuilder("keyword").field("keyword"),
                         new TermsValuesSourceBuilder("long").field("long")
-                    ))
+                    )).size(10)
             , (result) -> {
                 assertEquals(10, result.getBuckets().size());
                 assertEquals("{keyword=a, long=0}", result.getBuckets().get(0).getKeyAsString());
@@ -454,14 +459,14 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
                         new TermsValuesSourceBuilder("keyword").field("keyword"),
                         new TermsValuesSourceBuilder("long").field("long")
                     )
-                ).aggregateAfter(createAfterKey("keyword", "c", "long", 10L))
+                ).aggregateAfter(createAfterKey("keyword", "c", "long", 10L)).size(6)
             , (result) -> {
                 assertEquals(6, result.getBuckets().size());
                 assertEquals("{keyword=c, long=100}", result.getBuckets().get(0).getKeyAsString());
@@ -490,19 +495,17 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                 createDocument("keyword", Arrays.asList("d", "d"), "long", Arrays.asList(10L, 100L, 1000L)),
                 createDocument("keyword", "c"),
                 createDocument("long", 100L)
-
             )
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
                         new TermsValuesSourceBuilder("keyword").field("keyword").order(SortOrder.DESC),
                         new TermsValuesSourceBuilder("long").field("long").order(SortOrder.DESC)
                     )
-                ).aggregateAfter(createAfterKey("keyword", "z", "long", 100L)
-                ),
+                ).aggregateAfter(createAfterKey("keyword", "z", "long", 100L)).size(10),
             (result) -> {
                 assertEquals(10, result.getBuckets().size());
                 assertEquals("{keyword=a, long=0}", result.getBuckets().get(9).getKeyAsString());
@@ -528,15 +531,14 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
                         new TermsValuesSourceBuilder("keyword").field("keyword").order(SortOrder.DESC),
                         new TermsValuesSourceBuilder("long").field("long").order(SortOrder.DESC)
                     )
-                ).aggregateAfter(createAfterKey("keyword", "b", "long", 100L)
-                ),
+                ).aggregateAfter(createAfterKey("keyword", "b", "long", 100L)).size(2),
             (result) -> {
                 assertEquals(2, result.getBuckets().size());
                 assertEquals("{keyword=a, long=0}", result.getBuckets().get(1).getKeyAsString());
@@ -561,7 +563,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             )
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
@@ -569,7 +571,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                         new TermsValuesSourceBuilder("long").field("long"),
                         new TermsValuesSourceBuilder("double").field("double")
                     )
-                )
+                ).size(10)
             , (result) -> {
                 assertEquals(10, result.getBuckets().size());
                 assertEquals("{keyword=a, long=0, double=0.09}", result.getBuckets().get(0).getKeyAsString());
@@ -595,7 +597,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
@@ -603,7 +605,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                         new TermsValuesSourceBuilder("long").field("long"),
                         new TermsValuesSourceBuilder("double").field("double")
                     )
-                ).aggregateAfter(createAfterKey("keyword", "a", "long", 100L, "double", 0.4d))
+                ).aggregateAfter(createAfterKey("keyword", "a", "long", 100L, "double", 0.4d)).size(10)
             ,(result) -> {
                 assertEquals(10, result.getBuckets().size());
                 assertEquals("{keyword=b, long=100, double=0.4}", result.getBuckets().get(0).getKeyAsString());
@@ -629,7 +631,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
@@ -657,12 +659,13 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             )
         );
         final Sort sort = new Sort(new SortedNumericSortField("date", SortField.Type.LONG));
-        testSearchCase(new MatchAllDocsQuery(), sort, dataset,
+        testSearchCase(sort, dataset,
             () -> {
                 DateHistogramValuesSourceBuilder histo = new DateHistogramValuesSourceBuilder("date")
                     .field("date")
                     .dateHistogramInterval(DateHistogramInterval.days(1));
-                return new CompositeAggregationBuilder("name", Collections.singletonList(histo));
+                return new CompositeAggregationBuilder("name", Collections.singletonList(histo))
+                    .size(3);
             },
             (result) -> {
                 assertEquals(3, result.getBuckets().size());
@@ -675,13 +678,14 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), sort, dataset,
+        testSearchCase(sort, dataset,
             () -> {
                 DateHistogramValuesSourceBuilder histo = new DateHistogramValuesSourceBuilder("date")
                     .field("date")
                     .dateHistogramInterval(DateHistogramInterval.days(1));
                 return new CompositeAggregationBuilder("name", Collections.singletonList(histo))
-                    .aggregateAfter(createAfterKey("date", 1474329600000L));
+                    .aggregateAfter(createAfterKey("date", 1474329600000L))
+                    .size(2);
 
             }, (result) -> {
                 assertEquals(2, result.getBuckets().size());
@@ -706,13 +710,13 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             )
         );
         final Sort sort = new Sort(new SortedNumericSortField("date", SortField.Type.LONG));
-        testSearchCase(new MatchAllDocsQuery(), sort, dataset,
+        testSearchCase(sort, dataset,
             () -> {
                 DateHistogramValuesSourceBuilder histo = new DateHistogramValuesSourceBuilder("date")
                     .field("date")
                     .dateHistogramInterval(DateHistogramInterval.days(1))
                     .timeZone(DateTimeZone.forOffsetHours(1));
-                return new CompositeAggregationBuilder("name", Collections.singletonList(histo));
+                return new CompositeAggregationBuilder("name", Collections.singletonList(histo)).size(3);
             },
             (result) -> {
                 assertEquals(3, result.getBuckets().size());
@@ -725,14 +729,15 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), sort, dataset,
+        testSearchCase(sort, dataset,
             () -> {
                 DateHistogramValuesSourceBuilder histo = new DateHistogramValuesSourceBuilder("date")
                     .field("date")
                     .dateHistogramInterval(DateHistogramInterval.days(1))
                     .timeZone(DateTimeZone.forOffsetHours(1));
                 return new CompositeAggregationBuilder("name", Collections.singletonList(histo))
-                    .aggregateAfter(createAfterKey("date", 1474326000000L));
+                    .aggregateAfter(createAfterKey("date", 1474326000000L))
+                    .size(2);
 
             }, (result) -> {
                 assertEquals(2, result.getBuckets().size());
@@ -756,7 +761,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                 createDocument("long", 4L)
             )
         );
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
@@ -766,7 +771,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                         new TermsValuesSourceBuilder("keyword")
                             .field("keyword")
                     )
-                ),
+                ).size(7),
             (result) -> {
                 assertEquals(7, result.getBuckets().size());
                 assertEquals("{date=1474329600000, keyword=b}", result.getBuckets().get(0).getKeyAsString());
@@ -786,7 +791,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
@@ -796,7 +801,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                         new TermsValuesSourceBuilder("keyword")
                             .field("keyword")
                     )
-                ).aggregateAfter(createAfterKey("date", 1508371200000L, "keyword", "g"))
+                ).aggregateAfter(createAfterKey("date", 1508371200000L, "keyword", "g")).size(3)
             , (result) -> {
                 assertEquals(3, result.getBuckets().size());
                 assertEquals("{date=1508457600000, keyword=a}", result.getBuckets().get(0).getKeyAsString());
@@ -821,7 +826,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                 createDocument("long", 4L)
             )
         );
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
@@ -848,7 +853,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
@@ -887,7 +892,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                 createDocument("long", 4L)
             )
         );
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase( null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
@@ -916,7 +921,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase( null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
@@ -948,7 +953,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                 createDocument("long", 4L)
             )
         );
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase(null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
@@ -976,7 +981,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
         );
 
-        testSearchCase(new MatchAllDocsQuery(), null, dataset,
+        testSearchCase( null, dataset,
             () ->
                 new CompositeAggregationBuilder("name",
                     Arrays.asList(
@@ -999,16 +1004,19 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
         );
     }
 
-    private void testSearchCase(Query query,
-                                Sort sort,
+    private void testSearchCase(Sort sort,
                                 List<Map<String, List<Object>>> dataset,
                                 Supplier<CompositeAggregationBuilder> create,
                                 Consumer<InternalComposite> verify) throws IOException {
-        executeTestCase(false, null, query, dataset, create, verify);
-        executeTestCase(true, null, query, dataset, create, verify);
+        executeTestCase(false, null, new MatchAllDocsQuery(), dataset, create, verify);
+        executeTestCase(false, null, new TermQuery(new Term("fake", new BytesRef("fake"))), dataset, create, verify);
+        executeTestCase(true, null, new MatchAllDocsQuery(), dataset, create, verify);
+        executeTestCase(true, null, new TermQuery(new Term("fake", new BytesRef("fake"))), dataset, create, verify);
         if (sort != null) {
-            executeTestCase(false, sort, query, dataset, create, verify);
-            executeTestCase(true, sort, query, dataset, create, verify);
+            executeTestCase(false, sort, new MatchAllDocsQuery(), dataset, create, verify);
+            executeTestCase(false, sort, new TermQuery(new Term("fake", new BytesRef("fake"))), dataset, create, verify);
+            executeTestCase(true, sort, new MatchAllDocsQuery(), dataset, create, verify);
+            executeTestCase(true, sort, new TermQuery(new Term("fake", new BytesRef("fake"))), dataset, create, verify);
         }
     }
 
@@ -1033,6 +1041,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                 Document document = new Document();
                 for (Map<String, List<Object>> fields : dataset) {
                     addToDocument(document, fields);
+                    document.add(new StringField("fake", "fake", Field.Store.NO));
                     indexWriter.addDocument(document);
                     document.clear();
                 }
@@ -1041,7 +1050,8 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                 IndexSearcher indexSearcher = newSearcher(indexReader, sort == null, sort == null);
                 CompositeAggregationBuilder aggregationBuilder = create.get();
                 if (sort != null) {
-                    CompositeAggregator aggregator = createAggregator(aggregationBuilder, indexSearcher, indexSettings, FIELD_TYPES);
+                    CompositeAggregator aggregator =
+                        createAggregator(query, aggregationBuilder, indexSearcher, indexSettings, FIELD_TYPES);
                     assertTrue(aggregator.canEarlyTerminate());
                 }
                 final InternalComposite composite;
@@ -1076,10 +1086,12 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             for (Object value : entry.getValue()) {
                 if (value instanceof Long) {
                     doc.add(new SortedNumericDocValuesField(name, (long) value));
+                    doc.add(new LongPoint(name, (long) value));
                 } else if (value instanceof Double) {
                     doc.add(new SortedNumericDocValuesField(name, NumericUtils.doubleToSortableLong((double) value)));
                 } else if (value instanceof String) {
                     doc.add(new SortedSetDocValuesField(name, new BytesRef((String) value)));
+                    doc.add(new StringField(name, value.toString(), Field.Store.NO));
                 } else {
                     throw new AssertionError("invalid object: " + value.getClass().getSimpleName());
                 }

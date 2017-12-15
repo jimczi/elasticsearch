@@ -235,7 +235,9 @@ public class DateHistogramValuesSourceBuilder extends CompositeValuesSourceBuild
                 canEarlyTerminate = checkCanEarlyTerminate(context.searcher().getIndexReader(),
                     fieldContext.field(), order() == SortOrder.ASC ? false : true, sortField);
             }
-            return new CompositeValuesSourceConfig(name, vs, order(), canEarlyTerminate);
+            final SortedValuesDocIdSelector selector = fieldContext == null ? SortedValuesDocIdSelector.disabled() :
+                SortedValuesDocIdSelector.createSelector(fieldContext.fieldType(), order(), rounding::round);
+            return new CompositeValuesSourceConfig(name, vs, order(), canEarlyTerminate, selector);
         } else {
             throw new IllegalArgumentException("invalid source, expected numeric, got " + orig.getClass().getSimpleName());
         }

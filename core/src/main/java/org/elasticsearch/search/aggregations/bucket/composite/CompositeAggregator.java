@@ -16,7 +16,6 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.elasticsearch.search.aggregations.bucket.composite;
 
 import org.apache.lucene.index.LeafReaderContext;
@@ -47,6 +46,7 @@ final class CompositeAggregator extends BucketsAggregator {
     private final List<String> sourceNames;
     private final boolean canEarlyTerminate;
 
+    private final SortedValuesDocIdSelector selector;
     private final TreeMap<Integer, Integer> keys;
     private final CompositeValuesComparator array;
 
@@ -70,6 +70,7 @@ final class CompositeAggregator extends BucketsAggregator {
         this.keys = new TreeMap<>(array::compare);
         this.canEarlyTerminate = Arrays.stream(sources)
             .allMatch(CompositeValuesSourceConfig::canEarlyTerminate);
+        this.selector = sources[0].selector();
     }
 
     boolean canEarlyTerminate() {
@@ -119,55 +120,91 @@ final class CompositeAggregator extends BucketsAggregator {
         return new InternalComposite(name, size, sourceNames, Collections.emptyList(), reverseMuls, pipelineAggregators(), metaData());
     }
 
-    @Override
-    protected LeafBucketCollector getLeafCollector(LeafReaderContext ctx, LeafBucketCollector sub) throws IOException {
+    private void finishLastLeaf() {
         if (leaf != null) {
-            leaf.docIdSet = builder.build();
+            if (builder != null) {
+                leaf.docIdSet = builder.build();
+            } else {
+                assert leaf.docIdSet != null;
+            }
             contexts.add(leaf);
         }
+    }
+
+    @Override
+    protected LeafBucketCollector getLeafCollector(LeafReaderContext ctx, LeafBucketCollector sub) throws IOException {
+        finishLastLeaf();
+        // should we use the sorted values selector to shortcut the collection ?
+        boolean useSelector = canEarlyTerminate == false && selector.isApplicable(context.query());
         leaf = new LeafContext(ctx, sub);
-        builder = new RoaringDocIdSet.Builder(ctx.reader().maxDoc());
-        final CompositeValuesSource.Collector inner = array.getLeafCollector(ctx, getFirstPassCollector());
-        return new LeafBucketCollector() {
-            @Override
-            public void collect(int doc, long zeroBucket) throws IOException {
-                assert zeroBucket == 0L;
-                inner.collect(doc);
+        final CompositeValuesSource.Collector inner = array.getLeafCollector(ctx, getFirstPassCollector(useSelector == false));
+        if (useSelector == false) {
+            builder = new RoaringDocIdSet.Builder(ctx.reader().maxDoc());
+            return new LeafBucketCollector() {
+                @Override
+                public void collect(int doc, long zeroBucket) throws IOException {
+                    assert zeroBucket == 0L;
+                    inner.collect(doc);
+                }
+            };
+        } else {
+            builder = null;
+            leaf.docIdSet = selector.build(context.query(), ctx, extractLowerBound(), extractUpperBound(), size);
+            DocIdSetIterator it = leaf.docIdSet.iterator();
+            if (it != null) {
+                while(it.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+                    inner.collect(it.docID());
+                }
             }
-        };
+            // we already have the list of documents that should be selected for this round so
+            // we can terminate the collection for this leaf.
+            throw new CollectionTerminatedException();
+        }
     }
 
     @Override
     protected void doPostCollection() throws IOException {
-        if (leaf != null) {
-            leaf.docIdSet = builder.build();
-            contexts.add(leaf);
+        finishLastLeaf();
+    }
+
+    private Object extractUpperBound() {
+        if (keys.size() >= size) {
+            int slot = keys.lastKey();
+            return array.getValue(slot, 0);
+        }
+        return null;
+    }
+
+    private Object extractLowerBound() {
+        if (array.hasTop()) {
+            return array.getTop(0);
+        } else {
+            return null;
         }
     }
 
     /**
-     * The first pass selects the top N composite buckets from all matching documents.
-     * It also records all doc ids that contain a top N composite bucket in a {@link RoaringDocIdSet} in order to be
-     * able to replay the collection filtered on the best buckets only.
+     * The first pass selects the top N composite buckets from the collected documents.
+     * If <code>needsBiSet</code> is true, it also records all doc ids that contain a top N composite bucket
+     * in a {@link RoaringDocIdSet} in order to be able to replay the collection filtered on the best buckets only.
      */
-    private CompositeValuesSource.Collector getFirstPassCollector() {
+    private CompositeValuesSource.Collector getFirstPassCollector(boolean needsBitSet) {
         return new CompositeValuesSource.Collector() {
             int lastDoc = -1;
 
             @Override
             public void collect(int doc) throws IOException {
-
                 // Checks if the candidate key in slot 0 is competitive.
                 if (keys.containsKey(0)) {
                     // This key is already in the top N, skip it for now.
-                    if (doc != lastDoc) {
+                    if (needsBitSet && doc != lastDoc) {
                         builder.add(doc);
                         lastDoc = doc;
                     }
                     return;
                 }
                 if (array.hasTop() && array.compareTop(0) <= 0) {
-                    // This key is greater than the top value collected in the previous round.
+                    // This key is smaller than the top value collected in the previous round.
                     if (canEarlyTerminate) {
                         // The index sort matches the composite sort, we can early terminate this segment.
                         throw new CollectionTerminatedException();
@@ -187,7 +224,6 @@ final class CompositeAggregator extends BucketsAggregator {
                         return;
                     }
                 }
-
                 // The candidate key is competitive
                 final int newSlot;
                 if (keys.size() >= size) {
@@ -201,7 +237,7 @@ final class CompositeAggregator extends BucketsAggregator {
                 // move the candidate key to its new slot.
                 array.move(0, newSlot);
                 keys.put(newSlot, newSlot);
-                if (doc != lastDoc) {
+                if (needsBitSet && doc != lastDoc) {
                     builder.add(doc);
                     lastDoc = doc;
                 }

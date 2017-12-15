@@ -16,7 +16,6 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.elasticsearch.search.aggregations.bucket.composite;
 
 import org.elasticsearch.search.aggregations.support.ValuesSource;
@@ -27,12 +26,23 @@ class CompositeValuesSourceConfig {
     private final ValuesSource vs;
     private final int reverseMul;
     private final boolean canEarlyTerminate;
+    private final SortedValuesDocIdSelector selector;
 
-    CompositeValuesSourceConfig(String name, ValuesSource vs, SortOrder order, boolean canEarlyTerminate) {
+    /**
+     * Ctr
+     * @param name The name of this config.
+     * @param vs The {@link ValuesSource} to extract the values.
+     * @param order The sort order for this source.
+     * @param canEarlyTerminate Whether values in this field have been used to sort the documents at index time.
+     * @param selector The selector for this source.
+     */
+    CompositeValuesSourceConfig(String name, ValuesSource vs, SortOrder order,
+                                boolean canEarlyTerminate, SortedValuesDocIdSelector selector) {
         this.name = name;
         this.vs = vs;
         this.canEarlyTerminate = canEarlyTerminate;
         this.reverseMul = order == SortOrder.ASC ? 1 : -1;
+        this.selector = selector;
     }
 
     String name() {
@@ -41,6 +51,10 @@ class CompositeValuesSourceConfig {
 
     ValuesSource valuesSource() {
         return vs;
+    }
+
+    SortedValuesDocIdSelector selector() {
+        return selector;
     }
 
     /**

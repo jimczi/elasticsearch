@@ -128,7 +128,9 @@ public class HistogramValuesSourceBuilder extends CompositeValuesSourceBuilder<H
                 canEarlyTerminate = checkCanEarlyTerminate(context.searcher().getIndexReader(),
                     fieldContext.field(), order() == SortOrder.ASC ? false : true, sortField);
             }
-            return new CompositeValuesSourceConfig(name, vs, order(), canEarlyTerminate);
+            // TODO should we build a selector for histogram ?
+            final SortedValuesDocIdSelector selector = SortedValuesDocIdSelector.disabled();
+            return new CompositeValuesSourceConfig(name, vs, order(), canEarlyTerminate, selector);
         } else {
             throw new IllegalArgumentException("invalid source, expected numeric, got " + orig.getClass().getSimpleName());
         }

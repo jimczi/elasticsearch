@@ -33,6 +33,7 @@ import org.elasticsearch.script.Script;
 import org.elasticsearch.search.sort.SortOrder;
 
 import java.io.IOException;
+import java.util.function.LongUnaryOperator;
 
 /**
  * A {@link CompositeValuesSourceBuilder} that builds a {@link ValuesSource} from a {@link Script} or
@@ -95,6 +96,8 @@ public class TermsValuesSourceBuilder extends CompositeValuesSourceBuilder<Terms
             canEarlyTerminate = checkCanEarlyTerminate(context.searcher().getIndexReader(),
                 fieldContext.field(), order() == SortOrder.ASC ? false : true, sortField);
         }
-        return new CompositeValuesSourceConfig(name, vs, order(), canEarlyTerminate);
+        final SortedValuesDocIdSelector selector = fieldContext == null ? SortedValuesDocIdSelector.disabled() :
+            SortedValuesDocIdSelector.createSelector(fieldContext.fieldType(), order(), LongUnaryOperator.identity());
+        return new CompositeValuesSourceConfig(name, vs, order(), canEarlyTerminate, selector);
     }
 }

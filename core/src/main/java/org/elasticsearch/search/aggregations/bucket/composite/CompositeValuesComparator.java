@@ -105,6 +105,22 @@ final class CompositeValuesComparator {
     }
 
     /**
+     * Get the top value (if set) for the provided source <code>pos</code>.
+     */
+    Object getTop(int pos) {
+        assert hasTop();
+        return arrays[pos].topValue();
+    }
+
+    /**
+     * Returns the value associated with the source <code>pos</code> for the provided <code>slot</code>.
+     */
+    Object getValue(int slot, int pos) {
+        assert pos < arrays.length;
+        return arrays[pos].value(slot);
+    }
+
+    /**
      * Compares the top values with the values in <code>slot</code>.
      */
     int compareTop(int slot) {

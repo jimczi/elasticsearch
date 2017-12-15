@@ -63,6 +63,18 @@ abstract class CompositeValuesSource<VS extends ValuesSource, T extends Comparab
     abstract String type();
 
     /**
+     * Returns the value associated with the provided <code>slot</code>.
+     */
+    abstract T value(int slot);
+
+    /**
+     * Returns the top value (null if not set) for this source.
+     */
+    T topValue() {
+        return topValue;
+    }
+
+    /**
      * Moves the value in <code>from</code> in <code>to</code>.
      * The value present in <code>to</code> is overridden.
      */
@@ -130,6 +142,7 @@ abstract class CompositeValuesSource<VS extends ValuesSource, T extends Comparab
         private final long[] values;
         private SortedSetDocValues lookup;
         private Long topValueLong;
+        private boolean topValueNotPresent;
 
         GlobalOrdinalValuesSource(ValuesSource.Bytes.WithOrdinals vs, int size, int reverseMul) {
             super(vs, size, reverseMul);
@@ -139,6 +152,15 @@ abstract class CompositeValuesSource<VS extends ValuesSource, T extends Comparab
         @Override
         String type() {
             return "global_ordinals";
+        }
+
+        @Override
+        BytesRef value(int slot) {
+            try {
+                return lookup.lookupOrd(values[slot]);
+            } catch (IOException e) {
+                return null;
+            }
         }
 
         @Override
@@ -153,7 +175,13 @@ abstract class CompositeValuesSource<VS extends ValuesSource, T extends Comparab
 
         @Override
         int compareTop(int slot) {
-            return Long.compare(values[slot], topValueLong) * reverseMul;
+            int cmp = Long.compare(values[slot], topValueLong) * reverseMul;
+            if (cmp == 0 && topValueNotPresent) {
+                // this is the insertion point for the top value since
+                // the exact value is not present in this shard.
+                return -reverseMul;
+            }
+            return cmp;
         }
 
         @Override
@@ -182,6 +210,7 @@ abstract class CompositeValuesSource<VS extends ValuesSource, T extends Comparab
                     if (topValueLong < 0) {
                         // convert negative insert position
                         topValueLong = -topValueLong - 2;
+                        topValueNotPresent = true;
                     }
                 }
             }
@@ -202,7 +231,6 @@ abstract class CompositeValuesSource<VS extends ValuesSource, T extends Comparab
      */
     private static class BinaryValuesSource extends CompositeValuesSource<ValuesSource.Bytes, BytesRef> {
         private final BytesRef[] values;
-        private BytesRef topValue;
 
         BinaryValuesSource(ValuesSource.Bytes vs, int size, int reverseMul) {
             super(vs, size, reverseMul);
@@ -212,6 +240,11 @@ abstract class CompositeValuesSource<VS extends ValuesSource, T extends Comparab
         @Override
         String type() {
             return "binary";
+        }
+
+        @Override
+        BytesRef value(int slot) {
+            return values[slot];
         }
 
         @Override
@@ -265,7 +298,6 @@ abstract class CompositeValuesSource<VS extends ValuesSource, T extends Comparab
      */
     private static class LongValuesSource extends CompositeValuesSource<ValuesSource.Numeric, Long> {
         private final long[] values;
-        private long topValue;
 
         LongValuesSource(ValuesSource.Numeric vs, int size, int reverseMul) {
             super(vs, size, reverseMul);
@@ -275,6 +307,11 @@ abstract class CompositeValuesSource<VS extends ValuesSource, T extends Comparab
         @Override
         String type() {
             return "long";
+        }
+
+        @Override
+        Long value(int slot) {
+            return values[slot];
         }
 
         @Override
@@ -326,7 +363,6 @@ abstract class CompositeValuesSource<VS extends ValuesSource, T extends Comparab
      */
     private static class DoubleValuesSource extends CompositeValuesSource<ValuesSource.Numeric, Double> {
         private final double[] values;
-        private double topValue;
 
         DoubleValuesSource(ValuesSource.Numeric vs, int size, int reverseMul) {
             super(vs, size, reverseMul);
@@ -336,6 +372,11 @@ abstract class CompositeValuesSource<VS extends ValuesSource, T extends Comparab
         @Override
         String type() {
             return "long";
+        }
+
+        @Override
+        Double value(int slot) {
+            return values[slot];
         }
 
         @Override
