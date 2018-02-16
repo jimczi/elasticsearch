@@ -22,27 +22,36 @@ package org.elasticsearch.search.aggregations.bucket.composite;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.search.CollectionTerminatedException;
 import org.elasticsearch.search.aggregations.LeafBucketCollector;
 
 import java.io.IOException;
+import java.util.Set;
+import java.util.TreeMap;
 
 import static org.elasticsearch.search.aggregations.support.ValuesSource.Numeric;
 import static org.elasticsearch.search.aggregations.support.ValuesSource.Bytes;
 import static org.elasticsearch.search.aggregations.support.ValuesSource.Bytes.WithOrdinals;
 
-final class CompositeValuesComparator {
-    private final int size;
+final class CompositeValuesCollectorQueue {
+    // the slot for the current candidate
+    private static final int CANDIDATE_SLOT = Integer.MAX_VALUE;
+
+    private final int maxSize;
+    private final TreeMap<Integer, Integer> keys;
     private final CompositeValuesSource<?, ?>[] arrays;
-    private boolean topValueSet = false;
+    private final int[] docCounts;
+    private boolean afterValueSet = false;
 
     /**
-     *
+     * Ctr
      * @param sources The list of {@link CompositeValuesSourceConfig} to build the composite buckets.
      * @param size The number of composite buckets to keep.
      */
-    CompositeValuesComparator(IndexReader reader, CompositeValuesSourceConfig[] sources, int size) {
-        this.size = size;
+    CompositeValuesCollectorQueue(IndexReader reader, CompositeValuesSourceConfig[] sources, int size) {
+        this.maxSize = size;
         this.arrays = new CompositeValuesSource<?, ?>[sources.length];
+        this.docCounts = new int[size];
         for (int i = 0; i < sources.length; i++) {
             final int reverseMul = sources[i].reverseMul();
             if (sources[i].valuesSource() instanceof WithOrdinals && reader instanceof DirectoryReader) {
@@ -60,25 +69,54 @@ final class CompositeValuesComparator {
                 }
             }
         }
+        this.keys = new TreeMap<>(this::compare);
     }
 
     /**
-     * Moves the values in <code>slot1</code> to <code>slot2</code>.
+     * The current size of the queue.
      */
-    void move(int slot1, int slot2) {
-        assert slot1 < size && slot2 < size;
+    int size() {
+        return keys.size();
+    }
+
+    /**
+     * Returns a sorted {@link Set} view of the slots contained in this queue.
+     */
+    Set<Integer> getSortedSlot() {
+        return keys.keySet();
+    }
+
+    /**
+     * Returns the slot of the current candidate or -1 if the candidate is not in the queue.
+     */
+    Integer getCurrent() {
+        return keys.get(CANDIDATE_SLOT);
+    }
+
+    /**
+     * Returns the document count in <code>slot</code>.
+     */
+    int getDocCount(int slot) {
+        return docCounts[slot];
+    }
+
+    /**
+     * Copies the current value in <code>slot</code>.
+     */
+    private void copyCurrent(int slot) {
         for (int i = 0; i < arrays.length; i++) {
-            arrays[i].move(slot1, slot2);
+            arrays[i].copyCurrent(slot);
         }
+        docCounts[slot] = 1;
     }
 
     /**
      * Compares the values in <code>slot1</code> with <code>slot2</code>.
      */
     int compare(int slot1, int slot2) {
-        assert slot1 < size && slot2 < size;
         for (int i = 0; i < arrays.length; i++) {
-            int cmp = arrays[i].compare(slot1, slot2);
+            int cmp = (slot1 == CANDIDATE_SLOT) ? arrays[i].compareCurrent(slot2) :
+                arrays[i].compare(slot1, slot2);
             if (cmp != 0) {
                 return cmp;
             }
@@ -87,30 +125,22 @@ final class CompositeValuesComparator {
     }
 
     /**
-     * Returns true if a top value has been set for this comparator.
+     * Sets the after values for this comparator.
      */
-    boolean hasTop() {
-        return topValueSet;
-    }
-
-    /**
-     * Sets the top values for this comparator.
-     */
-    void setTop(Comparable<?>[] values) {
+    void setAfter(Comparable<?>[] values) {
         assert values.length == arrays.length;
-        topValueSet = true;
+        afterValueSet = true;
         for (int i = 0; i < arrays.length; i++) {
-            arrays[i].setTop(values[i]);
+            arrays[i].setAfter(values[i]);
         }
     }
 
     /**
-     * Compares the top values with the values in <code>slot</code>.
+     * Compares the after values with the values in <code>slot</code>.
      */
-    int compareTop(int slot) {
-        assert slot < size;
+    private int compareWithAfter() {
         for (int i = 0; i < arrays.length; i++) {
-            int cmp = arrays[i].compareTop(slot);
+            int cmp = arrays[i].compareCurrentWithAfter();
             if (cmp != 0) {
                 return cmp;
             }
@@ -122,7 +152,7 @@ final class CompositeValuesComparator {
      * Builds the {@link CompositeKey} for <code>slot</code>.
      */
     CompositeKey toCompositeKey(int slot) throws IOException {
-        assert slot < size;
+        assert slot < maxSize;
         Comparable<?>[] values = new Comparable<?>[arrays.length];
         for (int i = 0; i < values.length; i++) {
             values[i] = arrays[i].toComparable(slot);
@@ -140,5 +170,57 @@ final class CompositeValuesComparator {
             next = arrays[i].getLeafCollector(context, next);
         }
         return next;
+    }
+
+    /**
+     * Check if the current candidate should be added in the queue.
+     * @param canEarlyTerminate true if the index is sorted by the composite sources.
+     * @return The target slot of the candidate or -1 is the candidate is not competitive.
+     */
+    int addIfCompetitive(boolean canEarlyTerminate) {
+        // Checks if the candidate key is competitive
+        Integer topSlot = keys.get(CANDIDATE_SLOT);
+        if (topSlot != null) {
+            // This key is already in the top N, skip it
+            docCounts[topSlot] += 1;
+            return topSlot;
+        }
+        if (afterValueSet && compareWithAfter() <= 0) {
+            // This key is greater than the top value collected in the previous round
+            if (canEarlyTerminate) {
+                // The index sort matches the composite sort, we can early terminate this segment
+                throw new CollectionTerminatedException();
+            }
+            // skip it
+            return -1;
+        }
+        if (keys.size() >= maxSize) {
+            // The tree map is full, check if the candidate key should be kept
+            if (compare(CANDIDATE_SLOT, keys.lastKey()) > 0) {
+                // The candidate key is not competitive
+                if (canEarlyTerminate) {
+                    // The index sort matches the composite sort, we can early terminate this segment
+                    throw new CollectionTerminatedException();
+                }
+                // just skip this key
+                return -1;
+            }
+        }
+
+        // The candidate key is competitive
+        final int newSlot;
+        if (keys.size() >= maxSize) {
+            // the tree map is full, we replace the last key with this candidate
+            int slot = keys.pollLastEntry().getKey();
+            // and we recycle the deleted slot
+            newSlot = slot;
+        } else {
+            newSlot = keys.size();
+            assert newSlot < maxSize;
+        }
+        // move the candidate key to its new slot
+        copyCurrent(newSlot);
+        keys.put(newSlot, newSlot);
+        return newSlot;
     }
 }

@@ -49,10 +49,16 @@ import org.elasticsearch.index.mapper.KeywordFieldMapper;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.Mapper;
 import org.elasticsearch.index.mapper.NumberFieldMapper;
+import org.elasticsearch.search.aggregations.Aggregator;
 import org.elasticsearch.search.aggregations.AggregatorTestCase;
 import org.elasticsearch.search.aggregations.bucket.histogram.DateHistogramInterval;
+import org.elasticsearch.search.aggregations.bucket.terms.StringTerms;
+import org.elasticsearch.search.aggregations.bucket.terms.TermsAggregationBuilder;
+import org.elasticsearch.search.aggregations.metrics.max.InternalMax;
+import org.elasticsearch.search.aggregations.metrics.max.MaxAggregationBuilder;
 import org.elasticsearch.search.aggregations.metrics.tophits.TopHits;
 import org.elasticsearch.search.aggregations.metrics.tophits.TopHitsAggregationBuilder;
+import org.elasticsearch.search.aggregations.support.ValueType;
 import org.elasticsearch.search.sort.SortOrder;
 import org.elasticsearch.test.IndexSettingsModule;
 import org.joda.time.DateTimeZone;
@@ -79,7 +85,7 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
     @Before
     public void setUp() throws Exception {
         super.setUp();
-        FIELD_TYPES = new MappedFieldType[5];
+        FIELD_TYPES = new MappedFieldType[6];
         FIELD_TYPES[0] = new KeywordFieldMapper.KeywordFieldType();
         FIELD_TYPES[0].setName("keyword");
         FIELD_TYPES[0].setHasDocValues(true);
@@ -101,6 +107,10 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
         FIELD_TYPES[4] = new NumberFieldMapper.NumberFieldType(NumberFieldMapper.NumberType.INTEGER);
         FIELD_TYPES[4].setName("price");
         FIELD_TYPES[4].setHasDocValues(true);
+
+        FIELD_TYPES[5] = new KeywordFieldMapper.KeywordFieldType();
+        FIELD_TYPES[5].setName("terms");
+        FIELD_TYPES[5].setHasDocValues(true);
     }
 
     @Override
@@ -580,7 +590,6 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                 createDocument("keyword", Arrays.asList("d", "d"), "long", Arrays.asList(10L, 100L, 1000L)),
                 createDocument("keyword", "c"),
                 createDocument("long", 100L)
-
             )
         );
 
@@ -1255,6 +1264,86 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
                 assertEquals(topHits.getHits().getTotalHits(), 1L);
             }
         );
+    }
+
+    public void testWithTermsSubAggExecutionMode() throws Exception {
+        // test with no bucket
+        for (Aggregator.SubAggCollectionMode mode : Aggregator.SubAggCollectionMode.values()) {
+            testSearchCase(new MatchAllDocsQuery(), null, Collections.singletonList(createDocument()),
+                () -> {
+                    TermsValuesSourceBuilder terms = new TermsValuesSourceBuilder("keyword")
+                        .field("keyword");
+                    return new CompositeAggregationBuilder("name", Collections.singletonList(terms))
+                        .subAggregation(
+                            new TermsAggregationBuilder("terms", ValueType.STRING)
+                                .field("terms")
+                                .collectMode(mode)
+                                .subAggregation(new MaxAggregationBuilder("max").field("long"))
+                        );
+                }, (result) -> {
+                    assertEquals(0, result.getBuckets().size());
+                }
+            );
+        }
+
+        final List<Map<String, List<Object>>> dataset = new ArrayList<>();
+        dataset.addAll(
+            Arrays.asList(
+                createDocument("keyword", "a", "terms", "a", "long", 50L),
+                createDocument("keyword", "c", "terms", "d", "long", 78L),
+                createDocument("keyword", "a", "terms", "w", "long", 78L),
+                createDocument("keyword", "d", "terms", "y", "long", 76L),
+                createDocument("keyword", "c", "terms", "y", "long", 70L)
+            )
+        );
+        final Sort sort = new Sort(new SortedSetSortField("keyword", false));
+        for (Aggregator.SubAggCollectionMode mode : Aggregator.SubAggCollectionMode.values()) {
+            testSearchCase(new MatchAllDocsQuery(), sort, dataset,
+                () -> {
+                    TermsValuesSourceBuilder terms = new TermsValuesSourceBuilder("keyword")
+                        .field("keyword");
+                    return new CompositeAggregationBuilder("name", Collections.singletonList(terms))
+                        .subAggregation(
+                            new TermsAggregationBuilder("terms", ValueType.STRING)
+                                .field("terms")
+                                .collectMode(mode)
+                                .subAggregation(new MaxAggregationBuilder("max").field("long"))
+                        );
+                }, (result) -> {
+                    assertEquals(3, result.getBuckets().size());
+
+                    assertEquals("{keyword=a}", result.getBuckets().get(0).getKeyAsString());
+                    assertEquals(2L, result.getBuckets().get(0).getDocCount());
+                    StringTerms subTerms = result.getBuckets().get(0).getAggregations().get("terms");
+                    assertEquals(2, subTerms.getBuckets().size());
+                    assertEquals("a", subTerms.getBuckets().get(0).getKeyAsString());
+                    assertEquals("w", subTerms.getBuckets().get(1).getKeyAsString());
+                    InternalMax max = subTerms.getBuckets().get(0).getAggregations().get("max");
+                    assertEquals(50L, (long) max.getValue());
+                    max = subTerms.getBuckets().get(1).getAggregations().get("max");
+                    assertEquals(78L, (long) max.getValue());
+
+                    assertEquals("{keyword=c}", result.getBuckets().get(1).getKeyAsString());
+                    assertEquals(2L, result.getBuckets().get(1).getDocCount());
+                    subTerms = result.getBuckets().get(1).getAggregations().get("terms");
+                    assertEquals(2, subTerms.getBuckets().size());
+                    assertEquals("d", subTerms.getBuckets().get(0).getKeyAsString());
+                    assertEquals("y", subTerms.getBuckets().get(1).getKeyAsString());
+                    max = subTerms.getBuckets().get(0).getAggregations().get("max");
+                    assertEquals(78L, (long) max.getValue());
+                    max = subTerms.getBuckets().get(1).getAggregations().get("max");
+                    assertEquals(70L, (long) max.getValue());
+
+                    assertEquals("{keyword=d}", result.getBuckets().get(2).getKeyAsString());
+                    assertEquals(1L, result.getBuckets().get(2).getDocCount());
+                    subTerms = result.getBuckets().get(2).getAggregations().get("terms");
+                    assertEquals(1, subTerms.getBuckets().size());
+                    assertEquals("y", subTerms.getBuckets().get(0).getKeyAsString());
+                    max = subTerms.getBuckets().get(0).getAggregations().get("max");
+                    assertEquals(76L, (long) max.getValue());
+                }
+            );
+        }
     }
 
     private void testSearchCase(Query query, Sort sort,
