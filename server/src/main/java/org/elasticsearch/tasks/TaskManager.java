@@ -420,6 +420,7 @@ public class TaskManager implements ClusterStateApplier {
                 }
             }
             if (cancelled) {
+                System.out.println("Cancel " + task);
                 task.cancel(reason);
             }
             return cancelled;

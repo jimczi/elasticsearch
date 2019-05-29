@@ -21,6 +21,7 @@ package org.elasticsearch.action.search;
 
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.OriginalIndices;
+import org.elasticsearch.action.admin.cluster.node.tasks.cancel.CancelTasksResponse;
 import org.elasticsearch.action.admin.cluster.shards.ClusterSearchShardsGroup;
 import org.elasticsearch.action.admin.cluster.shards.ClusterSearchShardsRequest;
 import org.elasticsearch.action.admin.cluster.shards.ClusterSearchShardsResponse;
@@ -28,6 +29,7 @@ import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.HandledTransportAction;
 import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.client.Client;
+import org.elasticsearch.client.node.NodeClient;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.block.ClusterBlockLevel;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
@@ -42,6 +44,7 @@ import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
 import org.elasticsearch.common.util.concurrent.CountDown;
+import org.elasticsearch.http.HttpChannel;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.query.Rewriteable;
 import org.elasticsearch.index.shard.ShardId;
@@ -56,6 +59,7 @@ import org.elasticsearch.search.internal.SearchContext;
 import org.elasticsearch.search.profile.ProfileShardResult;
 import org.elasticsearch.search.profile.SearchProfileShardResults;
 import org.elasticsearch.tasks.Task;
+import org.elasticsearch.tasks.TaskId;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.RemoteClusterAware;
 import org.elasticsearch.transport.RemoteClusterService;
@@ -63,13 +67,7 @@ import org.elasticsearch.transport.RemoteTransportException;
 import org.elasticsearch.transport.Transport;
 import org.elasticsearch.transport.TransportService;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -85,9 +83,11 @@ import static org.elasticsearch.action.search.SearchType.QUERY_THEN_FETCH;
 
 public class TransportSearchAction extends HandledTransportAction<SearchRequest, SearchResponse> {
 
-    /** The maximum number of shards for a single search request. */
+    /**
+     * The maximum number of shards for a single search request.
+     */
     public static final Setting<Long> SHARD_COUNT_LIMIT_SETTING = Setting.longSetting(
-            "action.search.shard_count.limit", Long.MAX_VALUE, 1L, Property.Dynamic, Property.NodeScope);
+        "action.search.shard_count.limit", Long.MAX_VALUE, 1L, Property.Dynamic, Property.NodeScope);
 
     private final ThreadPool threadPool;
     private final ClusterService clusterService;
@@ -97,11 +97,15 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
     private final SearchService searchService;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
 
+    private final Map<HttpChannel, Long> channels = new IdentityHashMap<>();
+
+    private final NodeClient nodeClient;
+
     @Inject
     public TransportSearchAction(ThreadPool threadPool, TransportService transportService, SearchService searchService,
                                  SearchTransportService searchTransportService, SearchPhaseController searchPhaseController,
                                  ClusterService clusterService, ActionFilters actionFilters,
-                                 IndexNameExpressionResolver indexNameExpressionResolver) {
+                                 IndexNameExpressionResolver indexNameExpressionResolver, NodeClient nodeClient) {
         super(SearchAction.NAME, transportService, actionFilters, (Writeable.Reader<SearchRequest>) SearchRequest::new);
         this.threadPool = threadPool;
         this.searchPhaseController = searchPhaseController;
@@ -111,6 +115,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         this.clusterService = clusterService;
         this.searchService = searchService;
         this.indexNameExpressionResolver = indexNameExpressionResolver;
+        this.nodeClient = nodeClient;
     }
 
     private Map<String, AliasFilter> buildPerIndexAliasFilter(SearchRequest request, ClusterState clusterState,
@@ -170,14 +175,14 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
          * operation took can be measured against the provided relative clock and the relative start
          * time.
          *
-         * @param absoluteStartMillis the absolute start time in milliseconds since the epoch
-         * @param relativeStartNanos the relative start time in nanoseconds
+         * @param absoluteStartMillis          the absolute start time in milliseconds since the epoch
+         * @param relativeStartNanos           the relative start time in nanoseconds
          * @param relativeCurrentNanosProvider provides the current relative time
          */
         SearchTimeProvider(
-                final long absoluteStartMillis,
-                final long relativeStartNanos,
-                final LongSupplier relativeCurrentNanosProvider) {
+            final long absoluteStartMillis,
+            final long relativeStartNanos,
+            final LongSupplier relativeCurrentNanosProvider) {
             this.absoluteStartMillis = absoluteStartMillis;
             this.relativeStartNanos = relativeStartNanos;
             this.relativeCurrentNanosProvider = relativeCurrentNanosProvider;
@@ -192,8 +197,89 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         }
     }
 
+    private boolean registerCloseListener(HttpChannel httpChannel, Task task) {
+        synchronized (channels) {
+            if (channels.containsKey(httpChannel) == false) {
+                channels.put(httpChannel, task.getId());
+                httpChannel.addCloseListener(new ActionListener<>() {
+                    @Override
+                    public void onResponse(Void aVoid) {
+                        onChannelClose(httpChannel);
+                    }
+
+                    @Override
+                    public void onFailure(Exception e) { onChannelClose(httpChannel); }
+                });
+            } else {
+                assert channels.get(httpChannel) == null;
+                channels.put(httpChannel, task.getId());
+                if (httpChannel.isOpen() == false) {
+                    onChannelClose(httpChannel);
+                }
+            }
+        }
+        return httpChannel.isOpen();
+    }
+
+    private void onChannelSuccess(HttpChannel httpChannel) {
+        synchronized (channels) {
+            channels.put(httpChannel, null);
+        }
+    }
+
+    private void onChannelClose(HttpChannel httpChannel) {
+        final Long taskId;
+        synchronized (channels) {
+            taskId = channels.remove(httpChannel);
+        }
+        if (taskId != null) {
+            // Cancel task (best effort)
+            System.out.println("Should cancel channel " + (new TaskId(nodeClient.getLocalNodeId(), taskId)));
+            nodeClient.admin().cluster().prepareCancelTasks().setTaskId(new TaskId(nodeClient.getLocalNodeId(), taskId))
+                .execute(
+                new ActionListener<>() {
+                    @Override
+                    public void onResponse(CancelTasksResponse cancelTasksResponse) {}
+
+                    @Override
+                    public void onFailure(Exception e) {}
+                }
+            );
+        }
+    }
+
     @Override
     protected void doExecute(Task task, SearchRequest searchRequest, ActionListener<SearchResponse> listener) {
+        final ActionListener<SearchResponse> newListener;
+        if (searchRequest.getHttpChannel() != null) {
+            final HttpChannel channel = searchRequest.getHttpChannel();
+            if (registerCloseListener(channel, task) == false) {
+                listener.onFailure(new RuntimeException("channel already closed"));
+                return;
+            }
+            newListener = new ActionListener<>() {
+                @Override
+                public void onResponse(SearchResponse searchResponse) {
+                    try {
+                        onChannelSuccess(channel);
+                    } finally {
+                        listener.onResponse(searchResponse);
+                    }
+                }
+
+                @Override
+                public void onFailure(Exception e) {
+                    try {
+                        onChannelSuccess(channel);
+                    } finally {
+                        listener.onFailure(e);
+                    }
+
+                }
+            };
+        } else {
+            newListener = listener;
+        }
         final long relativeStartNanos = System.nanoTime();
         final SearchTimeProvider timeProvider =
             new SearchTimeProvider(searchRequest.getOrCreateAbsoluteStartMillis(), relativeStartNanos, System::nanoTime);
@@ -208,11 +294,11 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
                 searchRequest.indices());
             OriginalIndices localIndices = remoteClusterIndices.remove(RemoteClusterAware.LOCAL_CLUSTER_GROUP_KEY);
             if (remoteClusterIndices.isEmpty()) {
-                executeLocalSearch(task, timeProvider, searchRequest, localIndices, clusterState, listener);
+                executeLocalSearch(task, timeProvider, searchRequest, localIndices, clusterState, newListener);
             } else {
                 if (shouldMinimizeRoundtrips(searchRequest)) {
                     ccsRemoteReduce(searchRequest, localIndices, remoteClusterIndices, timeProvider, searchService::createReduceContext,
-                        remoteClusterService, threadPool, listener,
+                        remoteClusterService, threadPool, newListener,
                         (r, l) -> executeLocalSearch(task, timeProvider, r, localIndices, clusterState, l));
                 } else {
                     AtomicInteger skippedClusters = new AtomicInteger(0);
@@ -228,13 +314,13 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
                                 int totalClusters = remoteClusterIndices.size() + localClusters;
                                 int successfulClusters = searchShardsResponses.size() + localClusters;
                                 executeSearch((SearchTask) task, timeProvider, searchRequest, localIndices,
-                                    remoteShardIterators, clusterNodeLookup, clusterState, remoteAliasFilters, listener,
+                                    remoteShardIterators, clusterNodeLookup, clusterState, remoteAliasFilters, newListener,
                                     new SearchResponse.Clusters(totalClusters, successfulClusters, skippedClusters.get()));
                             },
-                            listener::onFailure));
+                            newListener::onFailure));
                 }
             }
-        }, listener::onFailure);
+        }, newListener::onFailure);
         if (searchRequest.source() == null) {
             rewriteListener.onResponse(searchRequest.source());
         } else {

@@ -98,7 +98,7 @@ public class RestSearchAction extends BaseRestHandler {
         IntConsumer setSize = size -> searchRequest.source().size(size);
         request.withContentOrSourceParamParserOrNull(parser ->
             parseSearchRequest(searchRequest, request, parser, setSize));
-
+        searchRequest.setHttpChannel(request.getHttpChannel());
         return channel -> client.search(searchRequest, new RestStatusToXContentListener<>(channel));
     }
 
