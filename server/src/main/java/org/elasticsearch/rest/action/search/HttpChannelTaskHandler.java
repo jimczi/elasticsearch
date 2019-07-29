@@ -25,6 +25,7 @@ import org.elasticsearch.action.ActionResponse;
 import org.elasticsearch.action.ActionType;
 import org.elasticsearch.action.admin.cluster.node.tasks.cancel.CancelTasksRequest;
 import org.elasticsearch.client.node.NodeClient;
+import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.http.HttpChannel;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.tasks.TaskId;
@@ -32,7 +33,6 @@ import org.elasticsearch.tasks.TaskId;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 /**
@@ -42,7 +42,7 @@ import java.util.function.Consumer;
  * can be used to cancel the associated task when the underlying connection gets closed.
  */
 final class HttpChannelTaskHandler {
-    final Map<HttpChannel, CloseListener> httpChannels = new ConcurrentHashMap<>();
+    final Map<HttpChannel, CloseListener> httpChannels = ConcurrentCollections.newConcurrentMap();
 
     <Response extends ActionResponse> void execute(NodeClient client, HttpChannel httpChannel, ActionRequest request,
                                                    ActionType<Response> actionType, ActionListener<Response> listener) {
