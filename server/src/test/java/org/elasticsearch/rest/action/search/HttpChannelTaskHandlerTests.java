@@ -86,7 +86,6 @@ public class HttpChannelTaskHandlerTests extends ESTestCase {
             assertEquals(numChannels, httpChannelTaskHandler.httpChannels.size());
             for (Map.Entry<HttpChannel, HttpChannelTaskHandler.CloseListener> entry : httpChannelTaskHandler.httpChannels.entrySet()) {
                 assertEquals(0, entry.getValue().taskIds.size());
-                assertEquals(0, entry.getValue().unregistered.size());
             }
         }
     }

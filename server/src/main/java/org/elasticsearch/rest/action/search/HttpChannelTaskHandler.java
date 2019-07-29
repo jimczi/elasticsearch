@@ -81,7 +81,6 @@ final class HttpChannelTaskHandler {
         final HttpChannel channel;
         final Consumer<HttpChannel> onClose;
         final Set<TaskId> taskIds = new HashSet<>();
-        final Set<TaskId> unregistered = new HashSet<>();
 
         CloseListener(NodeClient client, HttpChannel channel, Consumer<HttpChannel> onClose) {
             this.client = client;
