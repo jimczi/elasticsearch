@@ -51,13 +51,20 @@ final class HttpChannelTaskHandler {
         Task task = client.executeLocally(actionType, request, new ActionListener<>() {
             @Override
             public void onResponse(Response response) {
-                reg.unregister();
-                listener.onResponse(response);
+                try {
+                    reg.unregister();
+                } finally {
+                    listener.onResponse(response);
+                }
             }
 
             @Override
             public void onFailure(Exception e) {
-                reg.unregister();
+                try {
+                    reg.unregister();
+                } finally {
+                    listener.onFailure(e);
+                }
             }
          });
         TaskId taskId = new TaskId(client.getLocalNodeId(), task.getId());

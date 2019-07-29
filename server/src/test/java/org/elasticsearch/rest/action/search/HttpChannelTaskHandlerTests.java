@@ -32,7 +32,6 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.http.HttpChannel;
 import org.elasticsearch.http.HttpResponse;
 import org.elasticsearch.tasks.Task;
-import org.elasticsearch.tasks.TaskListener;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.threadpool.TestThreadPool;
 import org.elasticsearch.threadpool.ThreadPool;
@@ -106,12 +105,12 @@ public class HttpChannelTaskHandlerTests extends ESTestCase {
         @Override
         public <Request extends ActionRequest, Response extends ActionResponse> Task executeLocally(ActionType<Response> action,
                                                                                                     Request request,
-                                                                                                    TaskListener<Response> listener) {
+                                                                                                    ActionListener<Response> listener) {
             Task task = request.createTask(counter.getAndIncrement(), "type", action.name(), null, Collections.emptyMap());
             if (rarely()) {
-                listener.onResponse(task, null);
+                listener.onResponse(null);
             } else {
-                threadPool().generic().submit(() -> listener.onResponse(task, null));
+                threadPool().generic().submit(() -> listener.onResponse(null));
             }
             return task;
         }
