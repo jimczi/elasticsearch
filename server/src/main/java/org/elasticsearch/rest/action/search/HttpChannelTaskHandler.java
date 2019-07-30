@@ -46,7 +46,7 @@ final class HttpChannelTaskHandler {
 
     <Response extends ActionResponse> void execute(NodeClient client, HttpChannel httpChannel, ActionRequest request,
                                                    ActionType<Response> actionType, ActionListener<Response> listener) {
-        CloseListener closeListener = httpChannels.computeIfAbsent(httpChannel, k -> new CloseListener(client, httpChannel, httpChannels::remove));
+        CloseListener closeListener = httpChannels.computeIfAbsent(httpChannel, k -> new CloseListener(client, httpChannels::remove));
         TaskRegistry reg = closeListener.taskRegistry();
         Task task = client.executeLocally(actionType, request, new ActionListener<>() {
             @Override
@@ -68,7 +68,7 @@ final class HttpChannelTaskHandler {
             }
          });
         TaskId taskId = new TaskId(client.getLocalNodeId(), task.getId());
-        reg.register(taskId);
+        reg.maybeRegister(httpChannel, taskId);
 
         //TODO test case where listener is registered, but no tasks have been added yet:
         // - connection gets closed, channel will be removed, no tasks will be cancelled
@@ -78,15 +78,13 @@ final class HttpChannelTaskHandler {
 
     static class CloseListener implements ActionListener<Void> {
         final NodeClient client;
-        final HttpChannel channel;
+        HttpChannel channel;
         final Consumer<HttpChannel> onClose;
         final Set<TaskId> taskIds = new HashSet<>();
 
-        CloseListener(NodeClient client, HttpChannel channel, Consumer<HttpChannel> onClose) {
+        CloseListener(NodeClient client, Consumer<HttpChannel> onClose) {
             this.client = client;
-            this.channel = channel;
             this.onClose = onClose;
-            channel.addCloseListener(this);
         }
 
         TaskRegistry taskRegistry() {
@@ -95,8 +93,12 @@ final class HttpChannelTaskHandler {
                 boolean unregistered;
 
                 @Override
-                public void register(TaskId taskId) {
+                public void maybeRegister(HttpChannel httpChannel, TaskId taskId) {
                     synchronized (CloseListener.this) {
+                        if (channel == null) {
+                            channel = httpChannel;
+                            channel.addCloseListener(CloseListener.this);
+                        }
                         if (unregistered == false) {
                             this.taskId = taskId;
                             taskIds.add(taskId);
@@ -136,7 +138,7 @@ final class HttpChannelTaskHandler {
     }
 
     private interface TaskRegistry {
-        void register(TaskId taskId);
+        void maybeRegister(HttpChannel httpChannel, TaskId taskId);
         void unregister();
     }
 }
