@@ -8,6 +8,7 @@
 package org.elasticsearch.xpack.vectors.mapper;
 
 import org.apache.lucene.document.BinaryDocValuesField;
+import org.apache.lucene.document.FloatPoint;
 import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.search.DocValuesFieldExistsQuery;
@@ -188,14 +189,15 @@ public class DenseVectorFieldMapper extends FieldMapper implements ArrayValueMap
         double dotProduct = 0f;
 
         int dim = 0;
+        float[] floats = new float[dims];
         for (Token token = context.parser().nextToken(); token != Token.END_ARRAY; token = context.parser().nextToken()) {
-            if (dim++ >= dims) {
+            if (dim >= dims) {
                 throw new IllegalArgumentException("Field [" + name() + "] of type [" + typeName() + "] of doc [" +
                     context.sourceToParse().id() + "] has exceeded the number of dimensions [" + dims + "] defined in mapping");
             }
             ensureExpectedToken(Token.VALUE_NUMBER, token, context.parser()::getTokenLocation);
             float value = context.parser().floatValue(true);
-
+            floats[dim++] = value;
             byteBuffer.putFloat(value);
             dotProduct += value * value;
         }
@@ -215,6 +217,7 @@ public class DenseVectorFieldMapper extends FieldMapper implements ArrayValueMap
             throw new IllegalArgumentException("Field [" + name() + "] of type [" + typeName() +
                 "] doesn't not support indexing multiple values for the same field in the same document");
         }
+        context.doc().add(new FloatPoint(fieldType.name(), floats));
         context.doc().addWithKey(fieldType().name(), field);
     }
 
