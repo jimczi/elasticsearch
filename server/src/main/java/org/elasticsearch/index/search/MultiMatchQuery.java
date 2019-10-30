@@ -22,12 +22,14 @@ package org.elasticsearch.index.search;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.index.Term;
-import org.apache.lucene.queries.BlendedTermQuery;
+import org.apache.lucene.search.BM25FQuery;
 import org.apache.lucene.search.BoostQuery;
 import org.apache.lucene.search.DisjunctionMaxQuery;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TermQuery;
+import org.apache.lucene.search.similarities.BM25Similarity;
+import org.apache.lucene.search.similarities.Similarity;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.index.mapper.MappedFieldType;
@@ -279,7 +281,7 @@ public class MultiMatchQuery extends MatchQuery {
         if (i > 0) {
             terms = Arrays.copyOf(terms, i);
             blendedBoost = Arrays.copyOf(blendedBoost, i);
-            queries.add(BlendedTermQuery.dismaxBlendedQuery(terms, blendedBoost, tieBreaker));
+            queries.add(buildBM25F(context, terms, blendedBoost));
         }
         if (queries.size() == 1) {
             return queries.get(0);
@@ -289,6 +291,31 @@ public class MultiMatchQuery extends MatchQuery {
             // TODO: can we improve this?
             return new DisjunctionMaxQuery(queries, tieBreaker);
         }
+    }
+
+    private static Query buildBM25F(QueryShardContext context, Term[] terms, float[] blendedBoost) {
+        float k1 = 1.2f;
+        float b = 0.75f;
+        for (Term term : terms) {
+            MappedFieldType ft = context.fieldMapper(term.field());
+            if (ft == null) {
+                continue;
+            }
+            Similarity sim = ft.similarity() != null ? ft.similarity().get() : context.getSearchSimilarity();
+            if (sim instanceof BM25Similarity) {
+                b = ((BM25Similarity) sim).getB();
+                k1 = ((BM25Similarity) sim).getK1();
+                break;
+            }
+        }
+        BM25FQuery.Builder builder = new BM25FQuery.Builder(k1, b);
+        for (int i = 0; i < terms.length; i++) {
+            builder.addField(terms[i].field(), blendedBoost[i] < 1 ? 1f : blendedBoost[i]);
+        }
+        for (int i = 0; i < terms.length; i++) {
+            builder.addTerm(terms[i].bytes());
+        }
+        return builder.build();
     }
 
     static final class FieldAndBoost {

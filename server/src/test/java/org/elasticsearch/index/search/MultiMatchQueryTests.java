@@ -21,7 +21,7 @@ package org.elasticsearch.index.search;
 
 import org.apache.lucene.analysis.MockSynonymAnalyzer;
 import org.apache.lucene.index.Term;
-import org.apache.lucene.queries.BlendedTermQuery;
+import org.apache.lucene.search.BM25FQuery;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.BoostQuery;
@@ -34,7 +34,6 @@ import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.compress.CompressedXContent;
-import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.index.IndexService;
@@ -58,6 +57,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.elasticsearch.common.lucene.search.Queries.newMatchNoDocsQuery;
 import static org.elasticsearch.index.query.QueryBuilders.multiMatchQuery;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -111,9 +111,11 @@ public class MultiMatchQueryTests extends ESSingleNodeTestCase {
                 .toQuery(queryShardContext);
             try (Engine.Searcher searcher = indexService.getShard(0).acquireSearcher("test")) {
                 Query rewrittenQuery = searcher.rewrite(parsedQuery);
-                Query tq1 = new BoostQuery(new TermQuery(new Term("name.last", "banon")), 3);
-                Query tq2 = new BoostQuery(new TermQuery(new Term("name.first", "banon")), 2);
-                Query expected = new DisjunctionMaxQuery(Arrays.asList(tq2, tq1), tieBreaker);
+                Query expected = new BM25FQuery.Builder()
+                    .addField("name.first", 2)
+                    .addField("name.last", 3)
+                    .addTerm(new BytesRef("banon"))
+                    .build();
                 assertEquals(expected, rewrittenQuery);
             }
         }
@@ -124,9 +126,11 @@ public class MultiMatchQueryTests extends ESSingleNodeTestCase {
         ft1.setName("foo");
         FakeFieldType ft2 = new FakeFieldType();
         ft2.setName("bar");
-        Term[] terms = new Term[] { new Term("foo", "baz"), new Term("bar", "baz") };
-        float[] boosts = new float[] {2, 3};
-        Query expected = BlendedTermQuery.dismaxBlendedQuery(terms, boosts, 1.0f);
+        Query expected = new BM25FQuery.Builder()
+            .addField("foo", 2)
+            .addField("bar", 3)
+            .addTerm(new BytesRef("baz"))
+            .build();
         Query actual = MultiMatchQuery.blendTerm(
                 indexService.newQueryShardContext(randomInt(20), null, () -> { throw new UnsupportedOperationException(); }, null),
                 new BytesRef("baz"), 1f, false, Arrays.asList(new FieldAndBoost(ft1, 2), new FieldAndBoost(ft2, 3)));
@@ -140,9 +144,11 @@ public class MultiMatchQueryTests extends ESSingleNodeTestCase {
         FakeFieldType ft2 = new FakeFieldType();
         ft2.setName("bar");
         ft2.setBoost(10);
-        Term[] terms = new Term[] { new Term("foo", "baz"), new Term("bar", "baz") };
-        float[] boosts = new float[] {200, 30};
-        Query expected = BlendedTermQuery.dismaxBlendedQuery(terms, boosts, 1.0f);
+        Query expected = new BM25FQuery.Builder()
+            .addField("foo", 200)
+            .addField("bar", 30)
+            .addTerm(new BytesRef("baz"))
+            .build();
         Query actual = MultiMatchQuery.blendTerm(
                 indexService.newQueryShardContext(randomInt(20), null, () -> { throw new UnsupportedOperationException(); }, null),
                 new BytesRef("baz"), 1f, false, Arrays.asList(new FieldAndBoost(ft1, 2), new FieldAndBoost(ft2, 3)));
@@ -159,12 +165,11 @@ public class MultiMatchQueryTests extends ESSingleNodeTestCase {
             }
         };
         ft2.setName("bar");
-        Term[] terms = new Term[] { new Term("foo", "baz") };
-        float[] boosts = new float[] {2};
-        Query expected = new DisjunctionMaxQuery(Arrays.asList(
-            Queries.newMatchNoDocsQuery("failed [" + ft2.name() + "] query, caused by illegal_argument_exception:[null]"),
-            BlendedTermQuery.dismaxBlendedQuery(terms, boosts, 1.0f)
-        ), 1f);
+        Query bm25f = new BM25FQuery.Builder()
+            .addField("foo", 2)
+            .addTerm(new BytesRef("baz"))
+            .build();
+        Query expected = new DisjunctionMaxQuery(Arrays.asList(newMatchNoDocsQuery(""), bm25f), 1f);
         Query actual = MultiMatchQuery.blendTerm(
                 indexService.newQueryShardContext(randomInt(20), null, () -> { throw new UnsupportedOperationException(); }, null),
                 new BytesRef("baz"), 1f, true, Arrays.asList(new FieldAndBoost(ft1, 2), new FieldAndBoost(ft2, 3)));
@@ -194,9 +199,10 @@ public class MultiMatchQueryTests extends ESSingleNodeTestCase {
             }
         };
         ft2.setName("bar");
-        Term[] terms = new Term[] { new Term("foo", "baz") };
-        float[] boosts = new float[] {2};
-        Query expectedDisjunct1 = BlendedTermQuery.dismaxBlendedQuery(terms, boosts, 1.0f);
+        Query expectedDisjunct1 = new BM25FQuery.Builder()
+            .addField("foo", 2)
+            .addTerm(new BytesRef("baz"))
+            .build();
         Query expectedDisjunct2 = new BoostQuery(new MatchAllDocsQuery(), 3);
         Query expected = new DisjunctionMaxQuery(
             Arrays.asList(
@@ -229,14 +235,12 @@ public class MultiMatchQueryTests extends ESSingleNodeTestCase {
         // check that blended term query is used for multiple fields
         fieldNames.put("name.last", 1.0f);
         parsedQuery = parser.parse(MultiMatchQueryBuilder.Type.CROSS_FIELDS, fieldNames, "dogs", null);
-        terms = new Term[4];
-        terms[0] = new Term("name.first", "dog");
-        terms[1] = new Term("name.first", "dogs");
-        terms[2] = new Term("name.last", "dog");
-        terms[3] = new Term("name.last", "dogs");
-        float[] boosts = new float[4];
-        Arrays.fill(boosts, 1.0f);
-        expectedQuery = BlendedTermQuery.dismaxBlendedQuery(terms, boosts, 1.0f);
+        expectedQuery = new BM25FQuery.Builder()
+            .addField("name.first")
+            .addField("name.last")
+            .addTerm(new BytesRef("dog"))
+            .addTerm(new BytesRef("dogs"))
+            .build();
         assertThat(parsedQuery, equalTo(expectedQuery));
 
     }
@@ -251,11 +255,11 @@ public class MultiMatchQueryTests extends ESSingleNodeTestCase {
         fieldNames.put("name.last", 1.0f);
         Query query = parser.parse(MultiMatchQueryBuilder.Type.CROSS_FIELDS, fieldNames, "guinea pig", null);
 
-        Term[] terms = new Term[2];
-        terms[0] = new Term("name.first", "cavy");
-        terms[1] = new Term("name.last", "cavy");
-        float[] boosts = new float[2];
-        Arrays.fill(boosts, 1.0f);
+        Query bm25f = new BM25FQuery.Builder()
+            .addField("name.first")
+            .addField("name.last")
+            .addTerm(new BytesRef("cavy"))
+            .build();
 
         List<Query> phraseDisjuncts = new ArrayList<>();
         phraseDisjuncts.add(
@@ -274,7 +278,7 @@ public class MultiMatchQueryTests extends ESSingleNodeTestCase {
             .add(
                 new BooleanQuery.Builder()
                     .add(new DisjunctionMaxQuery(phraseDisjuncts, 0.0f), BooleanClause.Occur.SHOULD)
-                    .add(BlendedTermQuery.dismaxBlendedQuery(terms, boosts, 1.0f), BooleanClause.Occur.SHOULD)
+                    .add(bm25f, BooleanClause.Occur.SHOULD)
                     .build(),
                 BooleanClause.Occur.SHOULD
             )

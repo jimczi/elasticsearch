@@ -21,8 +21,8 @@ package org.elasticsearch.index.query;
 
 import org.apache.lucene.analysis.MockSynonymAnalyzer;
 import org.apache.lucene.index.Term;
-import org.apache.lucene.queries.BlendedTermQuery;
 import org.apache.lucene.search.AutomatonQuery;
+import org.apache.lucene.search.BM25FQuery;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanClause.Occur;
 import org.apache.lucene.search.BooleanQuery;
@@ -1432,15 +1432,19 @@ public class QueryStringQueryBuilderTests extends AbstractQueryTestCase<QueryStr
                 .analyzer("whitespace")
                 .type(MultiMatchQueryBuilder.Type.CROSS_FIELDS)
                 .toQuery(createShardContext());
-            Query expected = BlendedTermQuery.dismaxBlendedQuery(blendedTerms, 1.0f);
-            assertEquals(expected, query);
+            Query expectedSingleTerm = new BM25FQuery.Builder()
+                .addField(STRING_FIELD_NAME)
+                .addField(STRING_FIELD_NAME_2)
+                .addTerm(new BytesRef("foo"))
+                .build();
+            assertEquals(expectedSingleTerm, query);
 
             query = new QueryStringQueryBuilder("foo mapped_string:10")
                 .analyzer("whitespace")
                 .type(MultiMatchQueryBuilder.Type.CROSS_FIELDS)
                 .toQuery(createShardContext());
-            expected = new BooleanQuery.Builder()
-                .add(BlendedTermQuery.dismaxBlendedQuery(blendedTerms, 1.0f), Occur.SHOULD)
+            Query expected = new BooleanQuery.Builder()
+                .add(expectedSingleTerm, Occur.SHOULD)
                 .add(new TermQuery(new Term(STRING_FIELD_NAME, "10")), Occur.SHOULD)
                 .build();
             assertEquals(expected, query);
