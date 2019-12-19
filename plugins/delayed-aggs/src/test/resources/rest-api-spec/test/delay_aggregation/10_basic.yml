@@ -1,0 +1,22 @@
+# Integration tests for DelayAggregation components
+#
+
+---
+"Delayed Aggs":
+
+    - do:
+        indices.create:
+            index: test
+
+    - do:
+        search:
+            index: test
+            body:
+              aggs:
+                1:
+                  delay:
+                    index: "tes*"
+                    value: "10s"
+
+
+    - match: { hits.total.value: 0 }
