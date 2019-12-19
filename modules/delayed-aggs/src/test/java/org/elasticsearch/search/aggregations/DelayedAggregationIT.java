@@ -20,7 +20,6 @@ package org.elasticsearch.search.aggregations;
 
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.common.unit.TimeValue;
-import org.elasticsearch.plugin.aggs.DelayedAggregationPlugin;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.test.ESIntegTestCase;
 

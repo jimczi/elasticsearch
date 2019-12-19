@@ -18,6 +18,6 @@
  */
 
 esplugin {
-  description ''
-  classname 'org.elasticsearch.plugin.aggs.DelayedAgggregationPlugin'
+  description 'Delayed Aggregation'
+  classname 'org.elasticsearch.search.aggregations.DelayedAggregationPlugin'
 }

@@ -17,11 +17,10 @@
  * under the License.
  */
 
-package org.elasticsearch.plugin.aggs;
+package org.elasticsearch.search.aggregations;
 
 import java.util.List;
 
-import org.elasticsearch.search.aggregations.DelayedAggregationBuilder;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.plugins.SearchPlugin;
 import org.elasticsearch.search.aggregations.bucket.filter.InternalFilter;
@@ -29,6 +28,8 @@ import org.elasticsearch.search.aggregations.bucket.filter.InternalFilter;
 import static java.util.Collections.singletonList;
 
 public class DelayedAggregationPlugin extends Plugin implements SearchPlugin {
+    public DelayedAggregationPlugin() {}
+
     @Override
     public List<AggregationSpec> getAggregations() {
         return singletonList(new AggregationSpec(DelayedAggregationBuilder.NAME, DelayedAggregationBuilder::new,
