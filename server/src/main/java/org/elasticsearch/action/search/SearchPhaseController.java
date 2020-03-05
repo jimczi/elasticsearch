@@ -587,7 +587,7 @@ public final class SearchPhaseController {
      * This implementation can be configured to batch up a certain amount of results and only reduce them
      * iff the buffer is exhausted.
      */
-    static final class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhaseResult> {
+    public static final class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhaseResult> {
         private final SearchShardTarget[] processedShards;
         private final InternalAggregations[] aggsBuffer;
         private final TopDocs[] topDocsBuffer;
@@ -611,9 +611,9 @@ public final class SearchPhaseController {
          * @param bufferSize the size of the reduce buffer. if the buffer size is smaller than the number of expected results
          *                   the buffer is used to incrementally reduce aggregation results before all shards responded.
          */
-        private QueryPhaseResultConsumer(SearchProgressListener progressListener, SearchPhaseController controller,
-                                         int expectedResultSize, int bufferSize, boolean hasTopDocs, boolean hasAggs,
-                                         int trackTotalHitsUpTo, int topNSize, boolean performFinalReduce) {
+        public QueryPhaseResultConsumer(SearchProgressListener progressListener, SearchPhaseController controller,
+                                        int expectedResultSize, int bufferSize, boolean hasTopDocs, boolean hasAggs,
+                                        int trackTotalHitsUpTo, int topNSize, boolean performFinalReduce) {
             super(expectedResultSize);
             if (expectedResultSize != 1 && bufferSize < 2) {
                 throw new IllegalArgumentException("buffer size must be >= 2 if there is more than one expected result");
