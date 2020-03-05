@@ -18,20 +18,18 @@
  */
 package org.elasticsearch.benchmark.search;
 
-import org.apache.lucene.search.FieldDoc;
-import org.apache.lucene.search.SortField;
-import org.apache.lucene.search.TopDocs;
-import org.apache.lucene.search.TopFieldDocs;
-import org.apache.lucene.search.TotalHits;
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.OriginalIndices;
 import org.elasticsearch.action.search.SearchPhaseController;
 import org.elasticsearch.action.search.SearchProgressListener;
-import org.elasticsearch.common.lucene.search.TopDocsAndMaxScore;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.SearchShardTarget;
+import org.elasticsearch.search.aggregations.BucketOrder;
 import org.elasticsearch.search.aggregations.InternalAggregation;
+import org.elasticsearch.search.aggregations.InternalAggregations;
+import org.elasticsearch.search.aggregations.bucket.terms.StringTerms;
 import org.elasticsearch.search.query.QuerySearchResult;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -47,7 +45,7 @@ import org.openjdk.jmh.annotations.Warmup;
 
 import java.util.AbstractList;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Random;
@@ -59,49 +57,56 @@ import java.util.concurrent.TimeUnit;
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 @State(Scope.Thread)
 @Fork(value = 1)
-public class TopDocsReduceBenchmark {
+public class TermsReduceBenchmark {
     private final SearchPhaseController controller = new SearchPhaseController(finalReduce ->
         new InternalAggregation.ReduceContext(null, null, finalReduce));
 
     @State(Scope.Benchmark)
-    public static class TopDocsList extends AbstractList<TopDocs> {
-        @Param({"100000"})
+    public static class TermsList extends AbstractList<InternalAggregations> {
+        @Param({"1000"})
         int numShards;
 
-        @Param({"10", "1000"})
+        @Param({"1000"})
         int topNSize;
 
-        List<TopDocs> topDocsList;
+        @Param({"100000"})
+        int cardinality;
+
+        List<InternalAggregations> aggsList;
 
         @Setup
         public void setup() {
-            this.topDocsList = new ArrayList<>();
+            this.aggsList = new ArrayList<>();
+            Random rand = new Random();
+            BytesRef[] dict = new BytesRef[cardinality];
+            for (int i = 0; i < dict.length; i++) {
+                dict[i] = new BytesRef(Long.toString(rand.nextLong()));
+            }
             for (int i = 0; i < numShards; i++) {
-                topDocsList.add(newTopDocs());
+                aggsList.add(new InternalAggregations(Collections.singletonList(newTerms(rand, dict))));
             }
         }
 
-        private TopDocs newTopDocs() {
-            Random rand = new Random();
-            FieldDoc[] fieldDocs = new FieldDoc[topNSize];
-            for (int i = 0; i < fieldDocs.length; i++) {
-                fieldDocs[i] = new FieldDoc(i, Float.NaN, new Object[] { rand.nextLong() });
+        private StringTerms newTerms(Random rand, BytesRef[] dict) {
+            List<StringTerms.Bucket> buckets = new ArrayList<>();
+            for (int i = 0; i < topNSize; i++) {
+                BytesRef term = dict[rand.nextInt(dict.length)];
+                buckets.add(new StringTerms.Bucket(term,
+                    rand.nextInt(10000), InternalAggregations.EMPTY, true, 0L, DocValueFormat.RAW));
             }
-            Arrays.sort(fieldDocs, Comparator.comparingLong(a -> (long) a.fields[0]));
-            SortField sortField = new SortField("sort", SortField.Type.LONG);
-            return new TopFieldDocs(new TotalHits(rand.nextInt(100000),
-                TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO),
-                fieldDocs, new SortField[] { sortField });
+            Collections.sort(buckets, Comparator.comparing(a -> ((BytesRef) a.getKey())));
+            return new StringTerms("terms", BucketOrder.key(true), topNSize, 1, Collections.emptyList(), Collections.emptyMap(),
+                DocValueFormat.RAW, numShards, true, 0, buckets, 0);
         }
 
         @Override
-        public TopDocs get(int index) {
-            return topDocsList.get(index);
+        public InternalAggregations get(int index) {
+            return aggsList.get(index);
         }
 
         @Override
         public int size() {
-            return topDocsList.size();
+            return aggsList.size();
         }
     }
 
@@ -109,24 +114,21 @@ public class TopDocsReduceBenchmark {
     private int bufferSize;
 
     @Benchmark
-    public  SearchPhaseController.ReducedQueryPhase reduceTopHits(TopDocsList candidateList) {
+    public  SearchPhaseController.ReducedQueryPhase reduceTopHits(TermsList candidateList) {
         List<QuerySearchResult> shards = new ArrayList<>();
         for (int i = 0; i < candidateList.size(); i++) {
             QuerySearchResult result = new QuerySearchResult();
             result.setShardIndex(0);
             result.from(0);
             result.size(candidateList.topNSize);
-            //result.aggregations(aggsList.get(i));
-            result.topDocs(new TopDocsAndMaxScore(candidateList.get(0), Float.NaN),
-                new DocValueFormat[]{ DocValueFormat.RAW });
+            result.aggregations(candidateList.get(i));
             result.setSearchShardTarget(new SearchShardTarget("node",
                 new ShardId(new Index("index", "index"), i), null, OriginalIndices.NONE));
             shards.add(result);
         }
         SearchPhaseController.QueryPhaseResultConsumer consumer =
             new SearchPhaseController.QueryPhaseResultConsumer(SearchProgressListener.NOOP,
-                controller, shards.size(), bufferSize, true, false, 0, candidateList.topNSize, true);
-        int pos = 0;
+                controller, shards.size(), bufferSize, false, true, 0, candidateList.topNSize, true);
         for (int i = 0; i < shards.size(); i++) {
             consumer.consumeResult(shards.get(i));
         }
