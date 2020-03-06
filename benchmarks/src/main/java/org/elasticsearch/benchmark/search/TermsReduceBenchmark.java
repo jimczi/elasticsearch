@@ -47,8 +47,10 @@ import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 @Warmup(iterations = 10)
@@ -88,13 +90,16 @@ public class TermsReduceBenchmark {
         }
 
         private StringTerms newTerms(Random rand, BytesRef[] dict) {
-            List<StringTerms.Bucket> buckets = new ArrayList<>();
+            Set<BytesRef> randomTerms = new HashSet<>();
             for (int i = 0; i < topNSize; i++) {
-                BytesRef term = dict[rand.nextInt(dict.length)];
+                randomTerms.add(dict[rand.nextInt(dict.length)]);
+            }
+            List<StringTerms.Bucket> buckets = new ArrayList<>();
+            for (BytesRef term : randomTerms) {
                 buckets.add(new StringTerms.Bucket(term,
                     rand.nextInt(10000), InternalAggregations.EMPTY, true, 0L, DocValueFormat.RAW));
             }
-            Collections.sort(buckets, Comparator.comparing(a -> ((BytesRef) a.getKey())));
+            Collections.sort(buckets, Comparator.comparingLong(a -> a.getDocCount()));
             return new StringTerms("terms", BucketOrder.key(true), topNSize, 1, Collections.emptyList(), Collections.emptyMap(),
                 DocValueFormat.RAW, numShards, true, 0, buckets, 0);
         }
