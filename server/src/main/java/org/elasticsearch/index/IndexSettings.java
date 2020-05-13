@@ -310,6 +310,12 @@ public final class IndexSettings {
         Property.IndexScope, Property.PrivateIndex, Property.Dynamic);
 
     /**
+     * Marks an index to be searched admin.
+     */
+    public static final Setting<Boolean> INDEX_SEARCH_ADMIN = Setting.boolSetting("index.search.admin", false,
+        Property.IndexScope, Property.PrivateIndex, Property.Dynamic);
+
+    /**
      * Determines a balance between file-based and operations-based peer recoveries. The number of operations that will be used in an
      * operations-based peer recovery is limited to this proportion of the total number of documents in the shard (including deleted
      * documents) on the grounds that a file-based peer recovery may copy all of the documents in the shard over to the new peer, but is
@@ -380,6 +386,7 @@ public final class IndexSettings {
     private volatile String defaultPipeline;
     private volatile String requiredPipeline;
     private volatile boolean searchThrottled;
+    private final boolean searchAdmin;
 
     /**
      * The maximum number of refresh listeners allows on this shard.
@@ -464,6 +471,7 @@ public final class IndexSettings {
         numberOfShards = settings.getAsInt(IndexMetadata.SETTING_NUMBER_OF_SHARDS, null);
 
         this.searchThrottled = INDEX_SEARCH_THROTTLED.get(settings);
+        this.searchAdmin = INDEX_SEARCH_ADMIN.get(settings);
         this.queryStringLenient = QUERY_STRING_LENIENT_SETTING.get(settings);
         this.queryStringAnalyzeWildcard = QUERY_STRING_ANALYZE_WILDCARD.get(nodeSettings);
         this.queryStringAllowLeadingWildcard = QUERY_STRING_ALLOW_LEADING_WILDCARD.get(nodeSettings);
@@ -962,6 +970,13 @@ public final class IndexSettings {
      */
     public boolean isSearchThrottled() {
         return searchThrottled;
+    }
+    /**
+     * Returns true if the this index should be searched throttled ie. using the
+     * {@link org.elasticsearch.threadpool.ThreadPool.Names#SEARCH_THROTTLED} thread-pool
+     */
+    public boolean isSearchAdmin() {
+        return searchAdmin;
     }
 
     private void setSearchThrottled(boolean searchThrottled) {

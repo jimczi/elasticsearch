@@ -74,6 +74,7 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
         public static final String WRITE = "write";
         public static final String SEARCH = "search";
         public static final String SEARCH_THROTTLED = "search_throttled";
+        public static final String SEARCH_ADMIN = "search_admin";
         public static final String MANAGEMENT = "management";
         public static final String FLUSH = "flush";
         public static final String REFRESH = "refresh";
@@ -127,7 +128,8 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
         entry(Names.FORCE_MERGE, ThreadPoolType.FIXED),
         entry(Names.FETCH_SHARD_STARTED, ThreadPoolType.SCALING),
         entry(Names.FETCH_SHARD_STORE, ThreadPoolType.SCALING),
-        entry(Names.SEARCH_THROTTLED, ThreadPoolType.FIXED));
+        entry(Names.SEARCH_THROTTLED, ThreadPoolType.FIXED),
+        entry(Names.SEARCH_ADMIN, ThreadPoolType.FIXED));
 
     private final Map<String, ExecutorHolder> executors;
 
@@ -168,6 +170,7 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
         builders.put(Names.ANALYZE, new FixedExecutorBuilder(settings, Names.ANALYZE, 1, 16, false));
         builders.put(Names.SEARCH, new FixedExecutorBuilder(settings, Names.SEARCH, searchThreadPoolSize(allocatedProcessors), 1000, true));
         builders.put(Names.SEARCH_THROTTLED, new FixedExecutorBuilder(settings, Names.SEARCH_THROTTLED, 1, 100, true));
+        builders.put(Names.SEARCH_ADMIN, new FixedExecutorBuilder(settings, Names.SEARCH_ADMIN, 1, 100, true));
         builders.put(Names.MANAGEMENT, new ScalingExecutorBuilder(Names.MANAGEMENT, 1, 5, TimeValue.timeValueMinutes(5)));
         // no queue as this means clients will need to handle rejections on listener queue even if the operation succeeded
         // the assumption here is that the listeners should be very lightweight on the listeners side
