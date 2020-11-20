@@ -24,25 +24,21 @@ import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field.Store;
 import org.apache.lucene.document.LatLonDocValuesField;
 import org.apache.lucene.document.LatLonPoint;
-import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
-import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.NoMergePolicy;
 import org.apache.lucene.index.RandomIndexWriter;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.queries.MinDocQuery;
-import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanClause.Occur;
 import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.Collector;
-import org.apache.lucene.search.CollectorManager;
 import org.apache.lucene.search.ConstantScoreQuery;
 import org.apache.lucene.search.DocValuesFieldExistsQuery;
 import org.apache.lucene.search.FieldComparator;
@@ -69,18 +65,9 @@ import org.apache.lucene.search.join.ScoreMode;
 import org.apache.lucene.search.spans.SpanNearQuery;
 import org.apache.lucene.search.spans.SpanTermQuery;
 import org.apache.lucene.store.Directory;
-import org.apache.lucene.store.IOContext;
-import org.apache.lucene.store.IndexInput;
-import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
-import org.apache.lucene.util.bkd.BKDConfig;
-import org.apache.lucene.util.bkd.BKDReader;
-import org.apache.lucene.util.bkd.BKDWriter;
 import org.elasticsearch.action.search.SearchShardTask;
-import org.elasticsearch.index.mapper.DateFieldMapper;
-import org.elasticsearch.index.mapper.MappedFieldType;
-import org.elasticsearch.index.mapper.NumberFieldMapper;
 import org.elasticsearch.index.query.ParsedQuery;
 import org.elasticsearch.index.query.QueryShardContext;
 import org.elasticsearch.index.search.ESToParentBlockJoinQuery;
@@ -99,7 +86,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import static org.elasticsearch.search.query.QueryPhase.pointsHaveDuplicateData;
 import static org.elasticsearch.search.query.TopDocsCollectorContext.hasInfMaxScore;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.equalTo;
@@ -107,7 +93,6 @@ import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 public class QueryPhaseTests extends IndexShardTestCase {
@@ -670,155 +655,6 @@ public class QueryPhaseTests extends IndexShardTestCase {
         dir.close();
     }
 
-    public void testNumericLongOrDateSortOptimization() throws Exception {
-        final String fieldNameLong = "long-field";
-        final String fieldNameDate = "date-field";
-        MappedFieldType fieldTypeLong = new NumberFieldMapper.NumberFieldType(fieldNameLong, NumberFieldMapper.NumberType.LONG);
-        MappedFieldType fieldTypeDate = new DateFieldMapper.DateFieldType(fieldNameDate);
-        QueryShardContext shardContext = mock(QueryShardContext.class);
-        when(shardContext.getFieldType(fieldNameLong)).thenReturn(fieldTypeLong);
-        when(shardContext.getFieldType(fieldNameDate)).thenReturn(fieldTypeDate);
-        // enough docs to have a tree with several leaf nodes
-        final int numDocs = 3500 * 20;
-        Directory dir = newDirectory();
-        IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig(null));
-        for (int i = 1; i <= numDocs; ++i) {
-            Document doc = new Document();
-            long longValue = randomLongBetween(-10000000L, 10000000L);
-            doc.add(new LongPoint(fieldNameLong, longValue));
-            doc.add(new NumericDocValuesField(fieldNameLong, longValue));
-            longValue = randomLongBetween(0, 3000000000000L);
-            doc.add(new LongPoint(fieldNameDate, longValue));
-            doc.add(new NumericDocValuesField(fieldNameDate, longValue));
-            writer.addDocument(doc);
-            if (i % 3500 == 0) writer.commit();
-        }
-        writer.close();
-        final IndexReader reader = DirectoryReader.open(dir);
-
-        TestSearchContext searchContext = spy(new TestSearchContext(shardContext, indexShard, newOptimizedContextSearcher(reader, 0)));
-
-        // 1. Test a sort on long field
-        final SortField sortFieldLong = new SortField(fieldNameLong, SortField.Type.LONG);
-        sortFieldLong.setMissingValue(Long.MAX_VALUE);
-        final Sort longSort = new Sort(sortFieldLong);
-        SortAndFormats sortAndFormats = new SortAndFormats(longSort, new DocValueFormat[]{DocValueFormat.RAW});
-        searchContext.sort(sortAndFormats);
-        searchContext.parsedQuery(new ParsedQuery(new MatchAllDocsQuery()));
-        searchContext.setTask(new SearchShardTask(123L, "", "", "", null, Collections.emptyMap()));
-        searchContext.setSize(10);
-        QueryPhase.executeInternal(searchContext);
-        assertSortResults(searchContext.queryResult().topDocs().topDocs, (long) numDocs, false);
-
-        // 2. Test a sort on long field + date field
-        final SortField sortFieldDate = new SortField(fieldNameDate, SortField.Type.LONG);
-        DocValueFormat dateFormat = fieldTypeDate.docValueFormat(null, null);
-        final Sort longDateSort = new Sort(sortFieldLong, sortFieldDate);
-        sortAndFormats = new SortAndFormats(longDateSort, new DocValueFormat[]{DocValueFormat.RAW, dateFormat});
-        searchContext.sort(sortAndFormats);
-        QueryPhase.executeInternal(searchContext);
-        assertSortResults(searchContext.queryResult().topDocs().topDocs, (long) numDocs, true);
-
-        // 3. Test a sort on date field
-        sortFieldDate.setMissingValue(Long.MAX_VALUE);
-        final Sort dateSort = new Sort(sortFieldDate);
-        sortAndFormats = new SortAndFormats(dateSort, new DocValueFormat[]{dateFormat});
-        searchContext.sort(sortAndFormats);
-        QueryPhase.executeInternal(searchContext);
-        assertSortResults(searchContext.queryResult().topDocs().topDocs, (long) numDocs, false);
-
-        // 4. Test a sort on date field + long field
-        final Sort dateLongSort = new Sort(sortFieldDate, sortFieldLong);
-        sortAndFormats = new SortAndFormats(dateLongSort, new DocValueFormat[]{dateFormat, DocValueFormat.RAW});
-        searchContext.sort(sortAndFormats);
-        QueryPhase.executeInternal(searchContext);
-        assertSortResults(searchContext.queryResult().topDocs().topDocs, (long) numDocs, true);
-
-        // 5. Test that sort optimization is run when from > 0 and size = 0
-        {
-            sortAndFormats = new SortAndFormats(longSort, new DocValueFormat[]{DocValueFormat.RAW});
-            searchContext.sort(sortAndFormats);
-            searchContext.from(5);
-            searchContext.setSize(0);
-            QueryPhase.executeInternal(searchContext);
-            assertSortResults(searchContext.queryResult().topDocs().topDocs, (long) numDocs, false);
-        }
-
-        // 6. Test that sort optimization is NOT run with from = 0 and size= 0
-        {
-            sortAndFormats = new SortAndFormats(longSort, new DocValueFormat[]{DocValueFormat.RAW});
-            searchContext = spy(new TestSearchContext(null, indexShard, newContextSearcher(reader)));
-            searchContext.sort(sortAndFormats);
-            searchContext.parsedQuery(new ParsedQuery(new MatchAllDocsQuery()));
-            searchContext.setTask(new SearchShardTask(123L, "", "", "", null, Collections.emptyMap()));
-            searchContext.setSize(0);
-
-            QueryPhase.executeInternal(searchContext);
-            TotalHits totalHits = searchContext.queryResult().topDocs().topDocs.totalHits;
-            assertEquals(TotalHits.Relation.EQUAL_TO, totalHits.relation);
-            assertEquals(numDocs, totalHits.value);
-        }
-
-        reader.close();
-        dir.close();
-    }
-
-    public void testIndexHasDuplicateData() throws IOException {
-        int docsCount = 5000;
-        int maxPointsInLeafNode = 40;
-        float duplicateRatio = 0.7f;
-        long duplicateValue = randomLongBetween(-10000000L, 10000000L);
-        BKDConfig config = new BKDConfig(1, 1, 8, maxPointsInLeafNode);
-        try (Directory dir = newDirectory()) {
-            BKDWriter w = new BKDWriter(docsCount, dir, "tmp", config, 1, docsCount);
-            byte[] longBytes = new byte[8];
-            for (int docId = 0; docId < docsCount; docId++) {
-                long value = randomFloat() < duplicateRatio ? duplicateValue : randomLongBetween(-10000000L, 10000000L);
-                LongPoint.encodeDimension(value, longBytes, 0);
-                w.add(longBytes, docId);
-            }
-            try (IndexOutput metaout = dir.createOutput("bkdmeta", IOContext.DEFAULT);
-                 IndexOutput indexout = dir.createOutput("bkdindex", IOContext.DEFAULT);
-                 IndexOutput dataout = dir.createOutput("bkddata", IOContext.DEFAULT)) {
-                w.finish(metaout, indexout, dataout).run();
-            }
-            try (IndexInput metain = dir.openInput("bkdmeta", IOContext.DEFAULT);
-                 IndexInput indexin = dir.openInput("bkdindex", IOContext.DEFAULT);
-                 IndexInput datain = dir.openInput("bkddata", IOContext.DEFAULT)) {
-                BKDReader r = new BKDReader(metain, indexin, datain);
-                assertTrue(pointsHaveDuplicateData(r, r.getDocCount() / 2));
-            }
-        }
-    }
-
-    public void testIndexHasNoDuplicateData() throws IOException {
-        int docsCount = 5000;
-        int maxPointsInLeafNode = 40;
-        float duplicateRatio = 0.3f;
-        long duplicateValue = randomLongBetween(-10000000L, 10000000L);
-        BKDConfig config = new BKDConfig(1, 1, 8, maxPointsInLeafNode);
-        try (Directory dir = newDirectory()) {
-            BKDWriter w = new BKDWriter(docsCount, dir, "tmp", config, 1, docsCount);
-            byte[] longBytes = new byte[8];
-            for (int docId = 0; docId < docsCount; docId++) {
-                long value = randomFloat() < duplicateRatio ? duplicateValue : randomLongBetween(-10000000L, 10000000L);
-                LongPoint.encodeDimension(value, longBytes, 0);
-                w.add(longBytes, docId);
-            }
-            long indexFP;
-            try (IndexOutput out = dir.createOutput("bkd", IOContext.DEFAULT)) {
-                Runnable finalizer = w.finish(out, out, out);
-                indexFP = out.getFilePointer();
-                finalizer.run();;
-            }
-            try (IndexInput in = dir.openInput("bkd", IOContext.DEFAULT)) {
-                in.seek(indexFP);
-                BKDReader r = new BKDReader(in, in, in);
-                assertFalse(pointsHaveDuplicateData(r, r.getDocCount() / 2));
-            }
-        }
-    }
-
     public void testMaxScoreQueryVisitor() {
         BitSetProducer producer = context -> new FixedBitSet(1);
         Query query = new ESToParentBlockJoinQuery(new MatchAllDocsQuery(), producer, ScoreMode.Avg, "nested");
@@ -977,47 +813,17 @@ public class QueryPhaseTests extends IndexShardTestCase {
 
     private static ContextIndexSearcher newContextSearcher(IndexReader reader) throws IOException {
         return new ContextIndexSearcher(reader, IndexSearcher.getDefaultSimilarity(),
-            IndexSearcher.getDefaultQueryCache(), IndexSearcher.getDefaultQueryCachingPolicy(), true);
+            IndexSearcher.getDefaultQueryCache(), IndexSearcher.getDefaultQueryCachingPolicy(), true, null);
     }
 
     private static ContextIndexSearcher newEarlyTerminationContextSearcher(IndexReader reader, int size) throws IOException {
         return new ContextIndexSearcher(reader, IndexSearcher.getDefaultSimilarity(),
-            IndexSearcher.getDefaultQueryCache(), IndexSearcher.getDefaultQueryCachingPolicy(), true) {
+            IndexSearcher.getDefaultQueryCache(), IndexSearcher.getDefaultQueryCachingPolicy(), true, null) {
 
             @Override
             public void search(List<LeafReaderContext> leaves, Weight weight, Collector collector) throws IOException {
                 final Collector in = new AssertingEarlyTerminationFilterCollector(collector, size);
                 super.search(leaves, weight, in);
-            }
-        };
-    }
-
-    // used to check that numeric long or date sort optimization was run
-    private static ContextIndexSearcher newOptimizedContextSearcher(IndexReader reader, int queryType) throws IOException {
-        return new ContextIndexSearcher(reader, IndexSearcher.getDefaultSimilarity(),
-            IndexSearcher.getDefaultQueryCache(), IndexSearcher.getDefaultQueryCachingPolicy(), true) {
-
-            @Override
-            public void search(List<LeafReaderContext> leaves, Weight weight, CollectorManager manager,
-                               QuerySearchResult result, DocValueFormat[] formats, TotalHits totalHits) throws IOException {
-                final Query query = weight.getQuery();
-                assertTrue(query instanceof BooleanQuery);
-                List<BooleanClause> clauses = ((BooleanQuery) query).clauses();
-                assertTrue(clauses.size() == 2);
-                assertTrue(clauses.get(0).getOccur() == Occur.FILTER);
-                assertTrue(clauses.get(1).getOccur() == Occur.SHOULD);
-                if (queryType == 0) {
-                    assertTrue(clauses.get(1).getQuery().getClass() ==
-                        LongPoint.newDistanceFeatureQuery("random_field", 1, 1, 1).getClass()
-                    );
-                }
-                if (queryType == 1) assertTrue(clauses.get(1).getQuery() instanceof DocValuesFieldExistsQuery);
-                super.search(leaves, weight, manager, result, formats, totalHits);
-            }
-
-            @Override
-            public void search(List<LeafReaderContext> leaves, Weight weight, Collector collector) {
-                assert (false);  // should not be there, expected to search with CollectorManager
             }
         };
     }
