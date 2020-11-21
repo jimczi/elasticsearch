@@ -46,6 +46,7 @@ import org.apache.lucene.util.BitSetIterator;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.CombinedBitSet;
 import org.apache.lucene.util.SparseFixedBitSet;
+import org.elasticsearch.common.CheckedFunction;
 import org.elasticsearch.common.lease.Releasable;
 import org.elasticsearch.common.lucene.index.FilterMultiReader;
 import org.elasticsearch.search.dfs.AggregatedDfs;
@@ -61,7 +62,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.function.Function;
 
 /**
  * Context-aware extension of {@link IndexSearcher}.
@@ -91,7 +91,7 @@ public class ContextIndexSearcher extends IndexSearcher implements Releasable {
                                 QueryCache queryCache,
                                 QueryCachingPolicy queryCachingPolicy,
                                 boolean wrapWithExitableDirectoryReader,
-                                Function<DirectoryReader, LeafReader[]> orderLeaves) throws IOException {
+                                CheckedFunction<DirectoryReader, LeafReader[], IOException> orderLeaves) throws IOException {
         this(reader, similarity, queryCache, queryCachingPolicy,
             wrapWithExitableDirectoryReader ? new MutableQueryTimeout() : null, orderLeaves);
     }
@@ -101,7 +101,7 @@ public class ContextIndexSearcher extends IndexSearcher implements Releasable {
                                  QueryCache queryCache,
                                  QueryCachingPolicy queryCachingPolicy,
                                  MutableQueryTimeout cancellable,
-                                 Function<DirectoryReader, LeafReader[]> orderLeaves) throws IOException {
+                                 CheckedFunction<DirectoryReader, LeafReader[], IOException> orderLeaves) throws IOException {
         super(wrapSorted(wrapExitable(reader, cancellable), orderLeaves));
         setSimilarity(similarity);
         setQueryCache(queryCache);
@@ -109,7 +109,8 @@ public class ContextIndexSearcher extends IndexSearcher implements Releasable {
         this.cancellable = cancellable;
     }
 
-    private static IndexReader wrapSorted(IndexReader reader, Function<DirectoryReader, LeafReader[]> orderLeaves) throws IOException {
+    private static IndexReader wrapSorted(IndexReader reader,
+                                          CheckedFunction<DirectoryReader, LeafReader[], IOException> orderLeaves) throws IOException {
         if (orderLeaves == null) {
             return reader;
         }

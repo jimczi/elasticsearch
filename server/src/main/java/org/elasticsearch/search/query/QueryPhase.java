@@ -21,10 +21,8 @@ package org.elasticsearch.search.query;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
-import org.apache.lucene.index.PointValues;
 import org.apache.lucene.queries.MinDocQuery;
 import org.apache.lucene.queries.SearchAfterSortedDocQuery;
 import org.apache.lucene.search.BooleanClause;
@@ -36,11 +34,9 @@ import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.Sort;
-import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TotalHits;
 import org.elasticsearch.action.search.SearchShardTask;
-import org.elasticsearch.common.CheckedConsumer;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.common.lucene.search.TopDocsAndMaxScore;
 import org.elasticsearch.common.util.concurrent.EWMATrackingEsThreadPoolExecutor;
@@ -62,10 +58,7 @@ import org.elasticsearch.tasks.TaskCancelledException;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import java.io.IOException;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.LinkedList;
-import java.util.List;
 import java.util.concurrent.ExecutorService;
 
 import static org.elasticsearch.search.query.QueryCollectorContext.createEarlyTerminationCollectorContext;
@@ -274,8 +267,12 @@ public class QueryPhase {
         }
     }
 
-    private static boolean searchWithCollector(SearchContext searchContext, ContextIndexSearcher searcher, Query query,
-            LinkedList<QueryCollectorContext> collectors, boolean hasFilterCollector, boolean timeoutSet) throws IOException {
+    private static boolean searchWithCollector(SearchContext searchContext,
+                                               ContextIndexSearcher searcher,
+                                               Query query,
+                                               LinkedList<QueryCollectorContext> collectors,
+                                               boolean hasFilterCollector,
+                                               boolean timeoutSet) throws IOException {
         // create the top docs collector last when the other collectors are known
         final TopDocsCollectorContext topDocsFactory = createTopDocsCollectorContext(searchContext, hasFilterCollector);
         // add the top docs collector, the first collector context in the chain
@@ -309,32 +306,6 @@ public class QueryPhase {
             ctx.postProcess(queryResult);
         }
         return topDocsFactory.shouldRescore();
-    }
-
-
-    /**
-     * Creates a sorter of {@link LeafReaderContext} that orders leaves depending on the minimum
-     * value and the sort order of the provided <code>sortField</code>.
-     */
-    static CheckedConsumer<List<LeafReaderContext>, IOException> createLeafSorter(SortField sortField) {
-        return leaves -> {
-            long[] sortValues = new long[leaves.size()];
-            long missingValue = (long) sortField.getMissingValue();
-            for (LeafReaderContext ctx : leaves) {
-                PointValues values = ctx.reader().getPointValues(sortField.getField());
-                if (values == null) {
-                    sortValues[ctx.ord] = missingValue;
-                } else {
-                    byte[] sortValue = sortField.getReverse() ? values.getMaxPackedValue(): values.getMinPackedValue();
-                    sortValues[ctx.ord] = sortValue == null ? missingValue : LongPoint.decodeDimension(sortValue, 0);
-                }
-            }
-            Comparator<LeafReaderContext> comparator = Comparator.comparingLong(l -> sortValues[l.ord]);
-            if (sortField.getReverse()) {
-                comparator = comparator.reversed();
-            }
-            Collections.sort(leaves, comparator);
-        };
     }
 
     /**
