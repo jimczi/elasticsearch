@@ -524,11 +524,6 @@ final class DefaultSearchContext extends SearchContext {
     }
 
     @Override
-    public MapperService mapperService() {
-        return indexService.mapperService();
-    }
-
-    @Override
     public BigArrays bigArrays() {
         return bigArrays;
     }
@@ -769,6 +764,11 @@ final class DefaultSearchContext extends SearchContext {
     @Override
     public QuerySearchResult queryResult() {
         return queryResult;
+    }
+
+    @Override
+    public NestedDocuments getNestedDocuments() {
+        return new NestedDocuments(indexService.mapperService(), bitsetFilterCache()::getBitSetProducer);
     }
 
     @Override
