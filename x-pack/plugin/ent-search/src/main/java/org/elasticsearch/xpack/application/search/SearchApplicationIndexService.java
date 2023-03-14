@@ -113,6 +113,10 @@ public class SearchApplicationIndexService {
         this.bigArrays = bigArrays;
     }
 
+    public Client getClient() {
+        return this.client;
+    }
+
     /**
      * Returns the {@link SystemIndexDescriptor} for the {@link SearchApplication} system index.
      *
