@@ -236,7 +236,6 @@ public class SearchExecutionContext extends QueryRewriteContext {
     private void reset() {
         allowUnmappedFields = indexSettings.isDefaultAllowUnmappedFields();
         this.lookup = null;
-        this.namedQueries.clear();
         this.nestedScope = new NestedScope();
     }
 
@@ -297,9 +296,8 @@ public class SearchExecutionContext extends QueryRewriteContext {
         }
     }
 
-    public Map<String, Query> copyNamedQueries() {
-        // This might be a good use case for CopyOnWriteHashMap
-        return Map.copyOf(namedQueries);
+    public Map<String, Query> getNamedQueries() {
+        return Collections.unmodifiableMap(namedQueries);
     }
 
     /**
@@ -539,7 +537,7 @@ public class SearchExecutionContext extends QueryRewriteContext {
         return indexSortConfig.hasPrimarySortOnField(field);
     }
 
-    public ParsedQuery toQuery(QueryBuilder queryBuilder) {
+    public Query toQuery(QueryBuilder queryBuilder) {
         return toQuery(queryBuilder, q -> {
             Query query = q.toQuery(this);
             if (query == null) {
@@ -549,11 +547,11 @@ public class SearchExecutionContext extends QueryRewriteContext {
         });
     }
 
-    private ParsedQuery toQuery(QueryBuilder queryBuilder, CheckedFunction<QueryBuilder, Query, IOException> filterOrQuery) {
+    private Query toQuery(QueryBuilder queryBuilder, CheckedFunction<QueryBuilder, Query, IOException> filterOrQuery) {
         reset();
         try {
             QueryBuilder rewriteQuery = Rewriteable.rewrite(queryBuilder, this, true);
-            return new ParsedQuery(filterOrQuery.apply(rewriteQuery), copyNamedQueries());
+            return filterOrQuery.apply(rewriteQuery);
         } catch (QueryShardException | ParsingException e) {
             throw e;
         } catch (Exception e) {

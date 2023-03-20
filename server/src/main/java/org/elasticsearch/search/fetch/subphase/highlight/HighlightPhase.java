@@ -41,7 +41,7 @@ public class HighlightPhase implements FetchSubPhase {
             return null;
         }
 
-        return getProcessor(context, context.highlight(), context.parsedQuery().query());
+        return getProcessor(context, context.highlight(), context.parsedQuery());
     }
 
     public FetchSubPhaseProcessor getProcessor(FetchContext context, SearchHighlightContext highlightContext, Query query) {

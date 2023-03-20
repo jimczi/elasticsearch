@@ -11,7 +11,6 @@ package org.elasticsearch.search.fetch;
 import org.apache.lucene.search.Query;
 import org.elasticsearch.index.mapper.SourceFieldMapper;
 import org.elasticsearch.index.mapper.SourceLoader;
-import org.elasticsearch.index.query.ParsedQuery;
 import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.search.SearchExtBuilder;
 import org.elasticsearch.search.fetch.subphase.FetchDocValuesContext;
@@ -124,14 +123,14 @@ public class FetchContext {
     /**
      * The original query with additional filters and named queries
      */
-    public ParsedQuery parsedQuery() {
+    public Query parsedQuery() {
         return searchContext.parsedQuery();
     }
 
     /**
      * Any post-filters run as part of the search
      */
-    public ParsedQuery parsedPostFilter() {
+    public Query parsedPostFilter() {
         return searchContext.parsedPostFilter();
     }
 

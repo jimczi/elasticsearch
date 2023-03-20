@@ -137,7 +137,7 @@ public class QueryPhase {
             if (searchContext.parsedPostFilter() != null) {
                 // add post filters before aggregations
                 // it will only be applied to top hits
-                collectors.add(createFilteredCollectorContext(searcher, searchContext.parsedPostFilter().query()));
+                collectors.add(createFilteredCollectorContext(searcher, searchContext.parsedPostFilter()));
             }
             if (searchContext.queryCollectors().isEmpty() == false) {
                 // plug in additional collectors, like aggregations

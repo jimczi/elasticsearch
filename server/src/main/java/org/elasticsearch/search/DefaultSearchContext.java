@@ -13,6 +13,7 @@ import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.BoostQuery;
 import org.apache.lucene.search.Collector;
 import org.apache.lucene.search.FieldDoc;
+import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
 import org.elasticsearch.action.search.SearchShardTask;
@@ -27,7 +28,6 @@ import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.mapper.NestedLookup;
 import org.elasticsearch.index.mapper.SourceLoader;
 import org.elasticsearch.index.query.AbstractQueryBuilder;
-import org.elasticsearch.index.query.ParsedQuery;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.index.search.NestedHelper;
@@ -108,13 +108,13 @@ final class DefaultSearchContext extends SearchContext {
      * applied. Putting things in here leaks them into highlighting so don't add
      * things like the type filter or alias filters.
      */
-    private ParsedQuery originalQuery;
+    private Query originalQuery;
 
     /**
      * The query to actually execute.
      */
     private Query query;
-    private ParsedQuery postFilter;
+    private Query postFilter;
     private Query aliasFilter;
     private int[] docIdsToLoad;
     private SearchContextAggregations aggregations;
@@ -256,10 +256,10 @@ final class DefaultSearchContext extends SearchContext {
         }
 
         if (query == null) {
-            parsedQuery(ParsedQuery.parsedMatchAllQuery());
+            parsedQuery(new MatchAllDocsQuery());
         }
         if (queryBoost != AbstractQueryBuilder.DEFAULT_BOOST) {
-            parsedQuery(new ParsedQuery(new BoostQuery(query, queryBoost), parsedQuery()));
+            parsedQuery(new BoostQuery(query, queryBoost));
         }
         this.query = buildFilteredQuery(query);
         if (lowLevelCancellation) {
@@ -573,25 +573,25 @@ final class DefaultSearchContext extends SearchContext {
     }
 
     @Override
-    public SearchContext parsedPostFilter(ParsedQuery postFilter) {
+    public SearchContext parsedPostFilter(Query postFilter) {
         this.postFilter = postFilter;
         return this;
     }
 
     @Override
-    public ParsedQuery parsedPostFilter() {
+    public Query parsedPostFilter() {
         return this.postFilter;
     }
 
     @Override
-    public SearchContext parsedQuery(ParsedQuery query) {
+    public SearchContext parsedQuery(Query query) {
         this.originalQuery = query;
-        this.query = query.query();
+        this.query = query;
         return this;
     }
 
     @Override
-    public ParsedQuery parsedQuery() {
+    public Query parsedQuery() {
         return this.originalQuery;
     }
 

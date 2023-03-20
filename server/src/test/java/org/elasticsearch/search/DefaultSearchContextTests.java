@@ -10,6 +10,7 @@ package org.elasticsearch.search;
 
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.QueryCachingPolicy;
@@ -30,7 +31,6 @@ import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.query.AbstractQueryBuilder;
-import org.elasticsearch.index.query.ParsedQuery;
 import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.index.shard.ShardId;
@@ -271,9 +271,8 @@ public class DefaultSearchContextTests extends ESTestCase {
             when(shardSearchRequest.indexBoost()).thenReturn(AbstractQueryBuilder.DEFAULT_BOOST);
 
             DefaultSearchContext context3 = new DefaultSearchContext(readerContext, shardSearchRequest, target, null, timeout, null, false);
-            ParsedQuery parsedQuery = ParsedQuery.parsedMatchAllQuery();
-            context3.sliceBuilder(null).parsedQuery(parsedQuery).preProcess();
-            assertEquals(context3.query(), context3.buildFilteredQuery(parsedQuery.query()));
+            context3.sliceBuilder(null).parsedQuery(new MatchAllDocsQuery()).preProcess();
+            assertEquals(context3.query(), context3.buildFilteredQuery(new MatchAllDocsQuery()));
 
             when(searchExecutionContext.getFieldType(anyString())).thenReturn(mock(MappedFieldType.class));
 
@@ -287,9 +286,9 @@ public class DefaultSearchContextTests extends ESTestCase {
                 false
             );
             DefaultSearchContext context4 = new DefaultSearchContext(readerContext, shardSearchRequest, target, null, timeout, null, false);
-            context4.sliceBuilder(new SliceBuilder(1, 2)).parsedQuery(parsedQuery).preProcess();
+            context4.sliceBuilder(new SliceBuilder(1, 2)).parsedQuery(new MatchAllDocsQuery()).preProcess();
             Query query1 = context4.query();
-            context4.sliceBuilder(new SliceBuilder(0, 2)).parsedQuery(parsedQuery).preProcess();
+            context4.sliceBuilder(new SliceBuilder(0, 2)).parsedQuery(new MatchAllDocsQuery()).preProcess();
             Query query2 = context4.query();
             assertTrue(query1 instanceof MatchNoDocsQuery || query2 instanceof MatchNoDocsQuery);
 

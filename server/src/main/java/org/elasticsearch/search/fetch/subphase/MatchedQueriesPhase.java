@@ -28,13 +28,7 @@ import java.util.Map;
 public final class MatchedQueriesPhase implements FetchSubPhase {
     @Override
     public FetchSubPhaseProcessor getProcessor(FetchContext context) throws IOException {
-        Map<String, Query> namedQueries = new HashMap<>();
-        if (context.parsedQuery() != null) {
-            namedQueries.putAll(context.parsedQuery().namedFilters());
-        }
-        if (context.parsedPostFilter() != null) {
-            namedQueries.putAll(context.parsedPostFilter().namedFilters());
-        }
+        Map<String, Query> namedQueries = context.getSearchExecutionContext().getNamedQueries();
         if (namedQueries.isEmpty()) {
             return null;
         }

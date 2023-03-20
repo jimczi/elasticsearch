@@ -13,6 +13,7 @@ import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.MultiTerms;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.Query;
 import org.apache.lucene.search.spell.DirectSpellChecker;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.BytesRefBuilder;
@@ -20,7 +21,6 @@ import org.apache.lucene.util.CharsRefBuilder;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.common.text.Text;
 import org.elasticsearch.index.query.AbstractQueryBuilder;
-import org.elasticsearch.index.query.ParsedQuery;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.script.TemplateScript;
@@ -134,8 +134,8 @@ public final class PhraseSuggester extends Suggester<PhraseSuggestionContext> {
                             .createParser(searchExecutionContext.getParserConfig(), querySource)
                     ) {
                         QueryBuilder innerQueryBuilder = AbstractQueryBuilder.parseTopLevelQuery(parser);
-                        final ParsedQuery parsedQuery = searchExecutionContext.toQuery(innerQueryBuilder);
-                        collateMatch = Lucene.exists(searcher, parsedQuery.query());
+                        final Query parsedQuery = searchExecutionContext.toQuery(innerQueryBuilder);
+                        collateMatch = Lucene.exists(searcher, parsedQuery);
                     }
                 }
                 if (collateMatch == false && collatePrune == false) {

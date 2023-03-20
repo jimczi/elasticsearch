@@ -16,7 +16,6 @@ import org.elasticsearch.action.search.SearchType;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.cache.bitset.BitsetFilterCache;
 import org.elasticsearch.index.mapper.SourceLoader;
-import org.elasticsearch.index.query.ParsedQuery;
 import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.search.SearchExtBuilder;
@@ -269,22 +268,22 @@ public abstract class FilteredSearchContext extends SearchContext {
     }
 
     @Override
-    public SearchContext parsedPostFilter(ParsedQuery postFilter) {
+    public SearchContext parsedPostFilter(Query postFilter) {
         return in.parsedPostFilter(postFilter);
     }
 
     @Override
-    public ParsedQuery parsedPostFilter() {
+    public Query parsedPostFilter() {
         return in.parsedPostFilter();
     }
 
     @Override
-    public SearchContext parsedQuery(ParsedQuery query) {
+    public SearchContext parsedQuery(Query query) {
         return in.parsedQuery(query);
     }
 
     @Override
-    public ParsedQuery parsedQuery() {
+    public Query parsedQuery() {
         return in.parsedQuery();
     }
 

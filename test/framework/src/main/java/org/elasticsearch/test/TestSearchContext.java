@@ -16,7 +16,6 @@ import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.IndexService;
 import org.elasticsearch.index.cache.bitset.BitsetFilterCache;
 import org.elasticsearch.index.mapper.SourceLoader;
-import org.elasticsearch.index.query.ParsedQuery;
 import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.index.shard.ShardId;
@@ -62,8 +61,8 @@ public class TestSearchContext extends SearchContext {
     final IndexShard indexShard;
     final QuerySearchResult queryResult = new QuerySearchResult();
     final SearchExecutionContext searchExecutionContext;
-    ParsedQuery originalQuery;
-    ParsedQuery postFilter;
+    Query originalQuery;
+    Query postFilter;
     Query query;
     Float minScore;
     SearchShardTask task;
@@ -357,25 +356,25 @@ public class TestSearchContext extends SearchContext {
     }
 
     @Override
-    public SearchContext parsedPostFilter(ParsedQuery postFilterQuery) {
+    public SearchContext parsedPostFilter(Query postFilterQuery) {
         this.postFilter = postFilterQuery;
         return this;
     }
 
     @Override
-    public ParsedQuery parsedPostFilter() {
+    public Query parsedPostFilter() {
         return postFilter;
     }
 
     @Override
-    public SearchContext parsedQuery(ParsedQuery parsedQuery) {
+    public SearchContext parsedQuery(Query parsedQuery) {
         this.originalQuery = parsedQuery;
-        this.query = parsedQuery.query();
+        this.query = parsedQuery;
         return this;
     }
 
     @Override
-    public ParsedQuery parsedQuery() {
+    public Query parsedQuery() {
         return originalQuery;
     }
 

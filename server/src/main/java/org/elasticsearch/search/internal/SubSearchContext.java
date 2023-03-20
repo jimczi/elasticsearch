@@ -9,7 +9,6 @@ package org.elasticsearch.search.internal;
 
 import org.apache.lucene.search.Query;
 import org.elasticsearch.core.TimeValue;
-import org.elasticsearch.index.query.ParsedQuery;
 import org.elasticsearch.search.aggregations.SearchContextAggregations;
 import org.elasticsearch.search.collapse.CollapseContext;
 import org.elasticsearch.search.fetch.FetchSearchResult;
@@ -34,7 +33,7 @@ public class SubSearchContext extends FilteredSearchContext {
     private int from;
     private int size = DEFAULT_SIZE;
     private SortAndFormats sort;
-    private ParsedQuery parsedQuery;
+    private Query parsedQuery;
     private Query query;
 
     private final FetchSearchResult fetchSearchResult;
@@ -171,16 +170,16 @@ public class SubSearchContext extends FilteredSearchContext {
     }
 
     @Override
-    public SubSearchContext parsedQuery(ParsedQuery parsedQuery) {
+    public SubSearchContext parsedQuery(Query parsedQuery) {
         this.parsedQuery = parsedQuery;
         if (parsedQuery != null) {
-            this.query = parsedQuery.query();
+            this.query = parsedQuery;
         }
         return this;
     }
 
     @Override
-    public ParsedQuery parsedQuery() {
+    public Query parsedQuery() {
         return parsedQuery;
     }
 
@@ -201,7 +200,7 @@ public class SubSearchContext extends FilteredSearchContext {
     }
 
     @Override
-    public SearchContext parsedPostFilter(ParsedQuery postFilter) {
+    public SearchContext parsedPostFilter(Query postFilter) {
         throw new UnsupportedOperationException("Not supported");
     }
 

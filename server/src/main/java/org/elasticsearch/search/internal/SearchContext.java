@@ -18,7 +18,6 @@ import org.elasticsearch.core.Releasables;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.cache.bitset.BitsetFilterCache;
 import org.elasticsearch.index.mapper.SourceLoader;
-import org.elasticsearch.index.query.ParsedQuery;
 import org.elasticsearch.index.query.QueryShardException;
 import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.index.shard.IndexShard;
@@ -246,13 +245,13 @@ public abstract class SearchContext implements Releasable {
 
     public abstract CollapseContext collapse();
 
-    public abstract SearchContext parsedPostFilter(ParsedQuery postFilter);
+    public abstract SearchContext parsedPostFilter(Query postFilter);
 
-    public abstract ParsedQuery parsedPostFilter();
+    public abstract Query parsedPostFilter();
 
-    public abstract SearchContext parsedQuery(ParsedQuery query);
+    public abstract SearchContext parsedQuery(Query query);
 
-    public abstract ParsedQuery parsedQuery();
+    public abstract Query parsedQuery();
 
     /**
      * The query to execute, not rewritten.

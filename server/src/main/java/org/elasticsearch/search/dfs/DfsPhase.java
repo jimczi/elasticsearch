@@ -173,7 +173,7 @@ public class DfsPhase {
         }
         List<DfsKnnResults> knnResults = new ArrayList<>(knnVectorQueryBuilders.size());
         for (int i = 0; i < knnSearch.size(); i++) {
-            Query knnQuery = searchExecutionContext.toQuery(knnVectorQueryBuilders.get(i)).query();
+            Query knnQuery = searchExecutionContext.toQuery(knnVectorQueryBuilders.get(i));
             TopScoreDocCollector topScoreDocCollector = TopScoreDocCollector.create(knnSearch.get(i).k(), Integer.MAX_VALUE);
             Collector collector = topScoreDocCollector;
             if (context.getProfilers() != null) {

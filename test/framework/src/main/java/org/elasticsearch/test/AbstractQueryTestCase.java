@@ -554,7 +554,7 @@ public abstract class AbstractQueryTestCase<QB extends AbstractQueryBuilder<QB>>
      */
     private void assertLuceneQuery(QB queryBuilder, Query query, SearchExecutionContext context) throws IOException {
         if (queryBuilder.queryName() != null && query instanceof MatchNoDocsQuery == false) {
-            Query namedQuery = context.copyNamedQueries().get(queryBuilder.queryName());
+            Query namedQuery = context.getNamedQueries().get(queryBuilder.queryName());
             assertThat(namedQuery, equalTo(query));
         }
         if (query != null) {
