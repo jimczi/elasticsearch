@@ -43,6 +43,7 @@ import org.elasticsearch.search.sort.SortBuilder;
 import org.elasticsearch.search.sort.SortBuilders;
 import org.elasticsearch.search.sort.SortOrder;
 import org.elasticsearch.search.suggest.SuggestBuilder;
+import org.elasticsearch.search.vectors.HybridSearchBuilder;
 import org.elasticsearch.search.vectors.KnnSearchBuilder;
 import org.elasticsearch.usage.SearchUsage;
 import org.elasticsearch.usage.SearchUsageHolder;
@@ -84,6 +85,7 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
     public static final ParseField QUERY_FIELD = new ParseField("query");
     public static final ParseField POST_FILTER_FIELD = new ParseField("post_filter");
     public static final ParseField KNN_FIELD = new ParseField("knn");
+    public static final ParseField HYBRID_FIELD = new ParseField("hybrid");
     public static final ParseField MIN_SCORE_FIELD = new ParseField("min_score");
     public static final ParseField VERSION_FIELD = new ParseField("version");
     public static final ParseField SEQ_NO_PRIMARY_TERM_FIELD = new ParseField("seq_no_primary_term");
@@ -132,6 +134,8 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
     private QueryBuilder postQueryBuilder;
 
     private List<KnnSearchBuilder> knnSearch = new ArrayList<>();
+
+    private HybridSearchBuilder hybridSearch;
 
     private int from = -1;
 
@@ -257,6 +261,9 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
                 knnSearch = in.readList(KnnSearchBuilder::new);
             }
         }
+        if (in.getTransportVersion().onOrAfter(TransportVersion.V_8_8_0)) {
+            hybridSearch = in.readOptionalWriteable(HybridSearchBuilder::new);
+        }
     }
 
     @Override
@@ -338,6 +345,9 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
                 out.writeCollection(knnSearch);
             }
         }
+        if (out.getTransportVersion().onOrAfter(TransportVersion.V_8_8_0)) {
+            out.writeOptionalWriteable(hybridSearch);
+        }
     }
 
     /**
@@ -388,6 +398,15 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
      */
     public List<KnnSearchBuilder> knnSearch() {
         return Collections.unmodifiableList(knnSearch);
+    }
+
+    public SearchSourceBuilder hybridSearch(HybridSearchBuilder hybridSearch) {
+        this.hybridSearch = hybridSearch;
+        return this;
+    }
+
+    public HybridSearchBuilder hybridSearch() {
+        return hybridSearch;
     }
 
     /**
@@ -1003,7 +1022,7 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
      * @return true if the source only has suggest
      */
     public boolean isSuggestOnly() {
-        return suggestBuilder != null && queryBuilder == null && knnSearch.isEmpty() && aggregations == null;
+        return suggestBuilder != null && queryBuilder == null && knnSearch.isEmpty() && hybridSearch == null && aggregations == null;
     }
 
     /**
@@ -1046,7 +1065,8 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
     @SuppressWarnings({ "unchecked", "rawtypes" })
     public SearchSourceBuilder rewrite(QueryRewriteContext context) throws IOException {
         assert (this.equals(
-            shallowCopy(queryBuilder, postQueryBuilder, knnSearch, aggregations, sliceBuilder, sorts, rescoreBuilders, highlightBuilder)
+            shallowCopy(queryBuilder, postQueryBuilder, knnSearch, hybridSearch,
+                aggregations, sliceBuilder, sorts, rescoreBuilders, highlightBuilder)
         ));
         QueryBuilder queryBuilder = null;
         if (this.queryBuilder != null) {
@@ -1057,6 +1077,10 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
             postQueryBuilder = this.postQueryBuilder.rewrite(context);
         }
         List<KnnSearchBuilder> knnSearch = Rewriteable.rewrite(this.knnSearch, context);
+        HybridSearchBuilder hybridSearch = null;
+        if (this.hybridSearch != null) {
+            hybridSearch = Rewriteable.rewrite(this.hybridSearch, context);
+        }
         AggregatorFactories.Builder aggregations = null;
         if (this.aggregations != null) {
             aggregations = this.aggregations.rewrite(context);
@@ -1072,6 +1096,7 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
         boolean rewritten = queryBuilder != this.queryBuilder
             || postQueryBuilder != this.postQueryBuilder
             || knnSearch != this.knnSearch
+            || hybridSearch != this.hybridSearch
             || aggregations != this.aggregations
             || rescoreBuilders != this.rescoreBuilders
             || sorts != this.sorts
@@ -1081,6 +1106,7 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
                 queryBuilder,
                 postQueryBuilder,
                 knnSearch,
+                hybridSearch,
                 aggregations,
                 this.sliceBuilder,
                 sorts,
@@ -1095,7 +1121,8 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
      * Create a shallow copy of this builder with a new slice configuration.
      */
     public SearchSourceBuilder shallowCopy() {
-        return shallowCopy(queryBuilder, postQueryBuilder, knnSearch, aggregations, sliceBuilder, sorts, rescoreBuilders, highlightBuilder);
+        return shallowCopy(queryBuilder, postQueryBuilder, knnSearch, hybridSearch,
+            aggregations, sliceBuilder, sorts, rescoreBuilders, highlightBuilder);
     }
 
     /**
@@ -1107,6 +1134,7 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
         QueryBuilder queryBuilder,
         QueryBuilder postQueryBuilder,
         List<KnnSearchBuilder> knnSearch,
+        HybridSearchBuilder hybridSearch,
         AggregatorFactories.Builder aggregations,
         SliceBuilder slice,
         List<SortBuilder<?>> sorts,
@@ -1127,6 +1155,7 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
         rewrittenBuilder.minScore = minScore;
         rewrittenBuilder.postQueryBuilder = postQueryBuilder;
         rewrittenBuilder.knnSearch = knnSearch;
+        rewrittenBuilder.hybridSearch = hybridSearch;
         rewrittenBuilder.profile = profile;
         rewrittenBuilder.queryBuilder = queryBuilder;
         rewrittenBuilder.rescoreBuilders = rescoreBuilders;
@@ -1358,6 +1387,9 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
                             if (runtimeMappings.size() > 0) {
                                 searchUsage.trackSectionUsage(RUNTIME_MAPPINGS_FIELD.getPreferredName());
                             }
+                        } else if (HYBRID_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
+                            hybridSearch = HybridSearchBuilder.fromXContent(parser);
+                            searchUsage.trackSectionUsage(HYBRID_FIELD.getPreferredName());
                         } else {
                             throw new ParsingException(
                                 parser.getTokenLocation(),
@@ -1504,6 +1536,10 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
                 builder.endObject();
             }
             builder.endArray();
+        }
+
+        if (hybridSearch != null) {
+            builder.field(HYBRID_FIELD.getPreferredName(), hybridSearch);
         }
 
         if (minScore != null) {
@@ -1882,6 +1918,7 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
             postQueryBuilder,
             queryBuilder,
             knnSearch,
+            hybridSearch,
             rescoreBuilders,
             scriptFields,
             size,
@@ -1926,6 +1963,7 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
             && Objects.equals(postQueryBuilder, other.postQueryBuilder)
             && Objects.equals(queryBuilder, other.queryBuilder)
             && Objects.equals(knnSearch, other.knnSearch)
+            && Objects.equals(hybridSearch, other.hybridSearch)
             && Objects.equals(rescoreBuilders, other.rescoreBuilders)
             && Objects.equals(scriptFields, other.scriptFields)
             && Objects.equals(size, other.size)

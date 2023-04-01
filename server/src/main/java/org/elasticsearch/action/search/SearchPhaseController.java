@@ -34,6 +34,7 @@ import org.elasticsearch.search.aggregations.AggregationReduceContext;
 import org.elasticsearch.search.aggregations.InternalAggregations;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.dfs.AggregatedDfs;
+import org.elasticsearch.search.dfs.DfsHybridResults;
 import org.elasticsearch.search.dfs.DfsKnnResults;
 import org.elasticsearch.search.dfs.DfsSearchResult;
 import org.elasticsearch.search.fetch.FetchSearchResult;
@@ -48,6 +49,7 @@ import org.elasticsearch.search.suggest.Suggest.Suggestion;
 import org.elasticsearch.search.suggest.completion.CompletionSuggestion;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -125,6 +127,25 @@ public final class SearchPhaseController {
             aggMaxDoc += lEntry.maxDoc();
         }
         return new AggregatedDfs(termStatistics, fieldStatistics, aggMaxDoc);
+    }
+
+    public static TopDocs mergeHybridResults(SearchRequest request, List<DfsSearchResult> dfsSearchResults) {
+        if (request.hasHybridSearch() == false) {
+            return null;
+        }
+        List<ScoreDoc> mergedDocs = new ArrayList<>();
+        int total = 0;
+        for (DfsSearchResult dfsResult : dfsSearchResults) {
+            DfsHybridResults hybridResult = dfsResult.hybridResults();
+            for (ScoreDoc[] scoreDocs : hybridResult.getScoreShardDocs()) {
+                setShardIndex(scoreDocs, dfsResult.getShardIndex());
+                total += scoreDocs.length;
+                mergedDocs.addAll(Arrays.asList(scoreDocs));
+            }
+        }
+        TotalHits totalHits = new TotalHits(total, Relation.EQUAL_TO);
+        TopDocs topDocs = new TopDocs(totalHits, mergedDocs.toArray(ScoreDoc[]::new));
+        return topDocs;
     }
 
     public static List<DfsKnnResults> mergeKnnResults(SearchRequest request, List<DfsSearchResult> dfsSearchResults) {
@@ -292,8 +313,12 @@ public final class SearchPhaseController {
     }
 
     static void setShardIndex(TopDocs topDocs, int shardIndex) {
-        assert topDocs.scoreDocs.length == 0 || topDocs.scoreDocs[0].shardIndex == -1 : "shardIndex is already set";
-        for (ScoreDoc doc : topDocs.scoreDocs) {
+        setShardIndex(topDocs.scoreDocs, shardIndex);
+    }
+
+    static void setShardIndex(ScoreDoc[] scoreDocs, int shardIndex) {
+        assert scoreDocs.length == 0 || scoreDocs[0].shardIndex == -1 : "shardIndex is already set";
+        for (ScoreDoc doc : scoreDocs) {
             doc.shardIndex = shardIndex;
         }
     }

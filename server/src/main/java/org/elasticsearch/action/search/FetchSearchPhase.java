@@ -102,9 +102,10 @@ final class FetchSearchPhase extends SearchPhase {
         final boolean isScrollSearch = context.getRequest().scroll() != null;
         final List<SearchPhaseResult> phaseResults = queryResults.asList();
         final SearchPhaseController.ReducedQueryPhase reducedQueryPhase = resultConsumer.reduce();
-        // Usually when there is a single shard, we force the search type QUERY_THEN_FETCH. But when there's kNN, we might
+        // Usually when there is a single shard, we force the search type QUERY_THEN_FETCH. But when there's kNN or hybrid, we might
         // still use DFS_QUERY_THEN_FETCH, which does not perform the "query and fetch" optimization during the query phase.
-        final boolean queryAndFetchOptimization = queryResults.length() == 1 && context.getRequest().hasKnnSearch() == false;
+        final boolean queryAndFetchOptimization = queryResults.length() == 1 && context.getRequest().hasKnnSearch() == false
+            && context.getRequest().hasHybridSearch() == false;
         final Runnable finishPhase = () -> moveToNextPhase(
             queryResults,
             reducedQueryPhase,

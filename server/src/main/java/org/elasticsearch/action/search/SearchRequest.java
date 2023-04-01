@@ -745,6 +745,13 @@ public class SearchRequest extends ActionRequest implements IndicesRequest.Repla
         return source != null && source.knnSearch().isEmpty() == false;
     }
 
+    /**
+     * @return true if the request contains hybrid search
+     */
+    public boolean hasHybridSearch() {
+        return source != null && source.hybridSearch() != null;
+    }
+
     public int resolveTrackTotalHitsUpTo() {
         return resolveTrackTotalHitsUpTo(scroll, source);
     }

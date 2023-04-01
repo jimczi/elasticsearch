@@ -491,8 +491,8 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
             searchRequest.searchType(QUERY_THEN_FETCH);
         }
 
-        // if there's a kNN search, always use DFS_QUERY_THEN_FETCH
-        if (searchRequest.hasKnnSearch()) {
+        // if there's a kNN or an hybrid search, always use DFS_QUERY_THEN_FETCH
+        if (searchRequest.hasKnnSearch() || searchRequest.hasHybridSearch()) {
             searchRequest.searchType(DFS_QUERY_THEN_FETCH);
         }
     }

@@ -8,6 +8,8 @@
 package org.elasticsearch.action.search;
 
 import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.TopDocs;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.search.SearchPhaseResult;
 import org.elasticsearch.search.SearchShardTarget;
@@ -18,11 +20,14 @@ import org.elasticsearch.search.dfs.DfsSearchResult;
 import org.elasticsearch.search.internal.ShardSearchRequest;
 import org.elasticsearch.search.query.QuerySearchRequest;
 import org.elasticsearch.search.query.QuerySearchResult;
+import org.elasticsearch.search.vectors.HybridSearchBuilder;
 import org.elasticsearch.search.vectors.KnnScoreDocQueryBuilder;
+import org.elasticsearch.search.vectors.KnnSearchBuilder;
 import org.elasticsearch.transport.Transport;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.function.Function;
@@ -39,6 +44,7 @@ final class DfsQueryPhase extends SearchPhase {
     private final List<DfsSearchResult> searchResults;
     private final AggregatedDfs dfs;
     private final List<DfsKnnResults> knnResults;
+    private final TopDocs hybridResults;
     private final Function<ArraySearchPhaseResults<SearchPhaseResult>, SearchPhase> nextPhaseFactory;
     private final SearchPhaseContext context;
     private final SearchTransportService searchTransportService;
@@ -48,6 +54,7 @@ final class DfsQueryPhase extends SearchPhase {
         List<DfsSearchResult> searchResults,
         AggregatedDfs dfs,
         List<DfsKnnResults> knnResults,
+        TopDocs hybridResults,
         QueryPhaseResultConsumer queryResult,
         Function<ArraySearchPhaseResults<SearchPhaseResult>, SearchPhase> nextPhaseFactory,
         SearchPhaseContext context
@@ -58,6 +65,7 @@ final class DfsQueryPhase extends SearchPhase {
         this.searchResults = searchResults;
         this.dfs = dfs;
         this.knnResults = knnResults;
+        this.hybridResults = hybridResults;
         this.nextPhaseFactory = nextPhaseFactory;
         this.context = context;
         this.searchTransportService = context.getSearchTransport();
@@ -93,7 +101,7 @@ final class DfsQueryPhase extends SearchPhase {
                 connection,
                 querySearchRequest,
                 context.getTask(),
-                new SearchActionListener<QuerySearchResult>(shardTarget, shardIndex) {
+                new SearchActionListener<>(shardTarget, shardIndex) {
 
                     @Override
                     protected void innerOnResponse(QuerySearchResult response) {
@@ -130,20 +138,7 @@ final class DfsQueryPhase extends SearchPhase {
         }
     }
 
-    private ShardSearchRequest rewriteShardSearchRequest(ShardSearchRequest request) {
-        SearchSourceBuilder source = request.source();
-        if (source == null || source.knnSearch().isEmpty()) {
-            return request;
-        }
-
-        List<ScoreDoc> scoreDocs = new ArrayList<>();
-        for (DfsKnnResults dfsKnnResults : knnResults) {
-            for (ScoreDoc scoreDoc : dfsKnnResults.scoreDocs()) {
-                if (scoreDoc.shardIndex == request.shardRequestIndex()) {
-                    scoreDocs.add(scoreDoc);
-                }
-            }
-        }
+    private KnnScoreDocQueryBuilder createScoreDocQueryBuilder(List<ScoreDoc> scoreDocs) {
         scoreDocs.sort(Comparator.comparingInt(scoreDoc -> scoreDoc.doc));
         // It is possible that the different results refer to the same doc.
         for (int i = 0; i < scoreDocs.size() - 1; i++) {
@@ -160,15 +155,57 @@ final class DfsQueryPhase extends SearchPhase {
                 scoreDocs.subList(i + 1, j).clear();
             }
         }
-        KnnScoreDocQueryBuilder knnQuery = new KnnScoreDocQueryBuilder(scoreDocs.toArray(new ScoreDoc[0]));
+        return new KnnScoreDocQueryBuilder(scoreDocs.toArray(new ScoreDoc[0]));
+    }
 
-        SearchSourceBuilder newSource = source.shallowCopy().knnSearch(List.of());
-        if (source.query() == null) {
-            newSource.query(knnQuery);
-        } else {
-            newSource.query(new BoolQueryBuilder().should(knnQuery).should(source.query()));
+    private ShardSearchRequest rewriteShardSearchRequest(ShardSearchRequest request) {
+        SearchSourceBuilder source = request.source();
+        if (source == null || (source.knnSearch().isEmpty() && source.hybridSearch() == null)) {
+            return request;
         }
 
+        List<KnnSearchBuilder> knnSearchList = source.knnSearch();
+        SearchSourceBuilder newSource = source.shallowCopy().knnSearch(List.of());
+        if (knnSearchList.isEmpty() == false) {
+            List<ScoreDoc> knnScoreDocs = new ArrayList<>();
+            for (DfsKnnResults dfsKnnResults : knnResults) {
+                for (ScoreDoc scoreDoc : dfsKnnResults.scoreDocs()) {
+                    if (scoreDoc.shardIndex == request.shardRequestIndex()) {
+                        knnScoreDocs.add(scoreDoc);
+                    }
+                }
+            }
+            if (knnScoreDocs.size() > 0) {
+                KnnScoreDocQueryBuilder knnQuery = createScoreDocQueryBuilder(knnScoreDocs);
+                if (newSource.query() == null) {
+                    newSource.query(knnQuery);
+                } else {
+                    newSource.query(new BoolQueryBuilder().should(knnQuery).should(source.query()));
+                }
+            }
+        }
+
+        HybridSearchBuilder hybridSearch = source.hybridSearch();
+        newSource = newSource.shallowCopy().hybridSearch(null);
+        if (hybridSearch != null) {
+            List<ScoreDoc> hybridScoreDocs = new ArrayList<>();
+            for (ScoreDoc scoreDoc : hybridResults.scoreDocs) {
+                if (scoreDoc.shardIndex == request.shardRequestIndex()) {
+                    hybridScoreDocs.add(scoreDoc);
+                }
+            }
+            if (hybridScoreDocs.size() > 0) {
+                if (hybridResults != null) {
+                    KnnScoreDocQueryBuilder hybridQuery =
+                        createScoreDocQueryBuilder(Arrays.asList(hybridResults.scoreDocs));
+                    if (newSource.query() == null) {
+                        newSource.query(hybridQuery);
+                    } else {
+                        newSource.query(new BoolQueryBuilder().should(hybridQuery).should(source.query()));
+                    }
+                }
+            }
+        }
         request.source(newSource);
         return request;
     }

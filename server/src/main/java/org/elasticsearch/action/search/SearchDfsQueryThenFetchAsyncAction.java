@@ -9,6 +9,7 @@
 package org.elasticsearch.action.search;
 
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.search.TopDocs;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.routing.GroupShardsIterator;
@@ -88,11 +89,13 @@ final class SearchDfsQueryThenFetchAsyncAction extends AbstractSearchAsyncAction
         final List<DfsSearchResult> dfsSearchResults = results.getAtomicArray().asList();
         final AggregatedDfs aggregatedDfs = SearchPhaseController.aggregateDfs(dfsSearchResults);
         final List<DfsKnnResults> mergedKnnResults = SearchPhaseController.mergeKnnResults(getRequest(), dfsSearchResults);
+        final TopDocs mergedHybridResults = SearchPhaseController.mergeHybridResults(getRequest(), dfsSearchResults);;
 
         return new DfsQueryPhase(
             dfsSearchResults,
             aggregatedDfs,
             mergedKnnResults,
+            mergedHybridResults,
             queryPhaseResultConsumer,
             (queryResults) -> new FetchSearchPhase(queryResults, aggregatedDfs, context),
             context

@@ -13,10 +13,15 @@ import org.apache.lucene.search.CollectionStatistics;
 import org.apache.lucene.search.Collector;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.ScoreMode;
+import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.TermStatistics;
+import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TopScoreDocCollector;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.index.query.ParsedQuery;
+import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.internal.SearchContext;
@@ -50,6 +55,7 @@ public class DfsPhase {
         try {
             collectStatistics(context);
             executeKnnVectorQuery(context);
+            executeHybridQuery(context);
 
             if (context.getProfilers() != null) {
                 context.dfsResult().profileResult(context.getProfilers().getDfsProfiler().buildDfsPhaseResults());
@@ -155,6 +161,26 @@ public class DfsPhase {
             .termsStatistics(terms, termStatistics)
             .fieldStatistics(fieldStatistics)
             .maxDoc(context.searcher().getIndexReader().maxDoc());
+    }
+
+    private void executeHybridQuery(SearchContext context) throws IOException {
+        SearchSourceBuilder source = context.request().source();
+        if (source == null || source.hybridSearch() == null) {
+            return;
+        }
+
+        SearchExecutionContext searchContext = context.getSearchExecutionContext();
+        List<QueryBuilder> queries = source.hybridSearch().getQueries();
+        List<ScoreDoc[]> resultList = new ArrayList<>();
+        for (QueryBuilder queryBuilder : queries) {
+            Query query = searchContext.toQuery(queryBuilder).query();
+            TopDocs topDocs = searchContext.searcher().search(query, source.hybridSearch().limit(), Sort.RELEVANCE);
+            for (ScoreDoc scoreDoc : topDocs.scoreDocs) {
+                scoreDoc.score = 42; // to check the logic
+            }
+            resultList.add(topDocs.scoreDocs);
+        }
+        context.dfsResult().hybridResults(new DfsHybridResults(resultList));
     }
 
     private void executeKnnVectorQuery(SearchContext context) throws IOException {

@@ -34,6 +34,7 @@ public class DfsSearchResult extends SearchPhaseResult {
     private TermStatistics[] termStatistics;
     private Map<String, CollectionStatistics> fieldStatistics = new HashMap<>();
     private List<DfsKnnResults> knnResults;
+    private DfsHybridResults hybridResults;
     private int maxDoc;
     private SearchProfileDfsPhaseResult searchProfileDfsPhaseResult;
 
@@ -66,6 +67,17 @@ public class DfsSearchResult extends SearchPhaseResult {
         }
         if (in.getTransportVersion().onOrAfter(TransportVersion.V_8_6_0)) {
             searchProfileDfsPhaseResult = in.readOptionalWriteable(SearchProfileDfsPhaseResult::new);
+        }
+        if (in.getTransportVersion().onOrAfter(TransportVersion.V_8_4_0)) {
+            if (in.getTransportVersion().onOrAfter(TransportVersion.V_8_7_0)) {
+                knnResults = in.readOptionalList(DfsKnnResults::new);
+            } else {
+                DfsKnnResults results = in.readOptionalWriteable(DfsKnnResults::new);
+                knnResults = results != null ? List.of(results) : List.of();
+            }
+        }
+        if (in.getTransportVersion().onOrAfter(TransportVersion.V_8_8_0)) {
+            hybridResults = in.readOptionalWriteable(DfsHybridResults::new);
         }
     }
 
@@ -100,6 +112,11 @@ public class DfsSearchResult extends SearchPhaseResult {
         return this;
     }
 
+    public DfsSearchResult hybridResults(DfsHybridResults hybridResults) {
+        this.hybridResults = hybridResults;
+        return this;
+    }
+
     public DfsSearchResult profileResult(SearchProfileDfsPhaseResult searchProfileDfsPhaseResult) {
         this.searchProfileDfsPhaseResult = searchProfileDfsPhaseResult;
         return this;
@@ -119,6 +136,10 @@ public class DfsSearchResult extends SearchPhaseResult {
 
     public List<DfsKnnResults> knnResults() {
         return knnResults;
+    }
+
+    public DfsHybridResults hybridResults() {
+        return hybridResults;
     }
 
     public SearchProfileDfsPhaseResult searchProfileDfsPhaseResult() {
@@ -154,6 +175,10 @@ public class DfsSearchResult extends SearchPhaseResult {
         }
         if (out.getTransportVersion().onOrAfter(TransportVersion.V_8_6_0)) {
             out.writeOptionalWriteable(searchProfileDfsPhaseResult);
+        }
+
+        if (out.getTransportVersion().onOrAfter(TransportVersion.V_8_8_0)) {
+            out.writeOptionalWriteable(hybridResults);
         }
     }
 
