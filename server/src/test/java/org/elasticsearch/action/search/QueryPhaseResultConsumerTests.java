@@ -52,7 +52,13 @@ public class QueryPhaseResultConsumerTests extends ESTestCase {
         searchPhaseController = new SearchPhaseController((t, s) -> new AggregationReduceContext.Builder() {
             @Override
             public AggregationReduceContext forPartialReduction() {
-                return new AggregationReduceContext.ForPartial(BigArrays.NON_RECYCLING_INSTANCE, null, t, mock(AggregationBuilder.class));
+                return new AggregationReduceContext.ForPartial(
+                    BigArrays.NON_RECYCLING_INSTANCE,
+                    null,
+                    t,
+                    mock(AggregationBuilder.class),
+                    b -> {}
+                );
             }
 
             public AggregationReduceContext forFinalReduction() {

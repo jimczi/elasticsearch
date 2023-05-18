@@ -383,7 +383,8 @@ public class InternalMultiTermsTests extends InternalAggregationTestCase<Interna
             bigArrays,
             mockScriptService,
             () -> false,
-            mock(AggregationBuilder.class)
+            mock(AggregationBuilder.class),
+            b -> {}
         );
 
         InternalMultiTerms result = (InternalMultiTerms) terms1.reduce(List.of(terms1, terms2), context);

@@ -71,7 +71,11 @@ public class TermsReduceBenchmark {
     private final SearchPhaseController controller = new SearchPhaseController((task, req) -> new AggregationReduceContext.Builder() {
         @Override
         public AggregationReduceContext forPartialReduction() {
-            return new AggregationReduceContext.ForPartial(null, null, task, builder);
+            final MultiBucketConsumerService.MultiBucketConsumer bucketConsumer = new MultiBucketConsumerService.MultiBucketConsumer(
+                Integer.MAX_VALUE,
+                new NoneCircuitBreakerService().getBreaker(CircuitBreaker.REQUEST)
+            );
+            return new AggregationReduceContext.ForPartial(null, null, task, builder, bucketConsumer);
         }
 
         @Override

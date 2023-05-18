@@ -620,11 +620,16 @@ public abstract class AggregatorTestCase extends ESTestCase {
                 Collections.shuffle(internalAggs, random());
                 int r = randomIntBetween(1, toReduceSize);
                 List<InternalAggregation> toReduce = internalAggs.subList(0, r);
+                MultiBucketConsumer reduceBucketConsumer = new MultiBucketConsumer(
+                    Integer.MAX_VALUE,
+                    new NoneCircuitBreakerService().getBreaker(CircuitBreaker.REQUEST)
+                );
                 AggregationReduceContext reduceContext = new AggregationReduceContext.ForPartial(
                     bigArraysForReduction,
                     getMockScriptService(),
                     () -> false,
-                    builder
+                    builder,
+                    reduceBucketConsumer
                 );
                 A reduced = (A) internalAggs.get(0).reduce(toReduce, reduceContext);
                 internalAggs = new ArrayList<>(internalAggs.subList(r, toReduceSize));
@@ -633,7 +638,7 @@ public abstract class AggregatorTestCase extends ESTestCase {
             }
 
             // now do the final reduce
-            MultiBucketConsumer reduceBucketConsumer = new MultiBucketConsumer(
+            MultiBucketConsumer finalReduceBucketConsumer = new MultiBucketConsumer(
                 maxBucket,
                 new NoneCircuitBreakerService().getBreaker(CircuitBreaker.REQUEST)
             );
@@ -642,7 +647,7 @@ public abstract class AggregatorTestCase extends ESTestCase {
                 getMockScriptService(),
                 () -> false,
                 builder,
-                reduceBucketConsumer,
+                finalReduceBucketConsumer,
                 pipelines
             );
 
@@ -657,7 +662,7 @@ public abstract class AggregatorTestCase extends ESTestCase {
             for (PipelineAggregator pipelineAggregator : pipelines.aggregators()) {
                 internalAgg = (A) pipelineAggregator.reduce(internalAgg, reduceContext);
             }
-            doAssertReducedMultiBucketConsumer(internalAgg, reduceBucketConsumer);
+            doAssertReducedMultiBucketConsumer(internalAgg, finalReduceBucketConsumer);
             assertRoundTrip(internalAgg);
             if (builder instanceof ValuesSourceAggregationBuilder.MetricsAggregationBuilder<?>) {
                 verifyMetricNames((ValuesSourceAggregationBuilder.MetricsAggregationBuilder<?>) builder, internalAgg);

@@ -189,7 +189,7 @@ public abstract class InternalAggregationTestCase<T extends InternalAggregation>
         return new AggregationReduceContext.Builder() {
             @Override
             public AggregationReduceContext forPartialReduction() {
-                return new AggregationReduceContext.ForPartial(BigArrays.NON_RECYCLING_INSTANCE, null, () -> false, aggs);
+                return new AggregationReduceContext.ForPartial(BigArrays.NON_RECYCLING_INSTANCE, null, () -> false, aggs, b-> {});
             }
 
             @Override
@@ -207,7 +207,7 @@ public abstract class InternalAggregationTestCase<T extends InternalAggregation>
         return new AggregationReduceContext.Builder() {
             @Override
             public AggregationReduceContext forPartialReduction() {
-                return new AggregationReduceContext.ForPartial(BigArrays.NON_RECYCLING_INSTANCE, null, () -> false, agg);
+                return new AggregationReduceContext.ForPartial(BigArrays.NON_RECYCLING_INSTANCE, null, () -> false, agg, b -> {});
             }
 
             @Override
@@ -426,14 +426,22 @@ public abstract class InternalAggregationTestCase<T extends InternalAggregation>
             List<InternalAggregation> toPartialReduce = toReduce.subList(0, r);
             // Sort aggs so that unmapped come last. This mimicks the behavior of InternalAggregations.reduce()
             toPartialReduce.sort(INTERNAL_AGG_COMPARATOR);
+            MultiBucketConsumer bucketConsumer = new MultiBucketConsumer(
+                Integer.MAX_VALUE,
+                new NoneCircuitBreakerService().getBreaker(CircuitBreaker.REQUEST)
+            );
             AggregationReduceContext context = new AggregationReduceContext.ForPartial(
                 bigArrays,
                 mockScriptService,
                 () -> false,
-                inputs.builder()
+                inputs.builder(),
+                bucketConsumer
+
             );
             @SuppressWarnings("unchecked")
             T reduced = (T) toPartialReduce.get(0).reduce(toPartialReduce, context);
+
+            doAssertReducedMultiBucketConsumer(reduced, bucketConsumer);
             int initialBucketCount = 0;
             for (InternalAggregation internalAggregation : toPartialReduce) {
                 initialBucketCount += countInnerBucket(internalAggregation);

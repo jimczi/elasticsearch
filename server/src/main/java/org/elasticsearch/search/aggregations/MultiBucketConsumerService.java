@@ -134,6 +134,10 @@ public class MultiBucketConsumerService {
         return new MultiBucketConsumer(maxBucket, breaker);
     }
 
+    public MultiBucketConsumer createNoLimit() {
+        return new MultiBucketConsumer(Integer.MAX_VALUE, breaker);
+    }
+
     public int getLimit() {
         return maxBucket;
     }
