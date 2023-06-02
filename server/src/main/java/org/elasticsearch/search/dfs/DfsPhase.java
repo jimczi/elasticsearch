@@ -177,6 +177,8 @@ public class DfsPhase {
         }
         List<DfsKnnResults> knnResults = new ArrayList<>(knnVectorQueryBuilders.size());
         for (int i = 0; i < knnSearch.size(); i++) {
+            String knnField = knnVectorQueryBuilders.get(i).getFieldName();
+            String knnNestedPath = searchExecutionContext.nestedLookup().getNestedParent(knnField);
             Query knnQuery = searchExecutionContext.toQuery(knnVectorQueryBuilders.get(i)).query();
             TopScoreDocCollector topScoreDocCollector = TopScoreDocCollector.create(knnSearch.get(i).k(), Integer.MAX_VALUE);
             CollectorManager<Collector, Void> collectorManager = new SingleThreadCollectorManager(topScoreDocCollector);
@@ -190,7 +192,7 @@ public class DfsPhase {
                 context.searcher().setProfiler(knnProfiler);
             }
             context.searcher().search(knnQuery, collectorManager);
-            knnResults.add(new DfsKnnResults(topScoreDocCollector.topDocs().scoreDocs));
+            knnResults.add(new DfsKnnResults(knnNestedPath, topScoreDocCollector.topDocs().scoreDocs));
         }
         // Set profiler back after running KNN searches
         if (context.getProfilers() != null) {

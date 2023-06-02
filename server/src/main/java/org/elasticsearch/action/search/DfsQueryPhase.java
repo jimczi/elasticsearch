@@ -8,7 +8,10 @@
 package org.elasticsearch.action.search;
 
 import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.join.ScoreMode;
 import org.elasticsearch.index.query.BoolQueryBuilder;
+import org.elasticsearch.index.query.InnerHitBuilder;
+import org.elasticsearch.index.query.NestedQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.search.SearchPhaseResult;
 import org.elasticsearch.search.SearchShardTarget;
@@ -138,75 +141,36 @@ final class DfsQueryPhase extends SearchPhase {
             return request;
         }
 
-        if (source.rankBuilder() == null) {
-            // this path will use linear combination if there are
-            // multiple knn queries to combine all knn queries into
-            // a single query per shard
-
+        List<QueryBuilder> queryBuilders = new ArrayList<>();
+        if (source.query() != null) {
+            queryBuilders.add(source.query());
+        }
+        for (int i = 0; i < knnResults.size(); i++) {
+            DfsKnnResults dfsKnnResults = knnResults.get(i);
             List<ScoreDoc> scoreDocs = new ArrayList<>();
-            for (DfsKnnResults dfsKnnResults : knnResults) {
-                for (ScoreDoc scoreDoc : dfsKnnResults.scoreDocs()) {
-                    if (scoreDoc.shardIndex == request.shardRequestIndex()) {
-                        scoreDocs.add(scoreDoc);
-                    }
+            for (ScoreDoc scoreDoc : dfsKnnResults.scoreDocs()) {
+                if (scoreDoc.shardIndex == request.shardRequestIndex()) {
+                    scoreDocs.add(scoreDoc);
                 }
             }
             scoreDocs.sort(Comparator.comparingInt(scoreDoc -> scoreDoc.doc));
-            // It is possible that the different results refer to the same doc.
-            for (int i = 0; i < scoreDocs.size() - 1; i++) {
-                ScoreDoc scoreDoc = scoreDocs.get(i);
-                int j = i + 1;
-                for (; j < scoreDocs.size(); j++) {
-                    ScoreDoc otherScoreDoc = scoreDocs.get(j);
-                    if (otherScoreDoc.doc != scoreDoc.doc) {
-                        break;
-                    }
-                    scoreDoc.score += otherScoreDoc.score;
-                }
-                if (j > i + 1) {
-                    scoreDocs.subList(i + 1, j).clear();
-                }
+            String nestedPath = dfsKnnResults.getNestedPath();
+            QueryBuilder query = new KnnScoreDocQueryBuilder(scoreDocs.toArray(new ScoreDoc[0]));
+            if (nestedPath != null) {
+                query = new NestedQueryBuilder(nestedPath, query, ScoreMode.Max)
+                        .innerHit(source.knnSearch().get(i).innerHit());
             }
-
-            KnnScoreDocQueryBuilder knnQuery = new KnnScoreDocQueryBuilder(scoreDocs.toArray(new ScoreDoc[0]));
-            SearchSourceBuilder newSource = source.shallowCopy().knnSearch(List.of());
-            if (source.query() == null) {
-                newSource.query(knnQuery);
-            } else {
-                newSource.query(new BoolQueryBuilder().should(knnQuery).should(source.query()));
-            }
-            request.source(newSource);
-        } else {
-            // this path will keep knn queries separate for ranking per shard
-            // if there are multiple knn queries
-
-            List<QueryBuilder> rankQueryBuilders = new ArrayList<>();
-            if (source.query() != null) {
-                rankQueryBuilders.add(source.query());
-            }
-
-            for (DfsKnnResults dfsKnnResults : knnResults) {
-                List<ScoreDoc> scoreDocs = new ArrayList<>();
-                for (ScoreDoc scoreDoc : dfsKnnResults.scoreDocs()) {
-                    if (scoreDoc.shardIndex == request.shardRequestIndex()) {
-                        scoreDocs.add(scoreDoc);
-                    }
-                }
-                scoreDocs.sort(Comparator.comparingInt(scoreDoc -> scoreDoc.doc));
-                KnnScoreDocQueryBuilder knnQuery = new KnnScoreDocQueryBuilder(scoreDocs.toArray(new ScoreDoc[0]));
-                rankQueryBuilders.add(knnQuery);
-            }
-
-            BoolQueryBuilder searchQuery = new BoolQueryBuilder();
-            for (QueryBuilder queryBuilder : rankQueryBuilders) {
-                searchQuery.should(queryBuilder);
-            }
-
-            SearchSourceBuilder newSource = source.shallowCopy().query(searchQuery).knnSearch(List.of());
-            request.source(newSource);
-            request.rankQueryBuilders(rankQueryBuilders);
+            queryBuilders.add(query);
         }
-
+        BoolQueryBuilder searchQuery = new BoolQueryBuilder();
+        for (QueryBuilder queryBuilder : queryBuilders) {
+            searchQuery.should(queryBuilder);
+        }
+        SearchSourceBuilder newSource = source.shallowCopy().query(searchQuery).knnSearch(List.of());
+        request.source(newSource);
+        if (source.rankBuilder() != null) {
+            request.rankQueryBuilders(queryBuilders);
+        }
         return request;
     }
 }
