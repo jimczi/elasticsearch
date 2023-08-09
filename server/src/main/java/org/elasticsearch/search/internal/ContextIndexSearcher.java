@@ -37,6 +37,7 @@ import org.apache.lucene.util.BitSetIterator;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.SparseFixedBitSet;
 import org.apache.lucene.util.ThreadInterruptedException;
+import org.elasticsearch.common.CheckedSupplier;
 import org.elasticsearch.common.util.concurrent.FutureUtils;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.lucene.util.CombinedBitSet;
@@ -349,40 +350,35 @@ public class ContextIndexSearcher extends IndexSearcher implements Releasable {
             assert leafContexts.isEmpty();
             return collectorManager.reduce(Collections.singletonList(firstCollector));
         } else {
-            final List<C> collectors = new ArrayList<>(leafSlices.length);
-            collectors.add(firstCollector);
-            final ScoreMode scoreMode = firstCollector.scoreMode();
+            final List<CheckedSupplier<C, IOException>> collectors = new ArrayList<>(leafSlices.length);
             for (int i = 1; i < leafSlices.length; ++i) {
-                final C collector = collectorManager.newCollector();
-                collectors.add(collector);
-                if (scoreMode != collector.scoreMode()) {
-                    throw new IllegalStateException("CollectorManager does not always produce collectors with the same score mode");
-                }
+                collectors.add(() -> collectorManager.newCollector());
             }
             final List<RunnableFuture<C>> listTasks = new ArrayList<>();
             for (int i = 0; i < leafSlices.length; ++i) {
                 final LeafReaderContext[] leaves = leafSlices[i].leaves;
-                final C collector = collectors.get(i);
                 AtomicInteger state = new AtomicInteger(0);
+                final CheckedSupplier<C, IOException> collectorSupplier = collectors.get(i);
                 RunnableFuture<C> task = new FutureTask<>(() -> {
                     if (state.compareAndSet(0, 1)) {
                         // A slice throws exception or times out: cancel all the tasks, to prevent slices that haven't started yet from
                         // starting and performing needless computation.
                         // TODO we will also want to cancel tasks that have already started, reusing the timeout mechanism
                         try {
+                            final C collector = collectorSupplier.get();
                             search(Arrays.asList(leaves), weight, collector);
                             if (timeExceeded) {
                                 for (Future<?> future : listTasks) {
                                     FutureUtils.cancel(future);
                                 }
                             }
+                            return collector;
                         } catch (Exception e) {
                             for (Future<?> future : listTasks) {
                                 FutureUtils.cancel(future);
                             }
                             throw e;
                         }
-                        return collector;
                     }
                     throw new CancellationException();
                 }) {
