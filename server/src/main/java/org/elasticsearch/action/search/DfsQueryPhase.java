@@ -7,10 +7,22 @@
  */
 package org.elasticsearch.action.search;
 
+import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.queries.function.FunctionQuery;
+import org.apache.lucene.queries.function.valuesource.ConstKnnFloatValueSource;
+import org.apache.lucene.queries.function.valuesource.FloatKnnVectorFieldSource;
+import org.apache.lucene.queries.function.valuesource.FloatVectorSimilarityFunction;
+import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.join.ScoreMode;
+import org.elasticsearch.TransportVersion;
+import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.index.query.AbstractQueryBuilder;
+import org.elasticsearch.index.query.InnerHitContextBuilder;
+import org.elasticsearch.index.query.InnerHitBuilder;
 import org.elasticsearch.index.query.NestedQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.search.SearchPhaseResult;
 import org.elasticsearch.search.SearchShardTarget;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
@@ -22,11 +34,15 @@ import org.elasticsearch.search.internal.ShardSearchRequest;
 import org.elasticsearch.search.query.QuerySearchRequest;
 import org.elasticsearch.search.query.QuerySearchResult;
 import org.elasticsearch.search.vectors.KnnScoreDocQueryBuilder;
+import org.elasticsearch.search.vectors.KnnSearchBuilder;
 import org.elasticsearch.transport.Transport;
+import org.elasticsearch.xcontent.XContentBuilder;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 
 /**
@@ -153,7 +169,10 @@ final class DfsQueryPhase extends SearchPhase {
             String nestedPath = dfsKnnResults.getNestedPath();
             QueryBuilder query = new KnnScoreDocQueryBuilder(scoreDocs.toArray(new ScoreDoc[0]));
             if (nestedPath != null) {
-                query = new NestedQueryBuilder(nestedPath, query, ScoreMode.Max).innerHit(source.knnSearch().get(i).innerHit());
+                NestedQueryBuilder delegate =
+                        new NestedQueryBuilder(nestedPath, query, ScoreMode.Max).innerHit(source.knnSearch().get(i).innerHit());
+                // TODO: extract the knn search correctly
+                query = new KnnNestedQueryBuilder(source.knnSearch().get(0), delegate);
             }
             subSearchSourceBuilders.add(new SubSearchSourceBuilder(query));
             i++;
@@ -164,4 +183,116 @@ final class DfsQueryPhase extends SearchPhase {
 
         return request;
     }
+
+    private static class KnnNestedQueryBuilder extends AbstractQueryBuilder<KnnNestedQueryBuilder> {
+        private final KnnSearchBuilder knnQuery;
+        private final NestedQueryBuilder delegate;
+
+        private KnnNestedQueryBuilder(KnnSearchBuilder knnQuery, NestedQueryBuilder nested) {
+            this.knnQuery = knnQuery;
+            this.delegate = nested;
+        }
+
+        @Override
+        protected void doWriteTo(StreamOutput out) throws IOException {
+            knnQuery.writeTo(out);
+            delegate.writeTo(out);
+        }
+
+        @Override
+        protected void doXContent(XContentBuilder builder, Params params) throws IOException {
+            throw new IllegalStateException("");
+        }
+
+        @Override
+        protected Query doToQuery(SearchExecutionContext context) throws IOException {
+            return delegate.toQuery(context);
+        }
+
+        @Override
+        protected boolean doEquals(KnnNestedQueryBuilder other) {
+            return delegate.equals(other);
+        }
+
+        @Override
+        protected int doHashCode() {
+            return delegate.hashCode();
+        }
+
+        @Override
+        protected void extractInnerHitBuilders(Map<String, InnerHitContextBuilder> innerHits) {
+            if (delegate.innerHit() != null) {
+                InnerHitBuilder innerHitBuilder = delegate.innerHit();
+                String name = innerHitBuilder.getName() != null ? innerHitBuilder.getName() : delegate.getPath();
+                if (innerHits.containsKey(name)) {
+                    throw new IllegalArgumentException("[inner_hits] already contains an entry for key [" + name + "]");
+                }
+
+                QueryBuilder query = new ExactKnnQueryBuilder(knnQuery.getField(), knnQuery.getQueryVector());
+                InnerHitContextBuilder innerHitContextBuilder =
+                        new NestedQueryBuilder.NestedInnerHitContextBuilder(delegate.getPath(), query, innerHitBuilder, Map.of());
+                innerHits.put(name, innerHitContextBuilder);
+            }
+        }
+
+        @Override
+        public String getWriteableName() {
+            return "knn_nested";
+        }
+
+        @Override
+        public TransportVersion getMinimalSupportedVersion() {
+            return TransportVersion.current();
+        }
+    };
+
+    // TODO: Replace with a KnnVectorQueryBuilder that forces exact search
+    private static class ExactKnnQueryBuilder extends AbstractQueryBuilder<ExactKnnQueryBuilder> {
+        private final String field;
+        private final float[] queryVector;
+
+        private ExactKnnQueryBuilder(String field, float[] queryVector) {
+            this.field = field;
+            this.queryVector = queryVector;
+        }
+
+        @Override
+        protected void doWriteTo(StreamOutput out) throws IOException {
+            throw new IllegalStateException("");
+        }
+
+        @Override
+        protected void doXContent(XContentBuilder builder, Params params) throws IOException {
+            throw new IllegalStateException("");
+        }
+
+        @Override
+        protected Query doToQuery(SearchExecutionContext context) throws IOException {
+            var v1 = new FloatKnnVectorFieldSource(field);
+            var v2 = new ConstKnnFloatValueSource(queryVector);
+            return new FunctionQuery(new FloatVectorSimilarityFunction(VectorSimilarityFunction.COSINE, v1, v2));
+        }
+
+        @Override
+        protected boolean doEquals(ExactKnnQueryBuilder other) {
+            return false;
+        }
+
+        @Override
+        protected int doHashCode() {
+            throw new IllegalStateException("");
+        }
+
+        @Override
+        public String getWriteableName() {
+            throw new IllegalStateException("");
+        }
+
+        @Override
+        public TransportVersion getMinimalSupportedVersion() {
+            throw new IllegalStateException("");
+        }
+    };
+
+
 }

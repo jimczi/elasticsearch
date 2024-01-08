@@ -103,6 +103,10 @@ public class NestedQueryBuilder extends AbstractQueryBuilder<NestedQueryBuilder>
         out.writeBoolean(ignoreUnmapped);
     }
 
+    public String getPath() {
+        return path;
+    }
+
     /**
      * Returns the nested query to execute.
      */
@@ -326,10 +330,10 @@ public class NestedQueryBuilder extends AbstractQueryBuilder<NestedQueryBuilder>
         }
     }
 
-    static class NestedInnerHitContextBuilder extends InnerHitContextBuilder {
+    public static class NestedInnerHitContextBuilder extends InnerHitContextBuilder {
         private final String path;
 
-        NestedInnerHitContextBuilder(
+        public NestedInnerHitContextBuilder(
             String path,
             QueryBuilder query,
             InnerHitBuilder innerHitBuilder,
