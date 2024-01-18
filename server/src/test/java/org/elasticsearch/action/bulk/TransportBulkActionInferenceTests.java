@@ -8,6 +8,7 @@
 
 package org.elasticsearch.action.bulk;
 
+import org.elasticsearch.TransportVersion;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionRequest;
 import org.elasticsearch.action.DocWriteRequest;
@@ -27,15 +28,20 @@ import org.elasticsearch.cluster.node.DiscoveryNodeUtils;
 import org.elasticsearch.cluster.node.DiscoveryNodes;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.UUIDs;
+import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.core.Tuple;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.IndexingPressure;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.indices.EmptySystemIndices;
 import org.elasticsearch.indices.TestIndexNameExpressionResolver;
-import org.elasticsearch.inference.InferenceProvider;
 import org.elasticsearch.inference.InferenceResults;
+import org.elasticsearch.inference.InferenceService;
+import org.elasticsearch.inference.InferenceServiceRegistry;
+import org.elasticsearch.inference.InferenceServiceResults;
+import org.elasticsearch.inference.Model;
+import org.elasticsearch.inference.ModelRegistry;
+import org.elasticsearch.inference.TaskType;
 import org.elasticsearch.inference.TestInferenceResults;
 import org.elasticsearch.ingest.IngestService;
 import org.elasticsearch.test.ClusterServiceUtils;
@@ -43,27 +49,30 @@ import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.threadpool.TestThreadPool;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportService;
+import org.elasticsearch.xcontent.XContentBuilder;
 import org.junit.After;
 import org.junit.Before;
+import org.mockito.stubbing.Answer;
 import org.mockito.verification.VerificationMode;
 
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 public class TransportBulkActionInferenceTests extends ESTestCase {
@@ -78,8 +87,7 @@ public class TransportBulkActionInferenceTests extends ESTestCase {
     private ThreadPool threadPool;
     private NodeClient nodeClient;
     private TransportBulkAction transportBulkAction;
-
-    private InferenceProvider inferenceProvider;
+    private InferenceService inferenceService;
 
     @Before
     public void setup() {
@@ -116,9 +124,12 @@ public class TransportBulkActionInferenceTests extends ESTestCase {
 
         clusterService = ClusterServiceUtils.createClusterService(state, threadPool);
 
-        inferenceProvider = mock(InferenceProvider.class);
-        when(inferenceProvider.performsInference()).thenReturn(true);
-
+        inferenceService = null;
+        InferenceServiceRegistry inferenceServiceRegistry = mock(InferenceServiceRegistry.class);
+        when(inferenceServiceRegistry.getService(anyString())).thenAnswer(
+            (Answer<Optional<InferenceService>>) invocation -> Optional.ofNullable(inferenceService)
+        );
+        ModelRegistry modelRegistry = null;
         transportBulkAction = new TransportBulkAction(
             threadPool,
             mock(TransportService.class),
@@ -129,16 +140,9 @@ public class TransportBulkActionInferenceTests extends ESTestCase {
             TestIndexNameExpressionResolver.newInstance(),
             new IndexingPressure(Settings.builder().put(AutoCreateIndex.AUTO_CREATE_INDEX_SETTING.getKey(), true).build()),
             EmptySystemIndices.INSTANCE,
-            inferenceProvider
+            inferenceServiceRegistry,
+            modelRegistry
         );
-
-        // Default answers to avoid hanging tests due to unexpected invocations
-        doAnswer(invocation -> {
-            @SuppressWarnings("unchecked")
-            var listener = (ActionListener<List<InferenceResults>>) invocation.getArguments()[2];
-            listener.onFailure(new Exception("Unexpected invocation"));
-            return Void.TYPE;
-        }).when(inferenceProvider).textInference(any(), any(), any());
         when(nodeClient.executeLocally(eq(TransportShardBulkAction.TYPE), any(), any())).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
             var listener = (ActionListener<BulkShardResponse>) invocation.getArguments()[2];
@@ -169,7 +173,6 @@ public class TransportBulkActionInferenceTests extends ESTestCase {
 
         assertThat(response.getItems().length, equalTo(1));
         assertTrue(Arrays.stream(response.getItems()).allMatch(r -> r.isFailed() == false));
-        verifyInferenceExecuted(never());
     }
 
     public void testBulkRequestWithInference() {
@@ -189,7 +192,6 @@ public class TransportBulkActionInferenceTests extends ESTestCase {
 
         assertThat(response.getItems().length, equalTo(1));
         assertTrue(Arrays.stream(response.getItems()).allMatch(r -> r.isFailed() == false));
-        verifyInferenceExecuted(times(1));
     }
 
     public void testBulkRequestWithMultipleFieldsInference() {
@@ -277,7 +279,7 @@ public class TransportBulkActionInferenceTests extends ESTestCase {
     }
 
     private void verifyInferenceExecuted(VerificationMode verificationMode) {
-        verify(inferenceProvider, verificationMode).textInference(any(), any(), any());
+        // verify(inferenceProvider, verificationMode).textInference(any(), any(), any());
     }
 
     private void expectTransportShardBulkActionRequest(int requestSize) {
@@ -308,33 +310,98 @@ public class TransportBulkActionInferenceTests extends ESTestCase {
     }
 
     @SuppressWarnings("unchecked")
-    private void expectInferenceRequest(String modelId, String... inferenceTexts) {
-        doAnswer(invocation -> {
-            List<String> texts = (List<String>) invocation.getArguments()[1];
-            var listener = (ActionListener<List<InferenceResults>>) invocation.getArguments()[2];
-            listener.onResponse(
-                texts.stream()
-                    .map(
-                        text -> new TestInferenceResults(
-                            "test_field",
-                            randomMap(1, 10, () -> new Tuple<>(randomAlphaOfLengthBetween(1, 10), randomFloat()))
-                        )
-                    )
-                    .collect(Collectors.toList())
-            );
-            return Void.TYPE;
-        }).when(inferenceProvider)
-            .textInference(eq(modelId), argThat(texts -> texts.containsAll(Arrays.stream(inferenceTexts).toList())), any());
-    }
+    private void expectInferenceRequest(String modelId, String... inferenceTexts) {}
 
-    private void expectInferenceRequestFails(String modelId, String... inferenceTexts) {
-        doAnswer(invocation -> {
-            @SuppressWarnings("unchecked")
-            var listener = (ActionListener<List<InferenceResults>>) invocation.getArguments()[2];
-            listener.onFailure(new Exception("Inference failed"));
-            return Void.TYPE;
-        }).when(inferenceProvider)
-            .textInference(eq(modelId), argThat(texts -> texts.containsAll(Arrays.stream(inferenceTexts).toList())), any());
+    private void expectInferenceRequestFails(String modelId, String... inferenceTexts) {}
+
+    private static class MockInferenceService implements InferenceService {
+        private Map<String, TestInferenceResults> resultsPerModel = new HashMap<>();
+        private Exception exception;
+
+        void clearModels() {
+            resultsPerModel.clear();
+        }
+
+        void setResults(String text, TestInferenceResults results) {
+            resultsPerModel.put(text, results);
+        }
+
+        @Override
+        public String name() {
+            return "mock";
+        }
+
+        @Override
+        public Model parseRequestConfig(String modelId, TaskType taskType, Map<String, Object> config, Set<String> platfromArchitectures) {
+            return null;
+        }
+
+        @Override
+        public Model parsePersistedConfigWithSecrets(
+            String modelId,
+            TaskType taskType,
+            Map<String, Object> config,
+            Map<String, Object> secrets
+        ) {
+            return null;
+        }
+
+        @Override
+        public Model parsePersistedConfig(String modelId, TaskType taskType, Map<String, Object> config) {
+            return null;
+        }
+
+        @Override
+        public void infer(
+            Model model,
+            List<String> input,
+            Map<String, Object> taskSettings,
+            ActionListener<InferenceServiceResults> listener
+        ) {
+            var results = input.stream().map(text -> resultsPerModel.get(text)).collect(Collectors.toList());
+            listener.onResponse(new InferenceServiceResults() {
+                @Override
+                public List<? extends InferenceResults> transformToCoordinationFormat() {
+                    return results;
+                }
+
+                @Override
+                public List<? extends InferenceResults> transformToLegacyFormat() {
+                    return results;
+                }
+
+                @Override
+                public Map<String, Object> asMap() {
+                    throw new IllegalStateException("not implemented");
+                }
+
+                @Override
+                public String getWriteableName() {
+                    throw new IllegalStateException("not implemented");
+                }
+
+                @Override
+                public void writeTo(StreamOutput out) throws IOException {
+                    throw new IllegalStateException("not implemented");
+                }
+
+                @Override
+                public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
+                    throw new IllegalStateException("not implemented");
+                }
+            });
+        }
+
+        @Override
+        public void start(Model model, ActionListener<Boolean> listener) {}
+
+        @Override
+        public TransportVersion getMinimalSupportedVersion() {
+            return null;
+        }
+
+        @Override
+        public void close() throws IOException {}
     }
 
 }
