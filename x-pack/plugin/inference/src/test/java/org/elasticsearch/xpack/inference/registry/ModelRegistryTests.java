@@ -22,6 +22,7 @@ import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.engine.VersionConflictEngineException;
+import org.elasticsearch.inference.ModelRegistry;
 import org.elasticsearch.inference.TaskType;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.SearchHits;
@@ -65,7 +66,7 @@ public class ModelRegistryTests extends ESTestCase {
         var client = mockClient();
         mockClientExecuteSearch(client, mockSearchResponse(SearchHits.EMPTY));
 
-        var registry = new ModelRegistry(client);
+        var registry = new ModelRegistryImpl(client);
 
         var listener = new PlainActionFuture<ModelRegistry.UnparsedModel>();
         registry.getModelWithSecrets("1", listener);
@@ -79,7 +80,7 @@ public class ModelRegistryTests extends ESTestCase {
         var unknownIndexHit = SearchHit.createFromMap(Map.of("_index", "unknown_index"));
         mockClientExecuteSearch(client, mockSearchResponse(new SearchHit[] { unknownIndexHit }));
 
-        var registry = new ModelRegistry(client);
+        var registry = new ModelRegistryImpl(client);
 
         var listener = new PlainActionFuture<ModelRegistry.UnparsedModel>();
         registry.getModelWithSecrets("1", listener);
@@ -96,7 +97,7 @@ public class ModelRegistryTests extends ESTestCase {
         var inferenceSecretsHit = SearchHit.createFromMap(Map.of("_index", ".secrets-inference"));
         mockClientExecuteSearch(client, mockSearchResponse(new SearchHit[] { inferenceSecretsHit }));
 
-        var registry = new ModelRegistry(client);
+        var registry = new ModelRegistryImpl(client);
 
         var listener = new PlainActionFuture<ModelRegistry.UnparsedModel>();
         registry.getModelWithSecrets("1", listener);
@@ -113,7 +114,7 @@ public class ModelRegistryTests extends ESTestCase {
         var inferenceHit = SearchHit.createFromMap(Map.of("_index", ".inference"));
         mockClientExecuteSearch(client, mockSearchResponse(new SearchHit[] { inferenceHit }));
 
-        var registry = new ModelRegistry(client);
+        var registry = new ModelRegistryImpl(client);
 
         var listener = new PlainActionFuture<ModelRegistry.UnparsedModel>();
         registry.getModelWithSecrets("1", listener);
@@ -147,7 +148,7 @@ public class ModelRegistryTests extends ESTestCase {
 
         mockClientExecuteSearch(client, mockSearchResponse(new SearchHit[] { inferenceHit, inferenceSecretsHit }));
 
-        var registry = new ModelRegistry(client);
+        var registry = new ModelRegistryImpl(client);
 
         var listener = new PlainActionFuture<ModelRegistry.UnparsedModel>();
         registry.getModelWithSecrets("1", listener);
@@ -176,7 +177,7 @@ public class ModelRegistryTests extends ESTestCase {
 
         mockClientExecuteSearch(client, mockSearchResponse(new SearchHit[] { inferenceHit }));
 
-        var registry = new ModelRegistry(client);
+        var registry = new ModelRegistryImpl(client);
 
         var listener = new PlainActionFuture<ModelRegistry.UnparsedModel>();
         registry.getModel("1", listener);
@@ -201,7 +202,7 @@ public class ModelRegistryTests extends ESTestCase {
         mockClientExecuteBulk(client, bulkResponse);
 
         var model = TestModel.createRandomInstance();
-        var registry = new ModelRegistry(client);
+        var registry = new ModelRegistryImpl(client);
         var listener = new PlainActionFuture<Boolean>();
 
         registry.storeModel(model, listener);
@@ -218,7 +219,7 @@ public class ModelRegistryTests extends ESTestCase {
         mockClientExecuteBulk(client, bulkResponse);
 
         var model = TestModel.createRandomInstance();
-        var registry = new ModelRegistry(client);
+        var registry = new ModelRegistryImpl(client);
         var listener = new PlainActionFuture<Boolean>();
 
         registry.storeModel(model, listener);
@@ -249,7 +250,7 @@ public class ModelRegistryTests extends ESTestCase {
         mockClientExecuteBulk(client, bulkResponse);
 
         var model = TestModel.createRandomInstance();
-        var registry = new ModelRegistry(client);
+        var registry = new ModelRegistryImpl(client);
         var listener = new PlainActionFuture<Boolean>();
 
         registry.storeModel(model, listener);
@@ -272,7 +273,7 @@ public class ModelRegistryTests extends ESTestCase {
         mockClientExecuteBulk(client, bulkResponse);
 
         var model = TestModel.createRandomInstance();
-        var registry = new ModelRegistry(client);
+        var registry = new ModelRegistryImpl(client);
         var listener = new PlainActionFuture<Boolean>();
 
         registry.storeModel(model, listener);

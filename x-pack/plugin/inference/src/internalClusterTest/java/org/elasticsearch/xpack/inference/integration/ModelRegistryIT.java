@@ -15,6 +15,7 @@ import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.inference.InferenceServiceExtension;
 import org.elasticsearch.inference.Model;
 import org.elasticsearch.inference.ModelConfigurations;
+import org.elasticsearch.inference.ModelRegistry;
 import org.elasticsearch.inference.ModelSecrets;
 import org.elasticsearch.inference.SecretSettings;
 import org.elasticsearch.inference.ServiceSettings;
@@ -25,7 +26,7 @@ import org.elasticsearch.reindex.ReindexPlugin;
 import org.elasticsearch.test.ESSingleNodeTestCase;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xpack.inference.InferencePlugin;
-import org.elasticsearch.xpack.inference.registry.ModelRegistry;
+import org.elasticsearch.xpack.inference.registry.ModelRegistryImpl;
 import org.elasticsearch.xpack.inference.services.elser.ElserMlNodeModel;
 import org.elasticsearch.xpack.inference.services.elser.ElserMlNodeService;
 import org.elasticsearch.xpack.inference.services.elser.ElserMlNodeServiceSettingsTests;
@@ -60,7 +61,7 @@ public class ModelRegistryIT extends ESSingleNodeTestCase {
 
     @Before
     public void createComponents() {
-        modelRegistry = new ModelRegistry(client());
+        modelRegistry = new ModelRegistryImpl(client());
     }
 
     @Override
