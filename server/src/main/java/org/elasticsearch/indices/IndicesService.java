@@ -26,6 +26,7 @@ import org.elasticsearch.action.admin.indices.stats.CommonStatsFlags;
 import org.elasticsearch.action.admin.indices.stats.CommonStatsFlags.Flag;
 import org.elasticsearch.action.admin.indices.stats.IndexShardStats;
 import org.elasticsearch.action.admin.indices.stats.ShardStats;
+import org.elasticsearch.action.search.ResolvedIndices;
 import org.elasticsearch.action.search.SearchType;
 import org.elasticsearch.action.support.RefCountAwareThreadedActionListener;
 import org.elasticsearch.client.internal.Client;
@@ -169,7 +170,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import static java.util.Collections.emptyList;
@@ -1724,24 +1724,8 @@ public class IndicesService extends AbstractLifecycleComponent
     /**
      * Returns a new {@link QueryRewriteContext} with the given {@code now} provider
      */
-    public QueryRewriteContext getRewriteContext(LongSupplier nowInMillis, Supplier<Index[]> resolvedLocalIndicesSupplier) {
-        Objects.requireNonNull(resolvedLocalIndicesSupplier);
-
-        Supplier<Map<String, IndexMetadata>> indexMetadataMapSupplier = () -> {
-            Map<String, IndexMetadata> indexMetadataMap = new HashMap<>();
-            for (Index index : resolvedLocalIndicesSupplier.get()) {
-                IndexMetadata indexMetadata = clusterService.state().metadata().index(index);
-                if (indexMetadata == null) {
-                    throw new IndexNotFoundException(index);
-                }
-
-                indexMetadataMap.put(index.getName(), indexMetadata);
-            }
-
-            return indexMetadataMap;
-        };
-
-        return new QueryRewriteContext(parserConfig, client, nowInMillis, indexMetadataMapSupplier);
+    public QueryRewriteContext getRewriteContext(LongSupplier nowInMillis, ResolvedIndices concreteIndices) {
+        return new QueryRewriteContext(parserConfig, client, nowInMillis, concreteIndices);
     }
 
     public DataRewriteContext getDataRewriteContext(LongSupplier nowInMillis) {

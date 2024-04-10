@@ -21,6 +21,7 @@ import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionRunnable;
 import org.elasticsearch.action.search.CanMatchNodeRequest;
 import org.elasticsearch.action.search.CanMatchNodeResponse;
+import org.elasticsearch.action.search.ResolvedIndices;
 import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.search.SearchShardTask;
 import org.elasticsearch.action.search.SearchType;
@@ -1782,8 +1783,8 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     /**
      * Returns a new {@link QueryRewriteContext} with the given {@code now} provider
      */
-    public QueryRewriteContext getRewriteContext(LongSupplier nowInMillis, Supplier<Index[]> resolvedLocalIndicesSupplier) {
-        return indicesService.getRewriteContext(nowInMillis, resolvedLocalIndicesSupplier);
+    public QueryRewriteContext getRewriteContext(LongSupplier nowInMillis, ResolvedIndices concreteIndices) {
+        return indicesService.getRewriteContext(nowInMillis, concreteIndices);
     }
 
     public CoordinatorRewriteContextProvider getCoordinatorRewriteContextProvider(LongSupplier nowInMillis) {

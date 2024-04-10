@@ -10,7 +10,6 @@ package org.elasticsearch.action.search;
 
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionType;
-import org.elasticsearch.action.OriginalIndices;
 import org.elasticsearch.action.RemoteClusterActionType;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.HandledTransportAction;
@@ -19,7 +18,6 @@ import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.routing.GroupShardsIterator;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.index.Index;
 import org.elasticsearch.index.query.Rewriteable;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.search.SearchService;
@@ -28,12 +26,10 @@ import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.internal.AliasFilter;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.threadpool.ThreadPool;
-import org.elasticsearch.transport.RemoteClusterAware;
 import org.elasticsearch.transport.RemoteClusterService;
 import org.elasticsearch.transport.TransportService;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -102,36 +98,35 @@ public class TransportSearchShardsAction extends HandledTransportAction<SearchSh
             System::nanoTime
         );
 
-        // TODO: Pass a real local indices supplier to getRewriteContext, similar to how TransportSearchAction does
+        ResolvedIndices resolvedIndices = ResolvedIndices.resolveWithIndicesRequest(
+            clusterService.state(),
+            indexNameExpressionResolver,
+            remoteClusterService,
+            searchShardsRequest,
+            timeProvider.absoluteStartMillis()
+        );
+        if (resolvedIndices.getRemoteClusters().isEmpty() == false) {
+            throw new UnsupportedOperationException("search_shards API doesn't support remote indices " + searchShardsRequest);
+        }
         ClusterState clusterState = clusterService.state();
         Rewriteable.rewriteAndFetch(
             original,
-            searchService.getRewriteContext(timeProvider::absoluteStartMillis, () -> Index.EMPTY_ARRAY),
+            searchService.getRewriteContext(timeProvider::absoluteStartMillis, null),
             listener.delegateFailureAndWrap((delegate, searchRequest) -> {
-                Map<String, OriginalIndices> groupedIndices = remoteClusterService.groupIndices(
-                    searchRequest.indicesOptions(),
-                    searchRequest.indices()
-                );
-                OriginalIndices originalIndices = groupedIndices.remove(RemoteClusterAware.LOCAL_CLUSTER_GROUP_KEY);
-                if (groupedIndices.isEmpty() == false) {
-                    throw new UnsupportedOperationException("search_shards API doesn't support remote indices " + searchRequest);
-                }
-                // TODO: Move a share stuff out of the TransportSearchAction.
-                Index[] concreteIndices = transportSearchAction.resolveLocalIndices(originalIndices, clusterState, timeProvider);
+
                 final Set<String> indicesAndAliases = indexNameExpressionResolver.resolveExpressions(clusterState, searchRequest.indices());
                 final Map<String, AliasFilter> aliasFilters = transportSearchAction.buildIndexAliasFilters(
                     clusterState,
                     indicesAndAliases,
-                    concreteIndices
+                    resolvedIndices.getLocalIndices()
                 );
-                String[] concreteIndexNames = Arrays.stream(concreteIndices).map(Index::getName).toArray(String[]::new);
                 GroupShardsIterator<SearchShardIterator> shardIts = GroupShardsIterator.sortAndCreate(
                     transportSearchAction.getLocalShardsIterator(
                         clusterState,
                         searchRequest,
                         searchShardsRequest.clusterAlias(),
                         indicesAndAliases,
-                        concreteIndexNames
+                        resolvedIndices.getLocalIndexNames()
                     )
                 );
                 if (SearchService.canRewriteToMatchNone(searchRequest.source()) == false) {

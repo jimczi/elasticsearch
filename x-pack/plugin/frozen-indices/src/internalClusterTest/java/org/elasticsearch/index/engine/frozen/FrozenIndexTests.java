@@ -15,12 +15,12 @@ import org.elasticsearch.action.delete.DeleteResponse;
 import org.elasticsearch.action.search.ClosePointInTimeRequest;
 import org.elasticsearch.action.search.OpenPointInTimeRequest;
 import org.elasticsearch.action.search.OpenPointInTimeResponse;
+import org.elasticsearch.action.search.ResolvedIndices;
 import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.search.SearchType;
 import org.elasticsearch.action.search.TransportClosePointInTimeAction;
 import org.elasticsearch.action.search.TransportOpenPointInTimeAction;
-import org.elasticsearch.action.search.TransportSearchAction;
 import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.cluster.block.ClusterBlockException;
@@ -163,7 +163,7 @@ public class FrozenIndexTests extends ESSingleNodeTestCase {
                     assertFalse(((FrozenEngine) engine).isReaderOpen());
                 }
             }
-            assertWarnings(TransportSearchAction.FROZEN_INDICES_DEPRECATION_MESSAGE.replace("{}", indexName));
+            assertWarnings(ResolvedIndices.FROZEN_INDICES_DEPRECATION_MESSAGE.replace("{}", indexName));
         } finally {
             client().execute(TransportClosePointInTimeAction.TYPE, new ClosePointInTimeRequest(pitId)).get();
         }
@@ -214,7 +214,7 @@ public class FrozenIndexTests extends ESSingleNodeTestCase {
         IndicesStatsResponse index = indicesAdmin().prepareStats(indexName).clear().setRefresh(true).get();
         assertEquals(numRefreshes, index.getTotal().refresh.getTotal());
         if (numSearches > 0) {
-            assertWarnings(TransportSearchAction.FROZEN_INDICES_DEPRECATION_MESSAGE.replace("{}", indexName));
+            assertWarnings(ResolvedIndices.FROZEN_INDICES_DEPRECATION_MESSAGE.replace("{}", indexName));
         }
     }
 
@@ -322,7 +322,7 @@ public class FrozenIndexTests extends ESSingleNodeTestCase {
         assertEquals(1, index.getTotal().refresh.getTotal());
         index = indicesAdmin().prepareStats("test-idx-1").clear().setRefresh(true).get();
         assertEquals(0, index.getTotal().refresh.getTotal());
-        assertWarnings(TransportSearchAction.FROZEN_INDICES_DEPRECATION_MESSAGE.replace("{}", indexName));
+        assertWarnings(ResolvedIndices.FROZEN_INDICES_DEPRECATION_MESSAGE.replace("{}", indexName));
     }
 
     public void testCanMatch() throws IOException {

@@ -12,7 +12,7 @@ import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.methods.HttpPut;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
-import org.elasticsearch.action.search.TransportSearchAction;
+import org.elasticsearch.action.search.ResolvedIndices;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.RequestOptions;
 import org.elasticsearch.client.Response;
@@ -592,7 +592,7 @@ public abstract class AbstractSearchableSnapshotsRestTestCase extends ESRestTest
 
         // If warning are returned than these must exist in this set:
         Set<String> expectedWarnings = new HashSet<>();
-        expectedWarnings.add(TransportSearchAction.FROZEN_INDICES_DEPRECATION_MESSAGE.replace("{}", index));
+        expectedWarnings.add(ResolvedIndices.FROZEN_INDICES_DEPRECATION_MESSAGE.replace("{}", index));
         if (ignoreThrottled != null) {
             request.addParameter("ignore_throttled", ignoreThrottled.toString());
             expectedWarnings.add(
