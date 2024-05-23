@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.Executor;
 
 /**
  * An extension to the {@link ConcurrentMergeScheduler} that provides tracking on merge times, total
@@ -156,6 +157,9 @@ class ElasticsearchConcurrentMergeScheduler extends ConcurrentMergeScheduler {
             }
         }
     }
+
+
+
 
     /**
      * A callback allowing for custom logic before an actual merge starts.

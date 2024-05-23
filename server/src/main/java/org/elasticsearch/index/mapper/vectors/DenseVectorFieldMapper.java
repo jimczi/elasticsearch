@@ -158,9 +158,11 @@ public class DenseVectorFieldMapper extends FieldMapper {
         private final Parameter<Boolean> indexed;
         private final Parameter<Map<String, String>> meta = Parameter.metaParam();
 
+        private final int mergeThreadCount;
+
         final IndexVersion indexVersionCreated;
 
-        public Builder(String name, IndexVersion indexVersionCreated) {
+        public Builder(String name, IndexVersion indexVersionCreated, int mergeThreadCount) {
             super(name);
             this.indexVersionCreated = indexVersionCreated;
             final boolean indexedByDefault = indexVersionCreated.onOrAfter(INDEXED_BY_DEFAULT_INDEX_VERSION);
@@ -223,6 +225,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                     }
                 }
             });
+            this.mergeThreadCount = mergeThreadCount;
         }
 
         @Override
@@ -255,6 +258,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                 ),
                 indexOptions.getValue(),
                 indexVersionCreated,
+                mergeThreadCount,
                 multiFieldsBuilder.build(this, context),
                 copyTo
             );
@@ -838,7 +842,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
             this.type = type;
         }
 
-        abstract KnnVectorsFormat getVectorsFormat();
+        abstract KnnVectorsFormat getVectorsFormat(int mergeThreadCount);
 
         boolean supportsElementType(ElementType elementType) {
             return true;
@@ -938,7 +942,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
         }
 
         @Override
-        KnnVectorsFormat getVectorsFormat() {
+        KnnVectorsFormat getVectorsFormat(int mergeThreadCount) {
             return new ES813Int8FlatVectorFormat(confidenceInterval);
         }
 
@@ -976,7 +980,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
         }
 
         @Override
-        KnnVectorsFormat getVectorsFormat() {
+        KnnVectorsFormat getVectorsFormat(int mergeThreadCount) {
             return new ES813FlatVectorFormat();
         }
 
@@ -1005,10 +1009,10 @@ public class DenseVectorFieldMapper extends FieldMapper {
         }
 
         @Override
-        public KnnVectorsFormat getVectorsFormat() {
+        public KnnVectorsFormat getVectorsFormat(int mergeThreadCount) {
             // int bits = 7;
             // boolean compress = false; // TODO we only support 7 and false, for now
-            return new ES814HnswScalarQuantizedVectorsFormat(m, efConstruction, 1, confidenceInterval, null);
+            return new ES814HnswScalarQuantizedVectorsFormat(m, efConstruction, mergeThreadCount, confidenceInterval, null);
         }
 
         @Override
@@ -1067,8 +1071,8 @@ public class DenseVectorFieldMapper extends FieldMapper {
         }
 
         @Override
-        public KnnVectorsFormat getVectorsFormat() {
-            return new Lucene99HnswVectorsFormat(m, efConstruction, 1, null);
+        public KnnVectorsFormat getVectorsFormat(int mergeThreadCount) {
+            return new Lucene99HnswVectorsFormat(m, efConstruction, mergeThreadCount, null);
         }
 
         @Override
@@ -1101,7 +1105,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
     }
 
     public static final TypeParser PARSER = new TypeParser(
-        (n, c) -> new Builder(n, c.indexVersionCreated()),
+        (n, c) -> new Builder(n, c.indexVersionCreated(), c.getIndexSettings().getMergeSchedulerConfig().getMaxThreadCount()),
         notInMultiFields(CONTENT_TYPE)
     );
 
@@ -1395,17 +1399,21 @@ public class DenseVectorFieldMapper extends FieldMapper {
     private final IndexOptions indexOptions;
     private final IndexVersion indexCreatedVersion;
 
+    private final int mergeThreadCount;
+
     private DenseVectorFieldMapper(
         String simpleName,
         MappedFieldType mappedFieldType,
         IndexOptions indexOptions,
         IndexVersion indexCreatedVersion,
+        int mergeThreadCount,
         MultiFields multiFields,
         CopyTo copyTo
     ) {
         super(simpleName, mappedFieldType, multiFields, copyTo);
         this.indexOptions = indexOptions;
         this.indexCreatedVersion = indexCreatedVersion;
+        this.mergeThreadCount = mergeThreadCount;
     }
 
     @Override
@@ -1448,6 +1456,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                 updatedDenseVectorFieldType,
                 indexOptions,
                 indexCreatedVersion,
+                mergeThreadCount,
                 multiFields(),
                 copyTo
             );
@@ -1535,7 +1544,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
 
     @Override
     public FieldMapper.Builder getMergeBuilder() {
-        return new Builder(simpleName(), indexCreatedVersion).init(this);
+        return new Builder(simpleName(), indexCreatedVersion, mergeThreadCount).init(this);
     }
 
     private static IndexOptions parseIndexOptions(String fieldName, Object propNode) {
@@ -1560,7 +1569,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
         if (indexOptions == null) {
             format = defaultFormat;
         } else {
-            format = indexOptions.getVectorsFormat();
+            format = indexOptions.getVectorsFormat(mergeThreadCount);
         }
         // It's legal to reuse the same format name as this is the same on-disk format.
         return new KnnVectorsFormat(format.getName()) {
