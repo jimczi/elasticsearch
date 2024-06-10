@@ -350,7 +350,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
             frozenIndexCheck(resolvedIndices);
         }
 
-        var retriever = searchRequest.source().retriever();
+        var retriever = searchRequest.source().consumeRetriever();
         ActionListener<SearchRequest> rewriteSearchRequestListener = listener.delegateFailureAndWrap((delegate, rewritten) -> {
             if (ccsCheckCompatibility) {
                 checkCCSVersionCompatibility(rewritten);
@@ -476,8 +476,9 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
             );
             return;
         }
-        searchRequest.setPreFilterShardSize(Integer.MAX_VALUE);
         if (retriever.requiresPointInTime() && searchRequest.source().pointInTimeBuilder() == null) {
+            // The can match phase can reorder shards, so we disable it to ensure the stable ordering
+            searchRequest.setPreFilterShardSize(Integer.MAX_VALUE);
             rewriteSearchRequestListener = ActionListener.releaseAfter(
                 rewriteSearchRequestListener,
                 () -> closePIT(searchRequest.source().pointInTimeBuilder())

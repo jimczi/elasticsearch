@@ -30,6 +30,10 @@ public class ShardDocSortField extends SortField {
         this.shardRequestIndex = shardRequestIndex;
     }
 
+    public static int shardRequestIndex(long value) {
+        return (int) (value >> 32);
+    }
+
     int getShardRequestIndex() {
         return shardRequestIndex;
     }

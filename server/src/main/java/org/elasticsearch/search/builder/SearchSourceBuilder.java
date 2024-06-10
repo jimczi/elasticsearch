@@ -369,8 +369,10 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
         }
     }
 
-    public RetrieverBuilder retriever() {
-        return retrieverBuilder;
+    public RetrieverBuilder consumeRetriever() {
+        var ret = retrieverBuilder;
+        this.retrieverBuilder = null;
+        return ret;
     }
 
     /**

@@ -80,12 +80,12 @@ public class RankDocsRetrieverBuilder extends RetrieverBuilder {
     @Override
     protected boolean doEquals(Object o) {
         RankDocsRetrieverBuilder other = (RankDocsRetrieverBuilder) o;
-        return Arrays.equals(rankDocs.get(), other.rankDocs.get());
+        return Arrays.equals(rankDocs.get(), other.rankDocs.get()) && sources.equals(other.sources);
     }
 
     @Override
     protected int doHashCode() {
-        return Objects.hash(super.hashCode(), windowSize, rankDocs.get());
+        return Objects.hash(super.hashCode(), windowSize);
     }
 
     @Override

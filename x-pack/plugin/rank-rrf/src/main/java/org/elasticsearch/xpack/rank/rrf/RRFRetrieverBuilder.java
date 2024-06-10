@@ -20,12 +20,17 @@ import org.elasticsearch.common.ParsingException;
 import org.elasticsearch.common.util.Maps;
 import org.elasticsearch.features.NodeFeature;
 import org.elasticsearch.index.query.QueryRewriteContext;
+import org.elasticsearch.search.builder.PointInTimeBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.elasticsearch.search.fetch.StoredFieldsContext;
 import org.elasticsearch.search.rank.RankDoc;
+import org.elasticsearch.search.rank.RankDoc.RankKey;
 import org.elasticsearch.search.retriever.RankDocsRetrieverBuilder;
 import org.elasticsearch.search.retriever.RetrieverBuilder;
 import org.elasticsearch.search.retriever.RetrieverParserContext;
+import org.elasticsearch.search.sort.FieldSortBuilder;
 import org.elasticsearch.search.sort.ScoreSortBuilder;
+import org.elasticsearch.search.sort.ShardDocSortField;
 import org.elasticsearch.search.sort.SortBuilder;
 import org.elasticsearch.xcontent.ConstructingObjectParser;
 import org.elasticsearch.xcontent.ParseField;
@@ -123,29 +128,16 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
         }
         List<RetrieverSource> newRetrievers = new ArrayList<>();
         boolean hasChanged = false;
-        for (var source : retrievers) {
-            RetrieverBuilder rewritten = source.retriever.rewrite(ctx);
-            if (rewritten != source.retriever) {
-                newRetrievers.add(new RetrieverSource(rewritten, null));
-                hasChanged |= rewritten != source.retriever;
-            } else if (rewritten == source.retriever) {
-                SearchSourceBuilder sourceBuilder;
-                if (source.source == null) {
-                    sourceBuilder = new SearchSourceBuilder().pointInTimeBuilder(ctx.pointInTimeBuilder()).size(rankWindowSize);
-                    rewritten.extractToSearchSourceBuilder(sourceBuilder, false);
-                    List<SortBuilder<?>> sortBuilders = sourceBuilder.sorts() != null
-                        ? new ArrayList<>(sourceBuilder.sorts())
-                        : new ArrayList<>();
-                    if (sortBuilders.isEmpty()) {
-                        sortBuilders.add(new ScoreSortBuilder());
-                    }
-                    sourceBuilder.sort(sortBuilders);
-                } else {
-                    sourceBuilder = source.source;
-                }
+        for (var entry : retrievers) {
+            RetrieverBuilder newRetriever = entry.retriever.rewrite(ctx);
+            if (newRetriever != entry.retriever) {
+                newRetrievers.add(new RetrieverSource(newRetriever, null));
+                hasChanged |= newRetriever != entry.retriever;
+            } else if (newRetriever == entry.retriever) {
+                var sourceBuilder = entry.source != null ? entry.source : createSearchSourceBuilder(ctx.pointInTimeBuilder(), newRetriever);
                 var rewrittenSource = sourceBuilder.rewrite(ctx);
-                newRetrievers.add(new RetrieverSource(rewritten, rewrittenSource));
-                hasChanged |= rewrittenSource != source.source;
+                newRetrievers.add(new RetrieverSource(newRetriever, rewrittenSource));
+                hasChanged |= rewrittenSource != entry.source;
             }
         }
         if (hasChanged) {
@@ -157,8 +149,9 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
         }
 
         MultiSearchRequest multiSearchRequest = new MultiSearchRequest();
-        for (var ret : retrievers) {
-            SearchRequest searchRequest = new SearchRequest().source(ret.source);
+        for (var entry : retrievers) {
+            SearchRequest searchRequest = new SearchRequest().source(entry.source);
+            // The can match phase can reorder shards, so we disable it to ensure the stable ordering
             searchRequest.setPreFilterShardSize(Integer.MAX_VALUE);
             multiSearchRequest.add(searchRequest);
         }
@@ -221,14 +214,29 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
         return Objects.hash(retrievers, rankWindowSize, rankConstant);
     }
 
+    private SearchSourceBuilder createSearchSourceBuilder(PointInTimeBuilder pit, RetrieverBuilder retrieverBuilder) {
+        var sourceBuilder = new SearchSourceBuilder().pointInTimeBuilder(pit)
+            .trackTotalHits(false)
+            .storedFields(new StoredFieldsContext(false))
+            .size(rankWindowSize);
+        retrieverBuilder.extractToSearchSourceBuilder(sourceBuilder, false);
+        // Record the shard id in the sort result
+        List<SortBuilder<?>> sortBuilders = sourceBuilder.sorts() != null ? new ArrayList<>(sourceBuilder.sorts()) : new ArrayList<>();
+        if (sortBuilders.isEmpty()) {
+            sortBuilders.add(new ScoreSortBuilder());
+        }
+        sortBuilders.add(new FieldSortBuilder(FieldSortBuilder.SHARD_DOC_FIELD_NAME));
+        sourceBuilder.sort(sortBuilders);
+        return sourceBuilder;
+    }
+
     private ScoreDoc[] getTopDocs(SearchResponse searchResponse) {
         int size = Math.min(rankWindowSize, searchResponse.getHits().getHits().length);
         ScoreDoc[] docs = new ScoreDoc[size];
         for (int i = 0; i < size; i++) {
             var hit = searchResponse.getHits().getAt(i);
-            long sortValue = (long) hit.getRawSortValues()[hit.getRawSortValues().length - 1];
-            int shardIndex = (int) (sortValue >> 32);
-            docs[i] = new ScoreDoc(hit.docId(), hit.getScore(), shardIndex);
+            int shardRequestIndex = ShardDocSortField.shardRequestIndex((long) hit.getRawSortValues()[hit.getRawSortValues().length - 1]);
+            docs[i] = new ScoreDoc(hit.docId(), hit.getScore(), shardRequestIndex);
         }
         return docs;
     }
@@ -240,15 +248,14 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
         // if a doc isn't part of a result set its position will be NO_RANK [0] and
         // its score is [0f]
         int queries = rankResults.size();
-        Map<Long, RRFRankDoc> docsToRankResults = Maps.newMapWithExpectedSize(rankWindowSize);
+        Map<RankDoc.RankKey, RRFRankDoc> docsToRankResults = Maps.newMapWithExpectedSize(rankWindowSize);
         int index = 0;
         for (var rrfRankResult : rankResults) {
             int rank = 1;
             for (ScoreDoc scoreDoc : rrfRankResult) {
                 final int findex = index;
                 final int frank = rank;
-                long docAndShard = (((long) scoreDoc.shardIndex) << 32) | (scoreDoc.doc & 0xFFFFFFFFL);
-                docsToRankResults.compute(docAndShard, (key, value) -> {
+                docsToRankResults.compute(new RankKey(scoreDoc.doc, scoreDoc.shardIndex), (key, value) -> {
                     if (value == null) {
                         value = new RRFRankDoc(scoreDoc.doc, scoreDoc.shardIndex, queries);
                     }
