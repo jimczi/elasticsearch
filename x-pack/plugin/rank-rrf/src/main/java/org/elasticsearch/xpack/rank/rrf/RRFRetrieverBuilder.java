@@ -217,7 +217,7 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
     }
 
     @Override
-    public QueryBuilder originalQuery(QueryBuilder leadQuery) {
+    public QueryBuilder topDocsQuery(QueryBuilder leadQuery) {
         throw new IllegalStateException(NAME + " cannot be nested");
     }
 

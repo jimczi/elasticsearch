@@ -139,7 +139,7 @@ public final class KnnRetrieverBuilder extends RetrieverBuilder {
     }
 
     @Override
-    public QueryBuilder originalQuery(QueryBuilder leadQuery) {
+    public QueryBuilder topDocsQuery(QueryBuilder leadQuery) {
         // TODO nested + inner_hits
         BoolQueryBuilder ret = new BoolQueryBuilder().must(leadQuery)
             .should(new ExactKnnQueryBuilder(knnSearchBuilder.getQueryVector(), knnSearchBuilder.getField()));

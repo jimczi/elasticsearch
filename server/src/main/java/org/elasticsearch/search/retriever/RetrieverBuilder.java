@@ -34,9 +34,10 @@ import java.util.Objects;
 /**
  * A retriever represents an API element that returns an ordered list of top
  * documents. These can be obtained from a query, from another retriever, etc.
- * Internally, a {@link RetrieverBuilder} is just a wrapper for other search
- * elements that are extracted into a {@link SearchSourceBuilder}. The advantage
- * retrievers have is in the API they appear as a tree-like structure enabling
+ * Internally, a {@link RetrieverBuilder} is first rewritten into its simplest
+ * form and then its elements are extracted into a {@link SearchSourceBuilder}.
+ *
+ * The advantage retrievers have is in the API they appear as a tree-like structure enabling
  * easier reasoning about what a search does.
  *
  * This is the base class for all other retrievers. This class does not support
@@ -181,7 +182,7 @@ public abstract class RetrieverBuilder implements Rewriteable<RetrieverBuilder>,
     }
 
     /**
-     * Determines if this retriever contains sub-retrievers that need to be rewritten into simpler forms.
+     * Determines if this retriever contains sub-retrievers that need to be executed prior to search.
      */
     public boolean isCompound() {
         return false;
@@ -193,10 +194,12 @@ public abstract class RetrieverBuilder implements Rewriteable<RetrieverBuilder>,
     }
 
     /**
-     * Returns the original {@link QueryBuilder} used to compute the top documents.
-     * @param leadQuery
+     * This function is called by compound {@link RetrieverBuilder} to return the original query that
+     * was used by this retriever to compute its top documents.
+     *
+     * @param leadQuery The query identifying the top documents of the parent retriever.
      */
-    public abstract QueryBuilder originalQuery(QueryBuilder leadQuery);
+    public abstract QueryBuilder topDocsQuery(QueryBuilder leadQuery);
 
     /**
      * This method is called at the end of rewrite on the final retriever.
