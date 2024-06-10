@@ -13,6 +13,7 @@ import org.elasticsearch.features.NodeFeature;
 import org.elasticsearch.index.query.AbstractQueryBuilder;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.collapse.CollapseBuilder;
 import org.elasticsearch.search.internal.SearchContext;
@@ -104,6 +105,37 @@ public final class StandardRetrieverBuilder extends RetrieverBuilder implements 
     List<SortBuilder<?>> sortBuilders;
     Float minScore;
     CollapseBuilder collapseBuilder;
+
+    StandardRetrieverBuilder() {}
+
+    public StandardRetrieverBuilder(StandardRetrieverBuilder clone, QueryBuilder rewritten) {
+        this.queryBuilder = rewritten;
+        this.searchAfterBuilder = clone.searchAfterBuilder;
+        this.terminateAfter = clone.terminateAfter;
+        this.sortBuilders = clone.sortBuilders;
+        this.minScore = clone.minScore;
+        this.collapseBuilder = clone.collapseBuilder;
+        this.preFilterQueryBuilders = clone.preFilterQueryBuilders;
+    }
+
+    @Override
+    public RetrieverBuilder rewrite(QueryRewriteContext ctx) throws IOException {
+        var rewritten = queryBuilder.rewrite(ctx);
+        if (rewritten != queryBuilder) {
+            return new StandardRetrieverBuilder(this, rewritten);
+        }
+        return this;
+    }
+
+    @Override
+    public QueryBuilder originalQuery() {
+        if (preFilterQueryBuilders.isEmpty()) {
+            return queryBuilder;
+        }
+        var ret = new BoolQueryBuilder().must(queryBuilder);
+        preFilterQueryBuilders.stream().forEach(ret::filter);
+        return ret;
+    }
 
     @Override
     public void extractToSearchSourceBuilder(SearchSourceBuilder searchSourceBuilder, boolean compoundUsed) {

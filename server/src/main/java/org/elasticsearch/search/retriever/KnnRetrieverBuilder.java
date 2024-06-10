@@ -10,7 +10,10 @@ package org.elasticsearch.search.retriever;
 
 import org.elasticsearch.common.ParsingException;
 import org.elasticsearch.features.NodeFeature;
+import org.elasticsearch.index.query.BoolQueryBuilder;
+import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.elasticsearch.search.vectors.ExactKnnQueryBuilder;
 import org.elasticsearch.search.vectors.KnnSearchBuilder;
 import org.elasticsearch.search.vectors.QueryVectorBuilder;
 import org.elasticsearch.search.vectors.VectorData;
@@ -90,6 +93,7 @@ public final class KnnRetrieverBuilder extends RetrieverBuilder {
         return PARSER.apply(parser, context);
     }
 
+    private final KnnSearchBuilder knnSearchBuilder;
     private final String field;
     private final float[] queryVector;
     private final QueryVectorBuilder queryVectorBuilder;
@@ -105,6 +109,7 @@ public final class KnnRetrieverBuilder extends RetrieverBuilder {
         int numCands,
         Float similarity
     ) {
+        this.knnSearchBuilder = new KnnSearchBuilder(field, VectorData.fromFloats(queryVector), queryVectorBuilder, k, numCands, similarity);
         this.field = field;
         this.queryVector = queryVector;
         this.queryVectorBuilder = queryVectorBuilder;
@@ -121,15 +126,19 @@ public final class KnnRetrieverBuilder extends RetrieverBuilder {
     }
 
     @Override
+    public QueryBuilder originalQuery() {
+        // TODO nested + inner_hits
+        ExactKnnQueryBuilder knn = new ExactKnnQueryBuilder(knnSearchBuilder.getQueryVector(), knnSearchBuilder.getField());
+        if (preFilterQueryBuilders.isEmpty()) {
+            return knn;
+        }
+        var ret = new BoolQueryBuilder().should(knn);
+        preFilterQueryBuilders.stream().forEach(ret::filter);
+        return ret;
+    }
+
+    @Override
     public void extractToSearchSourceBuilder(SearchSourceBuilder searchSourceBuilder, boolean compoundUsed) {
-        KnnSearchBuilder knnSearchBuilder = new KnnSearchBuilder(
-            field,
-            VectorData.fromFloats(queryVector),
-            queryVectorBuilder,
-            k,
-            numCands,
-            similarity
-        );
         if (preFilterQueryBuilders != null) {
             knnSearchBuilder.addFilterQueries(preFilterQueryBuilders);
         }

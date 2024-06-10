@@ -476,7 +476,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
             );
             return;
         }
-        if (retriever.requiresPointInTime() && searchRequest.source().pointInTimeBuilder() == null) {
+        if (retriever.isCompound() && searchRequest.source().pointInTimeBuilder() == null) {
             // The can match phase can reorder shards, so we disable it to ensure the stable ordering
             searchRequest.setPreFilterShardSize(Integer.MAX_VALUE);
             rewriteSearchRequestListener = ActionListener.releaseAfter(

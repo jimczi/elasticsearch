@@ -12,6 +12,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.DisMaxQueryBuilder;
+import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.rank.RankDoc;
 import org.elasticsearch.search.vectors.ExactKnnQueryBuilder;
@@ -29,10 +30,10 @@ public class RankDocsRetrieverBuilder extends RetrieverBuilder {
 
     public static final String NAME = "rank_docs";
     private final int windowSize;
-    private final List<SearchSourceBuilder> sources;
+    private final List<RetrieverBuilder> sources;
     private final Supplier<RankDoc[]> rankDocs;
 
-    public RankDocsRetrieverBuilder(int windowSize, List<SearchSourceBuilder> sources, Supplier<RankDoc[]> rankDocs) {
+    public RankDocsRetrieverBuilder(int windowSize, List<RetrieverBuilder> sources, Supplier<RankDoc[]> rankDocs) {
         this.windowSize = windowSize;
         this.rankDocs = rankDocs;
         this.sources = sources;
@@ -44,6 +45,15 @@ public class RankDocsRetrieverBuilder extends RetrieverBuilder {
     }
 
     @Override
+    public QueryBuilder originalQuery() {
+        DisMaxQueryBuilder disMax = new DisMaxQueryBuilder().tieBreaker(0f);
+        for (var source : sources) {
+            disMax.add(source.originalQuery());
+        }
+        return disMax;
+    }
+
+    @Override
     public void extractToSearchSourceBuilder(SearchSourceBuilder searchSourceBuilder, boolean compoundUsed) {
         searchSourceBuilder.sort(Collections.singletonList(new RankDocsSortBuilder(rankDocs.get())));
         if (searchSourceBuilder.explain() != null && searchSourceBuilder.explain()) {
@@ -52,28 +62,15 @@ public class RankDocsRetrieverBuilder extends RetrieverBuilder {
         var bq = new BoolQueryBuilder();
         var rankQuery = new RankDocsQueryBuilder(rankDocs.get());
         if (searchSourceBuilder.aggregations() != null) {
-            bq.must(rankQuery);
+            bq.should(rankQuery);
             searchSourceBuilder.postFilter(rankQuery);
         } else {
-            bq.should(rankQuery);
+            bq.must(rankQuery);
         }
         for (var preFilterQueryBuilder : preFilterQueryBuilders) {
             bq.filter(preFilterQueryBuilder);
         }
-
-        DisMaxQueryBuilder disMax = new DisMaxQueryBuilder().tieBreaker(0f);
-        for (var originalSource : sources) {
-            // TODO: Add named queries?
-            if (originalSource.query() != null) {
-                disMax.add(originalSource.query());
-            }
-            for (var knnSearch : originalSource.knnSearch()) {
-                // TODO nested + inner_hits
-                ExactKnnQueryBuilder knn = new ExactKnnQueryBuilder(knnSearch.getQueryVector(), knnSearch.getField());
-                disMax.add(knn);
-            }
-        }
-        bq.should(disMax);
+        bq.should(originalQuery());
         searchSourceBuilder.query(bq);
     }
 

@@ -19,6 +19,7 @@ import org.elasticsearch.action.search.TransportMultiSearchAction;
 import org.elasticsearch.common.ParsingException;
 import org.elasticsearch.common.util.Maps;
 import org.elasticsearch.features.NodeFeature;
+import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.search.builder.PointInTimeBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
@@ -117,7 +118,7 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
     }
 
     @Override
-    public boolean requiresPointInTime() {
+    public boolean isCompound() {
         return true;
     }
 
@@ -175,7 +176,12 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
                 }
             });
         });
-        return new RankDocsRetrieverBuilder(rankWindowSize, newRetrievers.stream().map(s -> s.source).toList(), results::get);
+        return new RankDocsRetrieverBuilder(rankWindowSize, newRetrievers.stream().map(s -> s.retriever).toList(), results::get);
+    }
+
+    @Override
+    public QueryBuilder originalQuery() {
+        throw new IllegalStateException(NAME + " cannot be nested");
     }
 
     @Override
@@ -195,7 +201,6 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
                 entry.retriever.toXContent(builder, params);
                 builder.endObject();
             }
-
             builder.endArray();
         }
 

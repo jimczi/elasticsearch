@@ -159,7 +159,10 @@ public abstract class RetrieverBuilder implements Rewriteable<RetrieverBuilder>,
         return preFilterQueryBuilders;
     }
 
-    public boolean requiresPointInTime() {
+    /**
+     * Determines if this retriever contains sub-retrievers that need to be rewritten into simpler forms.
+     */
+    public boolean isCompound() {
         return false;
     }
 
@@ -167,6 +170,11 @@ public abstract class RetrieverBuilder implements Rewriteable<RetrieverBuilder>,
     public RetrieverBuilder rewrite(QueryRewriteContext ctx) throws IOException {
         return this;
     }
+
+    /**
+     * Returns the original {@link QueryBuilder} used to compute the top documents.
+     */
+    public abstract QueryBuilder originalQuery();
 
     /**
      * This method is called at the end of parsing on behalf of a {@link SearchSourceBuilder}.
