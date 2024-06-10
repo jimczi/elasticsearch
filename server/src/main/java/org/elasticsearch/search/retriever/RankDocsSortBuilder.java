@@ -9,6 +9,8 @@
 package org.elasticsearch.search.retriever;
 
 import org.elasticsearch.TransportVersion;
+import org.elasticsearch.TransportVersions;
+import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.index.query.QueryRewriteContext;
@@ -24,7 +26,7 @@ import java.io.IOException;
 import java.util.Arrays;
 
 public class RankDocsSortBuilder extends SortBuilder<RankDocsSortBuilder> {
-    public static final String NAME = "rank_docs";
+    public static final String NAME = "rank_sort";
 
     private final RankDoc[] rankDocs;
 
@@ -32,14 +34,18 @@ public class RankDocsSortBuilder extends SortBuilder<RankDocsSortBuilder> {
         this.rankDocs = rankDocs;
     }
 
-    @Override
-    public String getWriteableName() {
-        return NAME;
+    public RankDocsSortBuilder(StreamInput in) throws IOException {
+        this.rankDocs = in.readArray(c -> c.readNamedWriteable(RankDoc.class), RankDoc[]::new);
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         out.writeArray(StreamOutput::writeNamedWriteable, rankDocs);
+    }
+
+    @Override
+    public String getWriteableName() {
+        return NAME;
     }
 
     @Override
@@ -57,8 +63,7 @@ public class RankDocsSortBuilder extends SortBuilder<RankDocsSortBuilder> {
 
     @Override
     public TransportVersion getMinimalSupportedVersion() {
-        // TODO
-        return TransportVersion.current();
+        return TransportVersions.RANK_DOCS_RETRIEVER;
     }
 
     @Override

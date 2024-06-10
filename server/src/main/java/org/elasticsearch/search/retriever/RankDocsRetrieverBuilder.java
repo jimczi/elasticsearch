@@ -13,9 +13,9 @@ import org.apache.logging.log4j.Logger;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.DisMaxQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.rank.RankDoc;
-import org.elasticsearch.search.vectors.ExactKnnQueryBuilder;
 import org.elasticsearch.xcontent.XContentBuilder;
 
 import java.io.IOException;
@@ -25,6 +25,9 @@ import java.util.List;
 import java.util.Objects;
 import java.util.function.Supplier;
 
+/**
+ * An {@link RetrieverBuilder} that is used to
+ */
 public class RankDocsRetrieverBuilder extends RetrieverBuilder {
     private static final Logger logger = LogManager.getLogger(RankDocsRetrieverBuilder.class);
 
@@ -33,10 +36,16 @@ public class RankDocsRetrieverBuilder extends RetrieverBuilder {
     private final List<RetrieverBuilder> sources;
     private final Supplier<RankDoc[]> rankDocs;
 
-    public RankDocsRetrieverBuilder(int windowSize, List<RetrieverBuilder> sources, Supplier<RankDoc[]> rankDocs) {
+    public RankDocsRetrieverBuilder(
+        int windowSize,
+        List<RetrieverBuilder> rewritten,
+        Supplier<RankDoc[]> rankDocs,
+        List<QueryBuilder> preFilterQueryBuilders
+    ) {
         this.windowSize = windowSize;
         this.rankDocs = rankDocs;
-        this.sources = sources;
+        this.sources = rewritten;
+        this.preFilterQueryBuilders = preFilterQueryBuilders;
     }
 
     @Override
@@ -44,11 +53,37 @@ public class RankDocsRetrieverBuilder extends RetrieverBuilder {
         return NAME;
     }
 
+    private boolean sourceShouldRewrite(QueryRewriteContext ctx) throws IOException {
+        for (var source : sources) {
+            var newSource = source.rewrite(ctx);
+            if (newSource != source) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     @Override
-    public QueryBuilder originalQuery() {
+    public RetrieverBuilder rewrite(QueryRewriteContext ctx) throws IOException {
+        assert sourceShouldRewrite(ctx) == false : "Retriever sources should be rewritten first";
+        var rewrittenFilters = rewritePreFilters(ctx);
+        if (rewrittenFilters != preFilterQueryBuilders) {
+            return new RankDocsRetrieverBuilder(windowSize, sources, rankDocs, rewrittenFilters);
+        }
+        return this;
+    }
+
+    @Override
+    public QueryBuilder originalQuery(QueryBuilder leadQuery) {
         DisMaxQueryBuilder disMax = new DisMaxQueryBuilder().tieBreaker(0f);
         for (var source : sources) {
-            disMax.add(source.originalQuery());
+            var query = source.originalQuery(leadQuery);
+            if (query != null) {
+                if (source.retrieverName != null) {
+                    query.queryName(source.retrieverName);
+                }
+                disMax.add(query);
+            }
         }
         return disMax;
     }
@@ -70,7 +105,10 @@ public class RankDocsRetrieverBuilder extends RetrieverBuilder {
         for (var preFilterQueryBuilder : preFilterQueryBuilders) {
             bq.filter(preFilterQueryBuilder);
         }
-        bq.should(originalQuery());
+        QueryBuilder originalQuery = originalQuery(rankQuery);
+        if (originalQuery != null) {
+            bq.should(originalQuery);
+        }
         searchSourceBuilder.query(bq);
     }
 
@@ -82,7 +120,7 @@ public class RankDocsRetrieverBuilder extends RetrieverBuilder {
 
     @Override
     protected int doHashCode() {
-        return Objects.hash(super.hashCode(), windowSize);
+        return Objects.hash(super.hashCode(), Arrays.hashCode(rankDocs.get()), windowSize);
     }
 
     @Override

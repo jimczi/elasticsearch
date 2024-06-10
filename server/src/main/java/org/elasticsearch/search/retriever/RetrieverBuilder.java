@@ -152,6 +152,27 @@ public abstract class RetrieverBuilder implements Rewriteable<RetrieverBuilder>,
 
     protected String retrieverName;
 
+    public RetrieverBuilder() {}
+
+    protected RetrieverBuilder(RetrieverBuilder clone) {
+        this.preFilterQueryBuilders = clone.preFilterQueryBuilders;
+        this.retrieverName = clone.retrieverName;
+    }
+
+    protected final List<QueryBuilder> rewritePreFilters(QueryRewriteContext ctx) throws IOException {
+        List<QueryBuilder> newFilters = new ArrayList<>(preFilterQueryBuilders.size());
+        boolean changed = false;
+        for (var filter : preFilterQueryBuilders) {
+            var newFilter = filter.rewrite(ctx);
+            changed |= filter != newFilter;
+            newFilters.add(newFilter);
+        }
+        if (changed) {
+            return newFilters;
+        }
+        return preFilterQueryBuilders;
+    }
+
     /**
      * Gets the filters for this retriever.
      */
@@ -173,12 +194,13 @@ public abstract class RetrieverBuilder implements Rewriteable<RetrieverBuilder>,
 
     /**
      * Returns the original {@link QueryBuilder} used to compute the top documents.
+     * @param leadQuery
      */
-    public abstract QueryBuilder originalQuery();
+    public abstract QueryBuilder originalQuery(QueryBuilder leadQuery);
 
     /**
-     * This method is called at the end of parsing on behalf of a {@link SearchSourceBuilder}.
-     * Elements from retrievers are expected to be "extracted" into the {@link SearchSourceBuilder}.
+     * This method is called at the end of rewrite on the final retriever.
+     * Elements of the search request are expected to be "extracted" into the {@link SearchSourceBuilder}.
      */
     public abstract void extractToSearchSourceBuilder(SearchSourceBuilder searchSourceBuilder, boolean compoundUsed);
 

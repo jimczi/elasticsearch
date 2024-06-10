@@ -11,6 +11,7 @@ package org.elasticsearch.search.retriever;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.search.Query;
 import org.elasticsearch.TransportVersion;
+import org.elasticsearch.TransportVersions;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.index.query.AbstractQueryBuilder;
@@ -23,7 +24,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 
 public class RankDocsQueryBuilder extends AbstractQueryBuilder<RankDocsQueryBuilder> {
-    public static final String NAME = "rank_docs";
+    public static final String NAME = "rank";
 
     private final RankDoc[] rankDocs;
 
@@ -92,7 +93,6 @@ public class RankDocsQueryBuilder extends AbstractQueryBuilder<RankDocsQueryBuil
 
     @Override
     public TransportVersion getMinimalSupportedVersion() {
-        // TODO
-        return TransportVersion.current();
+        return TransportVersions.RANK_DOCS_RETRIEVER;
     }
 }

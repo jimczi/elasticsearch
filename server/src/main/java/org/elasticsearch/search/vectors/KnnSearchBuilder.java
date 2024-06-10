@@ -298,6 +298,10 @@ public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewritea
         return field;
     }
 
+    public Float getSimilarity() {
+        return similarity;
+    }
+
     public KnnSearchBuilder addFilterQuery(QueryBuilder filterQuery) {
         Objects.requireNonNull(filterQuery);
         this.filterQueries.add(filterQuery);

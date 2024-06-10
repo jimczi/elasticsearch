@@ -108,27 +108,42 @@ public final class StandardRetrieverBuilder extends RetrieverBuilder implements 
 
     StandardRetrieverBuilder() {}
 
-    public StandardRetrieverBuilder(StandardRetrieverBuilder clone, QueryBuilder rewritten) {
+    public StandardRetrieverBuilder(StandardRetrieverBuilder clone, QueryBuilder rewritten, List<QueryBuilder> preFilterQueryBuilders) {
+        super(clone);
         this.queryBuilder = rewritten;
+        this.preFilterQueryBuilders = preFilterQueryBuilders;
         this.searchAfterBuilder = clone.searchAfterBuilder;
         this.terminateAfter = clone.terminateAfter;
         this.sortBuilders = clone.sortBuilders;
         this.minScore = clone.minScore;
         this.collapseBuilder = clone.collapseBuilder;
-        this.preFilterQueryBuilders = clone.preFilterQueryBuilders;
     }
 
     @Override
     public RetrieverBuilder rewrite(QueryRewriteContext ctx) throws IOException {
-        var rewritten = queryBuilder.rewrite(ctx);
-        if (rewritten != queryBuilder) {
-            return new StandardRetrieverBuilder(this, rewritten);
+        // We only rewrite the query to avoid redundant work.
+        // The other query components are naturally rewritten during the search phase.
+        var rewritten = queryBuilder != null ? queryBuilder.rewrite(ctx) : null;
+        boolean hasChanged = rewritten != queryBuilder;
+        var rewrittenFilters = rewritePreFilters(ctx);
+        hasChanged |= rewrittenFilters != preFilterQueryBuilders;
+        if (hasChanged) {
+            return new StandardRetrieverBuilder(this, rewritten, rewrittenFilters);
         }
         return this;
     }
 
     @Override
-    public QueryBuilder originalQuery() {
+    public QueryBuilder originalQuery(QueryBuilder leadQuery) {
+        /**
+         * What actions should we take with {@link KnnVectorQueryBuilder} or {@link MultiTermQueryBuilder} when a
+         * compound retriever executes the original queries? Our goal is to retain these queries in scenarios where
+         * aggregations, highlighting, or inner_hits are used. However, this approach can be costly for compound
+         * retrievers since they will be executed twice: once as a must clause at this level and a second time as a
+         * should clause at the upper level (compound retriever).
+         * Therefore, it would be beneficial to rewrite these queries at the upper level to focus solely on
+         * scoring/matching similar to what {@link RetrieverBuilder#originalQuery(QueryBuilder)} is doing.
+         */
         if (preFilterQueryBuilders.isEmpty()) {
             return queryBuilder;
         }
@@ -149,7 +164,7 @@ public final class StandardRetrieverBuilder extends RetrieverBuilder implements 
             if (queryBuilder != null) {
                 boolQueryBuilder.must(queryBuilder);
             }
-            searchSourceBuilder.query(queryBuilder);
+            searchSourceBuilder.query(boolQueryBuilder);
         } else if (queryBuilder != null) {
             searchSourceBuilder.query(queryBuilder);
         }

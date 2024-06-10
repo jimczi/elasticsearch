@@ -1,9 +1,8 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
  * or more contributor license agreements. Licensed under the Elastic License
- * 2.0 and the Server Side Public License, v 1; you may not use this file except
- * in compliance with, at your election, the Elastic License 2.0 or the Server
- * Side Public License, v 1.
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 
 package org.elasticsearch.xpack.rank.rrf;
@@ -19,8 +18,10 @@ import org.elasticsearch.action.search.TransportMultiSearchAction;
 import org.elasticsearch.common.ParsingException;
 import org.elasticsearch.common.util.Maps;
 import org.elasticsearch.features.NodeFeature;
+import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryRewriteContext;
+import org.elasticsearch.license.LicenseUtils;
 import org.elasticsearch.search.builder.PointInTimeBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.fetch.StoredFieldsContext;
@@ -37,6 +38,7 @@ import org.elasticsearch.xcontent.ConstructingObjectParser;
 import org.elasticsearch.xcontent.ParseField;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentParser;
+import org.elasticsearch.xpack.core.XPackPlugin;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -86,6 +88,9 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
         if (context.clusterSupportsFeature(RRF_RETRIEVER_SUPPORTED) == false) {
             throw new ParsingException(parser.getTokenLocation(), "unknown retriever [" + NAME + "]");
         }
+        if (RRFRankPlugin.RANK_RRF_FEATURE.check(XPackPlugin.getSharedLicenseState()) == false) {
+            throw LicenseUtils.newComplianceException("Reciprocal Rank Fusion (RRF)");
+        }
         return PARSER.apply(parser, context);
     }
 
@@ -94,7 +99,7 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
     private final List<RetrieverSource> retrievers;
     private final int rankWindowSize;
     private final int rankConstant;
-    private final SetOnce<RRFRankDoc[]> rankDocs;
+    private final SetOnce<RRFRankDoc[]> rankDocsSupplier;
 
     public RRFRetrieverBuilder(List<RetrieverBuilder> retrieverBuilders, int rankWindowSize, int rankConstant) {
         this(
@@ -105,11 +110,30 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
         );
     }
 
-    private RRFRetrieverBuilder(List<RetrieverSource> retrievers, int rankWindowSize, int rankConstant, SetOnce<RRFRankDoc[]> rankDocs) {
+    private RRFRetrieverBuilder(
+        List<RetrieverSource> retrievers,
+        int rankWindowSize,
+        int rankConstant,
+        SetOnce<RRFRankDoc[]> rankDocsSupplier
+    ) {
         this.retrievers = retrievers;
         this.rankWindowSize = rankWindowSize;
         this.rankConstant = rankConstant;
-        this.rankDocs = rankDocs;
+        this.rankDocsSupplier = rankDocsSupplier;
+    }
+
+    private RRFRetrieverBuilder(
+        RRFRetrieverBuilder clone,
+        List<QueryBuilder> preFilterQueryBuilders,
+        List<RetrieverSource> retrievers,
+        SetOnce<RRFRankDoc[]> rankDocsSupplier
+    ) {
+        super(clone);
+        this.preFilterQueryBuilders = preFilterQueryBuilders;
+        this.rankWindowSize = clone.rankWindowSize;
+        this.rankConstant = clone.rankConstant;
+        this.retrievers = retrievers;
+        this.rankDocsSupplier = rankDocsSupplier;
     }
 
     @Override
@@ -127,8 +151,18 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
         if (ctx.pointInTimeBuilder() == null) {
             throw new IllegalStateException("PIT is required");
         }
-        List<RetrieverSource> newRetrievers = new ArrayList<>();
+
+        if (rankDocsSupplier != null) {
+            return this;
+        }
+
+        // Rewrite prefilters
         boolean hasChanged = false;
+        var newPreFilters = rewritePreFilters(ctx);
+        hasChanged |= newPreFilters != preFilterQueryBuilders;
+
+        // Rewrite retriever sources
+        List<RetrieverSource> newRetrievers = new ArrayList<>();
         for (var entry : retrievers) {
             RetrieverBuilder newRetriever = entry.retriever.rewrite(ctx);
             if (newRetriever != entry.retriever) {
@@ -142,21 +176,18 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
             }
         }
         if (hasChanged) {
-            return new RRFRetrieverBuilder(newRetrievers, rankWindowSize, rankConstant, null);
+            return new RRFRetrieverBuilder(this, newPreFilters, newRetrievers, null);
         }
 
-        if (rankDocs != null) {
-            return this;
-        }
-
-        MultiSearchRequest multiSearchRequest = new MultiSearchRequest();
+        // execute searches
+        final SetOnce<RankDoc[]> results = new SetOnce<>();
+        final MultiSearchRequest multiSearchRequest = new MultiSearchRequest();
         for (var entry : retrievers) {
             SearchRequest searchRequest = new SearchRequest().source(entry.source);
             // The can match phase can reorder shards, so we disable it to ensure the stable ordering
             searchRequest.setPreFilterShardSize(Integer.MAX_VALUE);
             multiSearchRequest.add(searchRequest);
         }
-        final SetOnce<RankDoc[]> results = new SetOnce<>();
         ctx.registerAsyncAction((client, listener) -> {
             client.execute(TransportMultiSearchAction.TYPE, multiSearchRequest, new ActionListener<>() {
                 @Override
@@ -176,11 +207,17 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
                 }
             });
         });
-        return new RankDocsRetrieverBuilder(rankWindowSize, newRetrievers.stream().map(s -> s.retriever).toList(), results::get);
+
+        return new RankDocsRetrieverBuilder(
+            rankWindowSize,
+            newRetrievers.stream().map(s -> s.retriever).toList(),
+            results::get,
+            newPreFilters
+        );
     }
 
     @Override
-    public QueryBuilder originalQuery() {
+    public QueryBuilder originalQuery(QueryBuilder leadQuery) {
         throw new IllegalStateException(NAME + " cannot be nested");
     }
 
@@ -225,6 +262,18 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
             .storedFields(new StoredFieldsContext(false))
             .size(rankWindowSize);
         retrieverBuilder.extractToSearchSourceBuilder(sourceBuilder, false);
+
+        // apply the pre-filters
+        if (preFilterQueryBuilders.size() > 0) {
+            QueryBuilder query = sourceBuilder.query();
+            BoolQueryBuilder newQuery = new BoolQueryBuilder();
+            if (query != null) {
+                newQuery.must(query);
+            }
+            preFilterQueryBuilders.stream().forEach(newQuery::filter);
+            sourceBuilder.query(newQuery);
+        }
+
         // Record the shard id in the sort result
         List<SortBuilder<?>> sortBuilders = sourceBuilder.sorts() != null ? new ArrayList<>(sourceBuilder.sorts()) : new ArrayList<>();
         if (sortBuilders.isEmpty()) {
@@ -240,8 +289,10 @@ public class RRFRetrieverBuilder extends RetrieverBuilder {
         ScoreDoc[] docs = new ScoreDoc[size];
         for (int i = 0; i < size; i++) {
             var hit = searchResponse.getHits().getAt(i);
-            int shardRequestIndex = ShardDocSortField.shardRequestIndex((long) hit.getRawSortValues()[hit.getRawSortValues().length - 1]);
-            docs[i] = new ScoreDoc(hit.docId(), hit.getScore(), shardRequestIndex);
+            long sortValue = (long) hit.getRawSortValues()[hit.getRawSortValues().length - 1];
+            int doc = ShardDocSortField.decodeDoc(sortValue);
+            int shardRequestIndex = ShardDocSortField.decodeShardRequestIndex(sortValue);
+            docs[i] = new ScoreDoc(doc, hit.getScore(), shardRequestIndex);
         }
         return docs;
     }

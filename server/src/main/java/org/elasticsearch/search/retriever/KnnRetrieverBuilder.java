@@ -12,6 +12,7 @@ import org.elasticsearch.common.ParsingException;
 import org.elasticsearch.features.NodeFeature;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.vectors.ExactKnnQueryBuilder;
 import org.elasticsearch.search.vectors.KnnSearchBuilder;
@@ -24,7 +25,6 @@ import org.elasticsearch.xcontent.XContentParser;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
@@ -94,12 +94,6 @@ public final class KnnRetrieverBuilder extends RetrieverBuilder {
     }
 
     private final KnnSearchBuilder knnSearchBuilder;
-    private final String field;
-    private final float[] queryVector;
-    private final QueryVectorBuilder queryVectorBuilder;
-    private final int k;
-    private final int numCands;
-    private final Float similarity;
 
     public KnnRetrieverBuilder(
         String field,
@@ -109,13 +103,20 @@ public final class KnnRetrieverBuilder extends RetrieverBuilder {
         int numCands,
         Float similarity
     ) {
-        this.knnSearchBuilder = new KnnSearchBuilder(field, VectorData.fromFloats(queryVector), queryVectorBuilder, k, numCands, similarity);
-        this.field = field;
-        this.queryVector = queryVector;
-        this.queryVectorBuilder = queryVectorBuilder;
-        this.k = k;
-        this.numCands = numCands;
-        this.similarity = similarity;
+        this.knnSearchBuilder = new KnnSearchBuilder(
+            field,
+            VectorData.fromFloats(queryVector),
+            queryVectorBuilder,
+            k,
+            numCands,
+            similarity
+        );
+    }
+
+    private KnnRetrieverBuilder(KnnRetrieverBuilder clone, KnnSearchBuilder knnSearchBuilder, List<QueryBuilder> preFilterQueryBuilders) {
+        super(clone);
+        this.knnSearchBuilder = knnSearchBuilder;
+        this.preFilterQueryBuilders = preFilterQueryBuilders;
     }
 
     // ---- FOR TESTING XCONTENT PARSING ----
@@ -126,13 +127,22 @@ public final class KnnRetrieverBuilder extends RetrieverBuilder {
     }
 
     @Override
-    public QueryBuilder originalQuery() {
-        // TODO nested + inner_hits
-        ExactKnnQueryBuilder knn = new ExactKnnQueryBuilder(knnSearchBuilder.getQueryVector(), knnSearchBuilder.getField());
-        if (preFilterQueryBuilders.isEmpty()) {
-            return knn;
+    public RetrieverBuilder rewrite(QueryRewriteContext ctx) throws IOException {
+        var rewritten = knnSearchBuilder.rewrite(ctx);
+        boolean hasChanged = rewritten != knnSearchBuilder;
+        var rewrittenFilters = rewritePreFilters(ctx);
+        hasChanged |= rewrittenFilters != preFilterQueryBuilders;
+        if (hasChanged) {
+            return new KnnRetrieverBuilder(this, rewritten, rewrittenFilters);
         }
-        var ret = new BoolQueryBuilder().should(knn);
+        return this;
+    }
+
+    @Override
+    public QueryBuilder originalQuery(QueryBuilder leadQuery) {
+        // TODO nested + inner_hits
+        BoolQueryBuilder ret = new BoolQueryBuilder().must(leadQuery)
+            .should(new ExactKnnQueryBuilder(knnSearchBuilder.getQueryVector(), knnSearchBuilder.getField()));
         preFilterQueryBuilders.stream().forEach(ret::filter);
         return ret;
     }
@@ -152,39 +162,32 @@ public final class KnnRetrieverBuilder extends RetrieverBuilder {
 
     @Override
     public void doToXContent(XContentBuilder builder, Params params) throws IOException {
-        builder.field(FIELD_FIELD.getPreferredName(), field);
-        builder.field(K_FIELD.getPreferredName(), k);
-        builder.field(NUM_CANDS_FIELD.getPreferredName(), numCands);
+        builder.field(FIELD_FIELD.getPreferredName(), knnSearchBuilder.getField());
+        builder.field(K_FIELD.getPreferredName(), knnSearchBuilder.k());
+        builder.field(NUM_CANDS_FIELD.getPreferredName(), knnSearchBuilder.k());
 
-        if (queryVector != null) {
-            builder.field(QUERY_VECTOR_FIELD.getPreferredName(), queryVector);
+        if (knnSearchBuilder.getQueryVector() != null) {
+            builder.field(QUERY_VECTOR_FIELD.getPreferredName(), knnSearchBuilder.getQueryVector());
         }
 
-        if (queryVectorBuilder != null) {
-            builder.field(QUERY_VECTOR_BUILDER_FIELD.getPreferredName(), queryVectorBuilder);
+        if (knnSearchBuilder.getQueryVectorBuilder() != null) {
+            builder.field(QUERY_VECTOR_BUILDER_FIELD.getPreferredName(), knnSearchBuilder.getQueryVectorBuilder());
         }
 
-        if (similarity != null) {
-            builder.field(VECTOR_SIMILARITY.getPreferredName(), similarity);
+        if (knnSearchBuilder.getSimilarity() != null) {
+            builder.field(VECTOR_SIMILARITY.getPreferredName(), knnSearchBuilder.getSimilarity());
         }
     }
 
     @Override
     public boolean doEquals(Object o) {
         KnnRetrieverBuilder that = (KnnRetrieverBuilder) o;
-        return k == that.k
-            && numCands == that.numCands
-            && Objects.equals(field, that.field)
-            && Arrays.equals(queryVector, that.queryVector)
-            && Objects.equals(queryVectorBuilder, that.queryVectorBuilder)
-            && Objects.equals(similarity, that.similarity);
+        return Objects.equals(knnSearchBuilder, that.knnSearchBuilder);
     }
 
     @Override
     public int doHashCode() {
-        int result = Objects.hash(field, queryVectorBuilder, k, numCands, similarity);
-        result = 31 * result + Arrays.hashCode(queryVector);
-        return result;
+        return Objects.hash(knnSearchBuilder);
     }
 
     // ---- END TESTING ----
