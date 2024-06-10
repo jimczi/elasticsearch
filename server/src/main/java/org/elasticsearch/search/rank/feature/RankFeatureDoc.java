@@ -8,6 +8,7 @@
 
 package org.elasticsearch.search.rank.feature;
 
+import org.apache.lucene.search.Explanation;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.search.rank.RankDoc;
@@ -52,6 +53,11 @@ public class RankFeatureDoc extends RankDoc {
     @Override
     protected int doHashCode() {
         return Objects.hashCode(featureData);
+    }
+
+    @Override
+    public Explanation explain() {
+        return Explanation.noMatch("No match");
     }
 
     @Override

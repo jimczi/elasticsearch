@@ -14,7 +14,6 @@ import org.elasticsearch.index.query.AbstractQueryBuilder;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
-import org.elasticsearch.search.builder.SubSearchSourceBuilder;
 import org.elasticsearch.search.collapse.CollapseBuilder;
 import org.elasticsearch.search.internal.SearchContext;
 import org.elasticsearch.search.searchafter.SearchAfterBuilder;
@@ -118,59 +117,28 @@ public final class StandardRetrieverBuilder extends RetrieverBuilder implements 
             if (queryBuilder != null) {
                 boolQueryBuilder.must(queryBuilder);
             }
-
-            searchSourceBuilder.subSearches().add(new SubSearchSourceBuilder(boolQueryBuilder));
+            searchSourceBuilder.query(queryBuilder);
         } else if (queryBuilder != null) {
-            searchSourceBuilder.subSearches().add(new SubSearchSourceBuilder(queryBuilder));
+            searchSourceBuilder.query(queryBuilder);
         }
 
         if (searchAfterBuilder != null) {
-            if (compoundUsed) {
-                throw new IllegalArgumentException(
-                    "[" + SEARCH_AFTER_FIELD.getPreferredName() + "] cannot be used in children of compound retrievers"
-                );
-            }
-
             searchSourceBuilder.searchAfter(searchAfterBuilder.getSortValues());
         }
 
         if (terminateAfter != SearchContext.DEFAULT_TERMINATE_AFTER) {
-            if (compoundUsed) {
-                throw new IllegalArgumentException(
-                    "[" + TERMINATE_AFTER_FIELD.getPreferredName() + "] cannot be used in children of compound retrievers"
-                );
-            }
-
             searchSourceBuilder.terminateAfter(terminateAfter);
         }
 
         if (sortBuilders != null) {
-            if (compoundUsed) {
-                throw new IllegalArgumentException(
-                    "[" + SORT_FIELD.getPreferredName() + "] cannot be used in children of compound retrievers"
-                );
-            }
-
             searchSourceBuilder.sort(sortBuilders);
         }
 
         if (minScore != null) {
-            if (compoundUsed) {
-                throw new IllegalArgumentException(
-                    "[" + MIN_SCORE_FIELD.getPreferredName() + "] cannot be used in children of compound retrievers"
-                );
-            }
-
             searchSourceBuilder.minScore(minScore);
         }
 
         if (collapseBuilder != null) {
-            if (compoundUsed) {
-                throw new IllegalArgumentException(
-                    "[" + COLLAPSE_FIELD.getPreferredName() + "] cannot be used in children of compound retrievers"
-                );
-            }
-
             searchSourceBuilder.collapse(collapseBuilder);
         }
     }

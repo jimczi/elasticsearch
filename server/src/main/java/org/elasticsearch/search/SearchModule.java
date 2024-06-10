@@ -232,6 +232,9 @@ import org.elasticsearch.search.rank.feature.RankFeatureShardPhase;
 import org.elasticsearch.search.rescore.QueryRescorerBuilder;
 import org.elasticsearch.search.rescore.RescorerBuilder;
 import org.elasticsearch.search.retriever.KnnRetrieverBuilder;
+import org.elasticsearch.search.retriever.RankDocsQueryBuilder;
+import org.elasticsearch.search.retriever.RankDocsRetrieverBuilder;
+import org.elasticsearch.search.retriever.RankDocsSortBuilder;
 import org.elasticsearch.search.retriever.RetrieverBuilder;
 import org.elasticsearch.search.retriever.RetrieverParserContext;
 import org.elasticsearch.search.retriever.StandardRetrieverBuilder;
@@ -840,6 +843,7 @@ public class SearchModule {
         namedWriteables.add(new NamedWriteableRegistry.Entry(SortBuilder.class, ScoreSortBuilder.NAME, ScoreSortBuilder::new));
         namedWriteables.add(new NamedWriteableRegistry.Entry(SortBuilder.class, ScriptSortBuilder.NAME, ScriptSortBuilder::new));
         namedWriteables.add(new NamedWriteableRegistry.Entry(SortBuilder.class, FieldSortBuilder.NAME, FieldSortBuilder::new));
+        namedWriteables.add(new NamedWriteableRegistry.Entry(SortBuilder.class, RankDocsSortBuilder.NAME, FieldSortBuilder::new));
     }
 
     private static <T> void registerFromPlugin(List<SearchPlugin> plugins, Function<SearchPlugin, List<T>> producer, Consumer<T> consumer) {
@@ -1074,6 +1078,9 @@ public class SearchModule {
     private void registerRetrieverParsers(List<SearchPlugin> plugins) {
         registerRetriever(new RetrieverSpec<>(StandardRetrieverBuilder.NAME, StandardRetrieverBuilder::fromXContent));
         registerRetriever(new RetrieverSpec<>(KnnRetrieverBuilder.NAME, KnnRetrieverBuilder::fromXContent));
+        registerRetriever(new RetrieverSpec<>(RankDocsRetrieverBuilder.NAME, (p, c) -> {
+            throw new IllegalArgumentException("[rank_docs] retriever cannot be provided directly");
+        }));
 
         registerFromPlugin(plugins, SearchPlugin::getRetrievers, this::registerRetriever);
     }
@@ -1172,6 +1179,9 @@ public class SearchModule {
         }));
         registerQuery(new QuerySpec<>(ExactKnnQueryBuilder.NAME, ExactKnnQueryBuilder::new, parser -> {
             throw new IllegalArgumentException("[exact_knn] queries cannot be provided directly");
+        }));
+        registerQuery(new QuerySpec<>(RankDocsQueryBuilder.NAME, RankDocsQueryBuilder::new, parser -> {
+            throw new IllegalArgumentException("[rank_docs] queries cannot be provided directly");
         }));
 
         registerFromPlugin(plugins, SearchPlugin::getQueries, this::registerQuery);

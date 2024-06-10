@@ -8,6 +8,7 @@
 
 package org.elasticsearch.search.rank;
 
+import org.apache.lucene.search.Explanation;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 
@@ -36,6 +37,11 @@ public class TestRankDoc extends RankDoc {
     @Override
     public int doHashCode() {
         return 0;
+    }
+
+    @Override
+    public Explanation explain() {
+        return null;
     }
 
     @Override

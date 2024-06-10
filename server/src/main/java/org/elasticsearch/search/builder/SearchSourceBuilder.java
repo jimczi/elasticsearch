@@ -203,6 +203,8 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
 
     private Map<String, Object> runtimeMappings = emptyMap();
 
+    private transient RetrieverBuilder retrieverBuilder;
+
     /**
      * Constructs a new search source builder.
      */
@@ -365,6 +367,10 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
         } else if (rankBuilder != null) {
             throw new IllegalArgumentException("cannot serialize [rank] to version [" + out.getTransportVersion().toReleaseVersion() + "]");
         }
+    }
+
+    public RetrieverBuilder retriever() {
+        return retrieverBuilder;
     }
 
     /**
@@ -1293,7 +1299,6 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
         }
         List<KnnSearchBuilder.Builder> knnBuilders = new ArrayList<>();
 
-        RetrieverBuilder retrieverBuilder = null;
         SearchUsage searchUsage = new SearchUsage();
         while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
             if (token == XContentParser.Token.FIELD_NAME) {
@@ -1657,9 +1662,7 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
             if (specified.isEmpty() == false) {
                 throw new IllegalArgumentException("cannot specify [" + RETRIEVER.getPreferredName() + "] and " + specified);
             }
-            retrieverBuilder.extractToSearchSourceBuilder(this, false);
         }
-
         searchUsageConsumer.accept(searchUsage);
         return this;
     }
