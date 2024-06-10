@@ -14,9 +14,10 @@ import org.elasticsearch.common.xcontent.SuggestingErrorOnUnknown;
 import org.elasticsearch.features.NodeFeature;
 import org.elasticsearch.index.query.AbstractQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.index.query.QueryRewriteContext;
+import org.elasticsearch.index.query.Rewriteable;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.xcontent.AbstractObjectParser;
-import org.elasticsearch.xcontent.FilterXContentParserWrapper;
 import org.elasticsearch.xcontent.NamedObjectNotFoundException;
 import org.elasticsearch.xcontent.ParseField;
 import org.elasticsearch.xcontent.ToXContent;
@@ -42,7 +43,7 @@ import java.util.Objects;
  * serialization and is expected to be fully extracted to a {@link SearchSourceBuilder}
  * prior to any transport calls.
  */
-public abstract class RetrieverBuilder implements ToXContent {
+public abstract class RetrieverBuilder implements Rewriteable<RetrieverBuilder>, ToXContent {
 
     public static final NodeFeature RETRIEVERS_SUPPORTED = new NodeFeature("retrievers_supported");
 
@@ -72,36 +73,6 @@ public abstract class RetrieverBuilder implements ToXContent {
      * compound retriever.
      */
     public static RetrieverBuilder parseTopLevelRetrieverBuilder(XContentParser parser, RetrieverParserContext context) throws IOException {
-        parser = new FilterXContentParserWrapper(parser) {
-
-            int nestedDepth = 0;
-
-            @Override
-            public <T> T namedObject(Class<T> categoryClass, String name, Object context) throws IOException {
-                if (categoryClass.equals(RetrieverBuilder.class)) {
-                    nestedDepth++;
-
-                    if (nestedDepth > 2) {
-                        throw new IllegalArgumentException(
-                            "the nested depth of the [" + name + "] retriever exceeds the maximum nested depth [2] for retrievers"
-                        );
-                    }
-                }
-
-                T namedObject = getXContentRegistry().parseNamedObject(categoryClass, name, this, context);
-
-                if (categoryClass.equals(RetrieverBuilder.class)) {
-                    nestedDepth--;
-                }
-
-                return namedObject;
-            }
-        };
-
-        return parseInnerRetrieverBuilder(parser, context);
-    }
-
-    protected static RetrieverBuilder parseInnerRetrieverBuilder(XContentParser parser, RetrieverParserContext context) throws IOException {
         Objects.requireNonNull(context);
 
         if (parser.currentToken() != XContentParser.Token.START_OBJECT && parser.nextToken() != XContentParser.Token.START_OBJECT) {
@@ -186,6 +157,15 @@ public abstract class RetrieverBuilder implements ToXContent {
      */
     public List<QueryBuilder> getPreFilterQueryBuilders() {
         return preFilterQueryBuilders;
+    }
+
+    public boolean requiresPointInTime() {
+        return false;
+    }
+
+    @Override
+    public RetrieverBuilder rewrite(QueryRewriteContext ctx) throws IOException {
+        return this;
     }
 
     /**

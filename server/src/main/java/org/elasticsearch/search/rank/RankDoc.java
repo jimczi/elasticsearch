@@ -8,6 +8,7 @@
 
 package org.elasticsearch.search.rank;
 
+import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.ScoreDoc;
 import org.elasticsearch.common.io.stream.NamedWriteable;
 import org.elasticsearch.common.io.stream.StreamInput;
@@ -74,4 +75,6 @@ public abstract class RankDoc extends ScoreDoc implements NamedWriteable {
     public String toString() {
         return "RankDoc{" + "score=" + score + ", doc=" + doc + ", shardIndex=" + shardIndex + '}';
     }
+
+    public abstract Explanation explain();
 }

@@ -26,6 +26,7 @@ import org.elasticsearch.action.admin.cluster.shards.TransportClusterSearchShard
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.HandledTransportAction;
 import org.elasticsearch.action.support.IndicesOptions;
+import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.block.ClusterBlockException;
 import org.elasticsearch.cluster.block.ClusterBlockLevel;
@@ -65,11 +66,13 @@ import org.elasticsearch.rest.action.search.SearchResponseMetrics;
 import org.elasticsearch.search.SearchPhaseResult;
 import org.elasticsearch.search.SearchService;
 import org.elasticsearch.search.aggregations.AggregationReduceContext;
+import org.elasticsearch.search.builder.PointInTimeBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.internal.AliasFilter;
 import org.elasticsearch.search.internal.SearchContext;
 import org.elasticsearch.search.profile.SearchProfileResults;
 import org.elasticsearch.search.profile.SearchProfileShardResult;
+import org.elasticsearch.search.retriever.RetrieverBuilder;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.tasks.TaskId;
 import org.elasticsearch.threadpool.ThreadPool;
@@ -150,6 +153,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
     private final int defaultPreFilterShardSize;
     private final boolean ccsCheckCompatibility;
     private final SearchResponseMetrics searchResponseMetrics;
+    private final NodeClient nodeClient;
 
     @Inject
     public TransportSearchAction(
@@ -165,7 +169,8 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         NamedWriteableRegistry namedWriteableRegistry,
         ExecutorSelector executorSelector,
         SearchTransportAPMMetrics searchTransportMetrics,
-        SearchResponseMetrics searchResponseMetrics
+        SearchResponseMetrics searchResponseMetrics,
+        NodeClient nodeClient
     ) {
         super(TYPE.name(), transportService, actionFilters, SearchRequest::new, EsExecutors.DIRECT_EXECUTOR_SERVICE);
         this.threadPool = threadPool;
@@ -183,6 +188,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         this.defaultPreFilterShardSize = DEFAULT_PRE_FILTER_SHARD_SIZE.get(clusterService.getSettings());
         this.ccsCheckCompatibility = SearchService.CCS_VERSION_CHECK_SETTING.get(clusterService.getSettings());
         this.searchResponseMetrics = searchResponseMetrics;
+        this.nodeClient = nodeClient;
     }
 
     private Map<String, OriginalIndices> buildPerIndexOriginalIndices(
@@ -311,13 +317,13 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
 
     void executeRequest(
         SearchTask task,
-        SearchRequest original,
+        SearchRequest searchRequest,
         ActionListener<SearchResponse> listener,
         Function<ActionListener<SearchResponse>, SearchPhaseProvider> searchPhaseProvider
     ) {
         final long relativeStartNanos = System.nanoTime();
         final SearchTimeProvider timeProvider = new SearchTimeProvider(
-            original.getOrCreateAbsoluteStartMillis(),
+            searchRequest.getOrCreateAbsoluteStartMillis(),
             relativeStartNanos,
             System::nanoTime
         );
@@ -326,16 +332,16 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         clusterState.blocks().globalBlockedRaiseException(ClusterBlockLevel.READ);
 
         final ResolvedIndices resolvedIndices;
-        if (original.pointInTimeBuilder() != null) {
+        if (searchRequest.pointInTimeBuilder() != null) {
             resolvedIndices = ResolvedIndices.resolveWithPIT(
-                original.pointInTimeBuilder(),
-                original.indicesOptions(),
+                searchRequest.pointInTimeBuilder(),
+                searchRequest.indicesOptions(),
                 clusterState,
                 namedWriteableRegistry
             );
         } else {
             resolvedIndices = ResolvedIndices.resolveWithIndicesRequest(
-                original,
+                searchRequest,
                 clusterState,
                 indexNameExpressionResolver,
                 remoteClusterService,
@@ -344,7 +350,8 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
             frozenIndexCheck(resolvedIndices);
         }
 
-        ActionListener<SearchRequest> rewriteListener = listener.delegateFailureAndWrap((delegate, rewritten) -> {
+        var retriever = searchRequest.source().retriever();
+        ActionListener<SearchRequest> rewriteSearchRequestListener = listener.delegateFailureAndWrap((delegate, rewritten) -> {
             if (ccsCheckCompatibility) {
                 checkCCSVersionCompatibility(rewritten);
             }
@@ -461,12 +468,70 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
                 }
             }
         });
-
-        Rewriteable.rewriteAndFetch(
-            original,
-            searchService.getRewriteContext(timeProvider::absoluteStartMillis, resolvedIndices),
-            rewriteListener
+        if (retriever == null) {
+            Rewriteable.rewriteAndFetch(
+                searchRequest,
+                searchService.getRewriteContext(timeProvider::absoluteStartMillis, resolvedIndices),
+                rewriteSearchRequestListener
+            );
+            return;
+        }
+        searchRequest.setPreFilterShardSize(Integer.MAX_VALUE);
+        if (retriever.requiresPointInTime() && searchRequest.source().pointInTimeBuilder() == null) {
+            rewriteSearchRequestListener = ActionListener.releaseAfter(
+                rewriteSearchRequestListener,
+                () -> closePIT(searchRequest.source().pointInTimeBuilder())
+            );
+        }
+        ActionListener<RetrieverBuilder> rewriteRetrieverListener = rewriteSearchRequestListener.delegateFailureAndWrap(
+            (delegate, newRetriever) -> {
+                newRetriever.extractToSearchSourceBuilder(searchRequest.source(), false);
+                Rewriteable.rewriteAndFetch(
+                    searchRequest,
+                    searchService.getRewriteContext(timeProvider::absoluteStartMillis, resolvedIndices),
+                    delegate
+                );
+            }
         );
+        if (searchRequest.source().pointInTimeBuilder() == null) {
+            ActionListener<OpenPointInTimeResponse> openPitListener = rewriteRetrieverListener.delegateFailureAndWrap((delegate, resp) -> {
+                var pit = new PointInTimeBuilder(resp.getPointInTimeId());
+                searchRequest.source().pointInTimeBuilder(pit);
+                Rewriteable.rewriteAndFetch(
+                    retriever,
+                    searchService.getRewriteContext(timeProvider::absoluteStartMillis, resolvedIndices, pit),
+                    rewriteRetrieverListener
+                );
+            });
+
+            OpenPointInTimeRequest pitReq = new OpenPointInTimeRequest(searchRequest.indices()).indicesOptions(
+                searchRequest.indicesOptions()
+            ).preference(searchRequest.preference()).routing(searchRequest.routing()).keepAlive(TimeValue.ONE_MINUTE);
+            nodeClient.execute(TransportOpenPointInTimeAction.TYPE, pitReq, openPitListener);
+        } else {
+            Rewriteable.rewriteAndFetch(
+                retriever,
+                searchService.getRewriteContext(
+                    timeProvider::absoluteStartMillis,
+                    resolvedIndices,
+                    searchRequest.source().pointInTimeBuilder()
+                ),
+                rewriteRetrieverListener
+            );
+        }
+    }
+
+    private void closePIT(PointInTimeBuilder pit) {
+        if (pit == null) {
+            return;
+        }
+        nodeClient.execute(TransportClosePointInTimeAction.TYPE, new ClosePointInTimeRequest(pit.getEncodedId()), new ActionListener<>() {
+            @Override
+            public void onResponse(ClosePointInTimeResponse resp) {}
+
+            @Override
+            public void onFailure(Exception e) {}
+        });
     }
 
     static void adjustSearchType(SearchRequest searchRequest, boolean singleShard) {

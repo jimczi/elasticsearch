@@ -790,6 +790,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             valuesSourceRegistry,
             allowExpensiveQueries,
             scriptService,
+            null,
             null
         );
     }
