@@ -482,9 +482,6 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
             OpenPointInTimeRequest pitReq = new OpenPointInTimeRequest(searchRequest.indices()).indicesOptions(
                 searchRequest.indicesOptions()
             ).preference(searchRequest.preference()).routing(searchRequest.routing()).keepAlive(TimeValue.ONE_MINUTE);
-
-            // The can match phase can reorder shards, so we disable it to ensure the stable ordering
-            searchRequest.setPreFilterShardSize(Integer.MAX_VALUE);
             nodeClient.execute(TransportOpenPointInTimeAction.TYPE, pitReq, new ActionListener<>() {
                 @Override
                 public void onResponse(OpenPointInTimeResponse resp) {
@@ -503,6 +500,11 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
                 }
             });
             return;
+        }
+        if (retriever.isCompound()) {
+            // The can match phase can reorder shards, so we disable it to ensure the stable ordering
+            // when running multiple requests within the same pit.
+            searchRequest.setPreFilterShardSize(Integer.MAX_VALUE);
         }
         Rewriteable.rewriteAndFetch(
             searchRequest,
