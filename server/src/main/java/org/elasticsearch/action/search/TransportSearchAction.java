@@ -469,15 +469,16 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         });
 
         final SearchSourceBuilder source = searchRequest.source();
-        final RetrieverBuilder retriever = source.retrieverBuilder();
-        if (retriever == null) {
+        if (source != null && source.retrieverBuilder() == null) {
             Rewriteable.rewriteAndFetch(
-                searchRequest,
-                searchService.getRewriteContext(timeProvider::absoluteStartMillis, resolvedIndices),
-                rewriteSearchRequestListener
+                    searchRequest,
+                    searchService.getRewriteContext(timeProvider::absoluteStartMillis, resolvedIndices),
+                    rewriteSearchRequestListener
             );
             return;
-        } else if (retriever != null && retriever.isCompound() && source.pointInTimeBuilder() == null) {
+        }
+        final RetrieverBuilder retriever = source.retrieverBuilder();
+        if (retriever != null && retriever.isCompound() && source.pointInTimeBuilder() == null) {
             OpenPointInTimeRequest pitReq = new OpenPointInTimeRequest(searchRequest.indices()).indicesOptions(
                 searchRequest.indicesOptions()
             ).preference(searchRequest.preference()).routing(searchRequest.routing()).keepAlive(TimeValue.ONE_MINUTE);
