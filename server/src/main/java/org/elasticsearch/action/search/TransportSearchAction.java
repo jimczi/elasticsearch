@@ -471,9 +471,9 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         final SearchSourceBuilder source = searchRequest.source();
         if (source != null && source.retrieverBuilder() == null) {
             Rewriteable.rewriteAndFetch(
-                    searchRequest,
-                    searchService.getRewriteContext(timeProvider::absoluteStartMillis, resolvedIndices),
-                    rewriteSearchRequestListener
+                searchRequest,
+                searchService.getRewriteContext(timeProvider::absoluteStartMillis, resolvedIndices),
+                rewriteSearchRequestListener
             );
             return;
         }
