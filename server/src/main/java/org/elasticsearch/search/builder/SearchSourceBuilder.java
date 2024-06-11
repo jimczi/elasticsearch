@@ -369,10 +369,8 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
         }
     }
 
-    public RetrieverBuilder consumeRetriever() {
-        var ret = retrieverBuilder;
-        this.retrieverBuilder = null;
-        return ret;
+    public RetrieverBuilder retrieverBuilder() {
+        return retrieverBuilder;
     }
 
     /**
@@ -1142,6 +1140,18 @@ public final class SearchSourceBuilder implements Writeable, ToXContentObject, R
                 highlightBuilder
             )
         ));
+        if (retrieverBuilder != null) {
+            var newRetriever = retrieverBuilder.rewrite(context);
+            if (newRetriever != retrieverBuilder) {
+                var rewritten = shallowCopy();
+                rewritten.retrieverBuilder = newRetriever;
+                return rewritten;
+            } else {
+                // consume retriever
+                retrieverBuilder.extractToSearchSourceBuilder(this, false);
+                retrieverBuilder = null;
+            }
+        }
         List<SubSearchSourceBuilder> subSearchSourceBuilders = Rewriteable.rewrite(this.subSearchSourceBuilders, context);
         QueryBuilder postQueryBuilder = null;
         if (this.postQueryBuilder != null) {

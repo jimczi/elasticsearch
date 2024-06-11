@@ -350,7 +350,6 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
             frozenIndexCheck(resolvedIndices);
         }
 
-        var retriever = searchRequest.source().consumeRetriever();
         ActionListener<SearchRequest> rewriteSearchRequestListener = listener.delegateFailureAndWrap((delegate, rewritten) -> {
             if (ccsCheckCompatibility) {
                 checkCCSVersionCompatibility(rewritten);
@@ -468,6 +467,9 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
                 }
             }
         });
+
+        final SearchSourceBuilder source = searchRequest.source();
+        final RetrieverBuilder retriever = source.retrieverBuilder();
         if (retriever == null) {
             Rewriteable.rewriteAndFetch(
                 searchRequest,
@@ -475,51 +477,37 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
                 rewriteSearchRequestListener
             );
             return;
-        }
-        if (retriever.isCompound() && searchRequest.source().pointInTimeBuilder() == null) {
-            // The can match phase can reorder shards, so we disable it to ensure the stable ordering
-            searchRequest.setPreFilterShardSize(Integer.MAX_VALUE);
-            rewriteSearchRequestListener = ActionListener.releaseAfter(
-                rewriteSearchRequestListener,
-                () -> closePIT(searchRequest.source().pointInTimeBuilder())
-            );
-        }
-        ActionListener<RetrieverBuilder> rewriteRetrieverListener = rewriteSearchRequestListener.delegateFailureAndWrap(
-            (delegate, newRetriever) -> {
-                newRetriever.extractToSearchSourceBuilder(searchRequest.source(), false);
-                Rewriteable.rewriteAndFetch(
-                    searchRequest,
-                    searchService.getRewriteContext(timeProvider::absoluteStartMillis, resolvedIndices),
-                    delegate
-                );
-            }
-        );
-        if (searchRequest.source().pointInTimeBuilder() == null) {
-            ActionListener<OpenPointInTimeResponse> openPitListener = rewriteRetrieverListener.delegateFailureAndWrap((delegate, resp) -> {
-                var pit = new PointInTimeBuilder(resp.getPointInTimeId());
-                searchRequest.source().pointInTimeBuilder(pit);
-                Rewriteable.rewriteAndFetch(
-                    retriever,
-                    searchService.getRewriteContext(timeProvider::absoluteStartMillis, resolvedIndices, pit),
-                    rewriteRetrieverListener
-                );
-            });
-
+        } else if (retriever != null && retriever.isCompound() && source.pointInTimeBuilder() == null) {
             OpenPointInTimeRequest pitReq = new OpenPointInTimeRequest(searchRequest.indices()).indicesOptions(
                 searchRequest.indicesOptions()
             ).preference(searchRequest.preference()).routing(searchRequest.routing()).keepAlive(TimeValue.ONE_MINUTE);
-            nodeClient.execute(TransportOpenPointInTimeAction.TYPE, pitReq, openPitListener);
-        } else {
-            Rewriteable.rewriteAndFetch(
-                retriever,
-                searchService.getRewriteContext(
-                    timeProvider::absoluteStartMillis,
-                    resolvedIndices,
-                    searchRequest.source().pointInTimeBuilder()
-                ),
-                rewriteRetrieverListener
-            );
+
+            // The can match phase can reorder shards, so we disable it to ensure the stable ordering
+            searchRequest.setPreFilterShardSize(Integer.MAX_VALUE);
+            nodeClient.execute(TransportOpenPointInTimeAction.TYPE, pitReq, new ActionListener<>() {
+                @Override
+                public void onResponse(OpenPointInTimeResponse resp) {
+                    source.pointInTimeBuilder(new PointInTimeBuilder(resp.getPointInTimeId()));
+                    executeRequest(
+                        task,
+                        searchRequest,
+                        ActionListener.releaseAfter(listener, () -> closePIT(searchRequest.source().pointInTimeBuilder())),
+                        searchPhaseProvider
+                    );
+                }
+
+                @Override
+                public void onFailure(Exception e) {
+                    listener.onFailure(e);
+                }
+            });
+            return;
         }
+        Rewriteable.rewriteAndFetch(
+            searchRequest,
+            searchService.getRewriteContext(timeProvider::absoluteStartMillis, resolvedIndices, searchRequest.pointInTimeBuilder()),
+            rewriteSearchRequestListener
+        );
     }
 
     private void closePIT(PointInTimeBuilder pit) {
