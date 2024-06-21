@@ -78,6 +78,7 @@ public class RankDocsQueryBuilder extends AbstractQueryBuilder<RankDocsQueryBuil
 
     @Override
     protected void doXContent(XContentBuilder builder, Params params) throws IOException {
+        builder.startObject(NAME);
         builder.startArray("docs");
         for (RankDoc doc : rankDocs) {
             builder.startObject();
@@ -85,6 +86,7 @@ public class RankDocsQueryBuilder extends AbstractQueryBuilder<RankDocsQueryBuil
             builder.endObject();
         }
         builder.endArray();
+        builder.endObject();
     }
 
     @Override

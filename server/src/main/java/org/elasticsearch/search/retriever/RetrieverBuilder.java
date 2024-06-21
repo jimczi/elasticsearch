@@ -203,7 +203,8 @@ public abstract class RetrieverBuilder implements Rewriteable<RetrieverBuilder>,
     public abstract QueryBuilder topDocsQuery();
 
     /**
-     * Called by {@link CombineRetrieverBuilder} to seal the top docs returned by this retriever.
+     * This function is called by {@link CombineRetrieverBuilder}s to seal the top docs returned by
+     * this retriever during rewrite.
      */
     public void setRankDocs(RankDoc[] rankDocs) {
         this.rankDocs = rankDocs;
