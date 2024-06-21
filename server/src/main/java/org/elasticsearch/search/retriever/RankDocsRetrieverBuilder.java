@@ -74,10 +74,10 @@ public class RankDocsRetrieverBuilder extends RetrieverBuilder {
     }
 
     @Override
-    public QueryBuilder topDocsQuery(QueryBuilder leadQuery) {
+    public QueryBuilder topDocsQuery() {
         DisMaxQueryBuilder disMax = new DisMaxQueryBuilder().tieBreaker(0f);
         for (var source : sources) {
-            var query = source.topDocsQuery(leadQuery);
+            var query = source.topDocsQuery();
             if (query != null) {
                 if (source.retrieverName != null) {
                     query.queryName(source.retrieverName);
@@ -85,6 +85,7 @@ public class RankDocsRetrieverBuilder extends RetrieverBuilder {
                 disMax.add(query);
             }
         }
+        // ignore prefilters of this level, they are already propagated to children
         return disMax;
     }
 
@@ -105,7 +106,7 @@ public class RankDocsRetrieverBuilder extends RetrieverBuilder {
         for (var preFilterQueryBuilder : preFilterQueryBuilders) {
             bq.filter(preFilterQueryBuilder);
         }
-        QueryBuilder originalQuery = topDocsQuery(rankQuery);
+        QueryBuilder originalQuery = topDocsQuery();
         if (originalQuery != null) {
             bq.should(originalQuery);
         }

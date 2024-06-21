@@ -117,7 +117,9 @@ public abstract class CombineRetrieverBuilder<T extends CombineRetrieverBuilder<
                     List<ScoreDoc[]> topDocs = new ArrayList<>();
                     for (int i = 0; i < items.getResponses().length; i++) {
                         var item = items.getResponses()[i];
-                        topDocs.add(getTopDocs(item.getResponse()));
+                        var rankDocs = getRankDocs(item.getResponse());
+                        childRetrievers.get(i).retriever().setRankDocs(rankDocs);
+                        topDocs.add(rankDocs);
                     }
                     results.set(combineQueryPhaseResults(topDocs));
                     listener.onResponse(null);
@@ -134,7 +136,7 @@ public abstract class CombineRetrieverBuilder<T extends CombineRetrieverBuilder<
     }
 
     @Override
-    public final QueryBuilder topDocsQuery(QueryBuilder leadQuery) {
+    public final QueryBuilder topDocsQuery() {
         throw new IllegalStateException(getName() + " cannot be nested");
     }
 
@@ -160,6 +162,9 @@ public abstract class CombineRetrieverBuilder<T extends CombineRetrieverBuilder<
             .trackTotalHits(false)
             .storedFields(new StoredFieldsContext(false))
             .size(windowSize);
+        if (preFilterQueryBuilders.isEmpty() == false) {
+            retrieverBuilder.getPreFilterQueryBuilders().addAll(preFilterQueryBuilders);
+        }
         retrieverBuilder.extractToSearchSourceBuilder(sourceBuilder, false);
 
         // apply the pre-filters
@@ -183,15 +188,16 @@ public abstract class CombineRetrieverBuilder<T extends CombineRetrieverBuilder<
         return sourceBuilder;
     }
 
-    private ScoreDoc[] getTopDocs(SearchResponse searchResponse) {
+    private RankDoc[] getRankDocs(SearchResponse searchResponse) {
         int size = Math.min(windowSize, searchResponse.getHits().getHits().length);
-        ScoreDoc[] docs = new ScoreDoc[size];
+        RankDoc[] docs = new RankDoc[size];
         for (int i = 0; i < size; i++) {
             var hit = searchResponse.getHits().getAt(i);
             long sortValue = (long) hit.getRawSortValues()[hit.getRawSortValues().length - 1];
             int doc = ShardDocSortField.decodeDoc(sortValue);
             int shardRequestIndex = ShardDocSortField.decodeShardRequestIndex(sortValue);
-            docs[i] = new ScoreDoc(doc, hit.getScore(), shardRequestIndex);
+            docs[i] = new RankDoc(doc, hit.getScore(), shardRequestIndex);
+            docs[i].rank = i;
         }
         return docs;
     }

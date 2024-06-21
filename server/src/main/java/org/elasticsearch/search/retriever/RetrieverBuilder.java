@@ -17,6 +17,7 @@ import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.index.query.Rewriteable;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.elasticsearch.search.rank.RankDoc;
 import org.elasticsearch.xcontent.AbstractObjectParser;
 import org.elasticsearch.xcontent.NamedObjectNotFoundException;
 import org.elasticsearch.xcontent.ParseField;
@@ -153,6 +154,8 @@ public abstract class RetrieverBuilder implements Rewriteable<RetrieverBuilder>,
 
     protected String retrieverName;
 
+    protected RankDoc[] rankDocs = null;
+
     public RetrieverBuilder() {}
 
     protected RetrieverBuilder(RetrieverBuilder clone) {
@@ -196,10 +199,15 @@ public abstract class RetrieverBuilder implements Rewriteable<RetrieverBuilder>,
     /**
      * This function is called by compound {@link RetrieverBuilder} to return the original query that
      * was used by this retriever to compute its top documents.
-     *
-     * @param leadQuery The query identifying the top documents of the parent retriever.
      */
-    public abstract QueryBuilder topDocsQuery(QueryBuilder leadQuery);
+    public abstract QueryBuilder topDocsQuery();
+
+    /**
+     * Called by {@link CombineRetrieverBuilder} to seal the top docs returned by this retriever.
+     */
+    public void setRankDocs(RankDoc[] rankDocs) {
+        this.rankDocs = rankDocs;
+    }
 
     /**
      * This method is called at the end of rewrite on the final retriever.

@@ -67,7 +67,7 @@ public class TestRetrieverBuilder extends RetrieverBuilder {
     }
 
     @Override
-    public QueryBuilder topDocsQuery(QueryBuilder leadQuery) {
+    public QueryBuilder topDocsQuery() {
         throw new UnsupportedOperationException("only used for parsing tests");
     }
 

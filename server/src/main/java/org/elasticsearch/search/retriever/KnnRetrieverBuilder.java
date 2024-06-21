@@ -139,9 +139,10 @@ public final class KnnRetrieverBuilder extends RetrieverBuilder {
     }
 
     @Override
-    public QueryBuilder topDocsQuery(QueryBuilder leadQuery) {
+    public QueryBuilder topDocsQuery() {
         // TODO nested + inner_hits
-        BoolQueryBuilder ret = new BoolQueryBuilder().must(leadQuery)
+        assert rankDocs != null : "rankDocs should be materialized at this point";
+        BoolQueryBuilder ret = new BoolQueryBuilder().must(new RankDocsQueryBuilder(rankDocs))
             .should(new ExactKnnQueryBuilder(knnSearchBuilder.getQueryVector(), knnSearchBuilder.getField()));
         preFilterQueryBuilders.stream().forEach(ret::filter);
         return ret;

@@ -134,7 +134,7 @@ public final class StandardRetrieverBuilder extends RetrieverBuilder implements 
     }
 
     @Override
-    public QueryBuilder topDocsQuery(QueryBuilder leadQuery) {
+    public QueryBuilder topDocsQuery() {
         /**
          * What actions should we take with {@link KnnVectorQueryBuilder} or {@link MultiTermQueryBuilder} when a
          * compound retriever executes the original queries? Our goal is to retain these queries in scenarios where
@@ -142,7 +142,7 @@ public final class StandardRetrieverBuilder extends RetrieverBuilder implements 
          * retrievers since they will be executed twice: once as a must clause at this level and a second time as a
          * should clause at the upper level (compound retriever).
          * Therefore, it would be beneficial to rewrite these queries at the upper level to focus solely on
-         * scoring/matching similar to what {@link RetrieverBuilder#topDocsQuery(QueryBuilder)} is doing.
+         * scoring/matching similar to what {@link RetrieverBuilder#topDocsQuery()} is doing.
          */
         if (preFilterQueryBuilders.isEmpty()) {
             return queryBuilder;

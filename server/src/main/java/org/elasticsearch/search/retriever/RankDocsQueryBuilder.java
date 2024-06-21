@@ -78,7 +78,13 @@ public class RankDocsQueryBuilder extends AbstractQueryBuilder<RankDocsQueryBuil
 
     @Override
     protected void doXContent(XContentBuilder builder, Params params) throws IOException {
-        throw new UnsupportedOperationException("Not supported");
+        builder.startArray("docs");
+        for (RankDoc doc : rankDocs) {
+            builder.startObject();
+            doc.toXContent(builder, params);
+            builder.endObject();
+        }
+        builder.endArray();
     }
 
     @Override
