@@ -354,11 +354,11 @@ public class SourceFieldMapper extends MetadataFieldMapper {
             context.doc().add(new StoredField(fieldType().name(), ref.bytes, ref.offset, ref.length));
         }
 
-        if (originalSource != null && adaptedSource != originalSource) {
+        if ((indexMode == null || indexMode.isSyntheticSourceEnabled() == false) && originalSource != null && adaptedSource != originalSource) {
             // if we omitted source or modified it we add the _recovery_source to ensure we have it for ops based recovery
-            BytesRef ref = originalSource.toBytesRef();
-            context.doc().add(new StoredField(RECOVERY_SOURCE_NAME, ref.bytes, ref.offset, ref.length));
-            context.doc().add(new NumericDocValuesField(RECOVERY_SOURCE_NAME, 1));
+            //BytesRef ref = originalSource.toBytesRef();
+            //context.doc().add(new StoredField(RECOVERY_SOURCE_NAME, ref.bytes, ref.offset, ref.length));
+            //context.doc().add(new NumericDocValuesField(RECOVERY_SOURCE_NAME, 1));
         }
     }
 

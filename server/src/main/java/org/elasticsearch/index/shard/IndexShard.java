@@ -2587,7 +2587,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         boolean singleConsumer,
         boolean accessStats
     ) throws IOException {
-        return getEngine().newChangesSnapshot(source, fromSeqNo, toSeqNo, requiredFullRange, singleConsumer, accessStats);
+        return getEngine().newChangesSnapshot(mapperService.mappingLookup(), source, fromSeqNo, toSeqNo, requiredFullRange, singleConsumer, accessStats);
     }
 
     public List<Segment> segments() {

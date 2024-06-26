@@ -923,7 +923,7 @@ public abstract class Engine implements Closeable {
      * @param source    the source of the request
      * @param fromSeqNo the start sequence number (inclusive)
      * @param toSeqNo   the end sequence number (inclusive)
-     * @see #newChangesSnapshot(String, long, long, boolean, boolean, boolean)
+     * @see #newChangesSnapshot(MappingLookup, String, long, long, boolean, boolean, boolean)
      */
     public abstract int countChanges(String source, long fromSeqNo, long toSeqNo) throws IOException;
 
@@ -932,6 +932,7 @@ public abstract class Engine implements Closeable {
      * This feature requires soft-deletes enabled. If soft-deletes are disabled, this method will throw an {@link IllegalStateException}.
      */
     public abstract Translog.Snapshot newChangesSnapshot(
+        MappingLookup mappingLookup,
         String source,
         long fromSeqNo,
         long toSeqNo,

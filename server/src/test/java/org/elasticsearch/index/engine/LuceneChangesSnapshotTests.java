@@ -48,14 +48,14 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
         long fromSeqNo = randomNonNegativeLong();
         long toSeqNo = randomLongBetween(fromSeqNo, Long.MAX_VALUE);
         // Empty engine
-        try (Translog.Snapshot snapshot = engine.newChangesSnapshot("test", fromSeqNo, toSeqNo, true, randomBoolean(), randomBoolean())) {
+        try (Translog.Snapshot snapshot = engine.newChangesSnapshot(null, "test", fromSeqNo, toSeqNo, true, randomBoolean(), randomBoolean())) {
             IllegalStateException error = expectThrows(IllegalStateException.class, () -> drainAll(snapshot));
             assertThat(
                 error.getMessage(),
                 containsString("Not all operations between from_seqno [" + fromSeqNo + "] and to_seqno [" + toSeqNo + "] found")
             );
         }
-        try (Translog.Snapshot snapshot = engine.newChangesSnapshot("test", fromSeqNo, toSeqNo, false, randomBoolean(), randomBoolean())) {
+        try (Translog.Snapshot snapshot = engine.newChangesSnapshot(null, "test", fromSeqNo, toSeqNo, false, randomBoolean(), randomBoolean())) {
             assertThat(snapshot, SnapshotMatchers.size(0));
         }
         int numOps = between(1, 100);
@@ -190,6 +190,7 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
         toSeqNo = randomLongBetween(fromSeqNo, numOps - 1);
         try (
             Translog.Snapshot snapshot = engine.newChangesSnapshot(
+                null,
                 "test",
                 fromSeqNo,
                 toSeqNo,
@@ -294,89 +295,6 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
         }
     }
 
-    public void testAccessStoredFieldsSequentially() throws Exception {
-        try (Store store = createStore(); Engine engine = createEngine(defaultSettings, store, createTempDir(), NoMergePolicy.INSTANCE)) {
-            int smallBatch = between(5, 9);
-            long seqNo = 0;
-            for (int i = 0; i < smallBatch; i++) {
-                engine.index(replicaIndexForDoc(createParsedDoc(Long.toString(seqNo), null), 1, seqNo, true));
-                seqNo++;
-            }
-            engine.index(replicaIndexForDoc(createParsedDoc(Long.toString(1000), null), 1, 1000, true));
-            seqNo = 11;
-            int largeBatch = between(15, 100);
-            for (int i = 0; i < largeBatch; i++) {
-                engine.index(replicaIndexForDoc(createParsedDoc(Long.toString(seqNo), null), 1, seqNo, true));
-                seqNo++;
-            }
-            // disable optimization for a small batch
-            Translog.Operation op;
-            try (
-                LuceneChangesSnapshot snapshot = (LuceneChangesSnapshot) engine.newChangesSnapshot(
-                    "test",
-                    0L,
-                    between(1, smallBatch),
-                    false,
-                    randomBoolean(),
-                    randomBoolean()
-                )
-            ) {
-                while ((op = snapshot.next()) != null) {
-                    assertFalse(op.toString(), snapshot.useSequentialStoredFieldsReader());
-                }
-                assertFalse(snapshot.useSequentialStoredFieldsReader());
-            }
-            // disable optimization for non-sequential accesses
-            try (
-                LuceneChangesSnapshot snapshot = (LuceneChangesSnapshot) engine.newChangesSnapshot(
-                    "test",
-                    between(1, 3),
-                    between(20, 100),
-                    false,
-                    randomBoolean(),
-                    randomBoolean()
-                )
-            ) {
-                while ((op = snapshot.next()) != null) {
-                    assertFalse(op.toString(), snapshot.useSequentialStoredFieldsReader());
-                }
-                assertFalse(snapshot.useSequentialStoredFieldsReader());
-            }
-            // enable optimization for sequential access of 10+ docs
-            try (
-                LuceneChangesSnapshot snapshot = (LuceneChangesSnapshot) engine.newChangesSnapshot(
-                    "test",
-                    11,
-                    between(21, 100),
-                    false,
-                    true,
-                    randomBoolean()
-                )
-            ) {
-                while ((op = snapshot.next()) != null) {
-                    assertTrue(op.toString(), snapshot.useSequentialStoredFieldsReader());
-                }
-                assertTrue(snapshot.useSequentialStoredFieldsReader());
-            }
-            // disable optimization if snapshot is accessed by multiple consumers
-            try (
-                LuceneChangesSnapshot snapshot = (LuceneChangesSnapshot) engine.newChangesSnapshot(
-                    "test",
-                    11,
-                    between(21, 100),
-                    false,
-                    false,
-                    randomBoolean()
-                )
-            ) {
-                while ((op = snapshot.next()) != null) {
-                    assertFalse(op.toString(), snapshot.useSequentialStoredFieldsReader());
-                }
-                assertFalse(snapshot.useSequentialStoredFieldsReader());
-            }
-        }
-    }
-
     class Follower extends Thread {
         private final InternalEngine leader;
         private final InternalEngine engine;
@@ -404,6 +322,7 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
                 long toSeqNo = Math.min(fromSeqNo + batchSize, leaderCheckpoint);
                 try (
                     Translog.Snapshot snapshot = leader.newChangesSnapshot(
+                        null,
                         "test",
                         fromSeqNo,
                         toSeqNo,
@@ -457,7 +376,7 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
     public void testOverFlow() throws Exception {
         long fromSeqNo = randomLongBetween(0, 5);
         long toSeqNo = randomLongBetween(Long.MAX_VALUE - 5, Long.MAX_VALUE);
-        try (Translog.Snapshot snapshot = engine.newChangesSnapshot("test", fromSeqNo, toSeqNo, true, randomBoolean(), randomBoolean())) {
+        try (Translog.Snapshot snapshot = engine.newChangesSnapshot(null, "test", fromSeqNo, toSeqNo, true, randomBoolean(), randomBoolean())) {
             IllegalStateException error = expectThrows(IllegalStateException.class, () -> drainAll(snapshot));
             assertThat(
                 error.getMessage(),
@@ -502,6 +421,7 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
             // Can't access stats if didn't request it
             try (
                 Translog.Snapshot snapshot = engine.newChangesSnapshot(
+                    null,
                     "test",
                     fromSeqNo.getAsLong(),
                     toSeqNo.getAsLong(),
@@ -520,6 +440,7 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
             // Access stats and operations
             try (
                 Translog.Snapshot snapshot = engine.newChangesSnapshot(
+                    null,
                     "test",
                     fromSeqNo.getAsLong(),
                     toSeqNo.getAsLong(),

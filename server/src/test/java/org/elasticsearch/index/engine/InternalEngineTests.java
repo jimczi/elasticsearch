@@ -6483,6 +6483,7 @@ public class InternalEngineTests extends EngineTestCase {
                         if (randomBoolean()) {
                             try (
                                 Translog.Snapshot ignored = engine.newChangesSnapshot(
+                                    null,
                                     "test",
                                     min,
                                     max,

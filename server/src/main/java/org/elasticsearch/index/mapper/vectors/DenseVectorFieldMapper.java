@@ -244,6 +244,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
 
         @Override
         public DenseVectorFieldMapper build(MapperBuilderContext context) {
+            validate();
             return new DenseVectorFieldMapper(
                 leafName(),
                 new DenseVectorFieldType(

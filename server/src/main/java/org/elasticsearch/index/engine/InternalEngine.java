@@ -3109,6 +3109,7 @@ public class InternalEngine extends Engine {
 
     @Override
     public Translog.Snapshot newChangesSnapshot(
+        MappingLookup mappingLookup,
         String source,
         long fromSeqNo,
         long toSeqNo,
@@ -3121,6 +3122,7 @@ public class InternalEngine extends Engine {
         Searcher searcher = acquireSearcher(source, SearcherScope.INTERNAL);
         try {
             LuceneChangesSnapshot snapshot = new LuceneChangesSnapshot(
+                mappingLookup,
                 searcher,
                 LuceneChangesSnapshot.DEFAULT_BATCH_SIZE,
                 fromSeqNo,

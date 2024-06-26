@@ -8,7 +8,6 @@
 
 package org.elasticsearch.index.engine;
 
-import org.apache.lucene.codecs.StoredFieldsReader;
 import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
@@ -24,29 +23,37 @@ import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TopFieldCollectorManager;
 import org.apache.lucene.util.ArrayUtil;
+import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.lucene.Lucene;
-import org.elasticsearch.common.lucene.index.SequentialStoredFieldsLeafReader;
 import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.core.IOUtils;
 import org.elasticsearch.index.IndexVersion;
-import org.elasticsearch.index.fieldvisitor.FieldsVisitor;
+import org.elasticsearch.index.fieldvisitor.LeafStoredFieldLoader;
+import org.elasticsearch.index.fieldvisitor.StoredFieldLoader;
+import org.elasticsearch.index.mapper.MappingLookup;
 import org.elasticsearch.index.mapper.SeqNoFieldMapper;
 import org.elasticsearch.index.mapper.SourceFieldMapper;
+import org.elasticsearch.index.mapper.SourceFieldMetrics;
+import org.elasticsearch.index.mapper.SourceLoader;
 import org.elasticsearch.index.translog.Translog;
 import org.elasticsearch.transport.Transports;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 /**
  * A {@link Translog.Snapshot} from changes in a Lucene index
  */
-final class LuceneChangesSnapshot implements Translog.Snapshot {
-    static final int DEFAULT_BATCH_SIZE = 1024;
+public final class LuceneChangesSnapshot implements Translog.Snapshot {
+    public static final int DEFAULT_BATCH_SIZE = 1024;
 
     private final int searchBatchSize;
     private final long fromSeqNo, toSeqNo;
@@ -65,10 +72,23 @@ final class LuceneChangesSnapshot implements Translog.Snapshot {
 
     private final IndexVersion indexVersionCreated;
 
-    private int storedFieldsReaderOrd = -1;
-    private StoredFieldsReader storedFieldsReader = null;
-
     private final Thread creationThread; // for assertion
+
+    private final StoredFieldLoader storedFieldLoader;
+    private final SourceLoader sourceLoader;
+
+    public LuceneChangesSnapshot(
+            Engine.Searcher engineSearcher,
+            int searchBatchSize,
+            long fromSeqNo,
+            long toSeqNo,
+            boolean requiredFullRange,
+            boolean singleConsumer,
+            boolean accessStats,
+            IndexVersion indexVersionCreated
+    ) throws IOException {
+        this(null, engineSearcher, searchBatchSize, fromSeqNo, toSeqNo, requiredFullRange, singleConsumer, accessStats, indexVersionCreated);
+    }
 
     /**
      * Creates a new "translog" snapshot from Lucene for reading operations whose seq# in the specified range.
@@ -82,7 +102,8 @@ final class LuceneChangesSnapshot implements Translog.Snapshot {
      * @param accessStats       true if the stats of the snapshot can be accessed via {@link #totalOperations()}
      * @param indexVersionCreated the version on which this index was created
      */
-    LuceneChangesSnapshot(
+    public LuceneChangesSnapshot(
+        MappingLookup mappingLookup,
         Engine.Searcher engineSearcher,
         int searchBatchSize,
         long fromSeqNo,
@@ -120,6 +141,14 @@ final class LuceneChangesSnapshot implements Translog.Snapshot {
         final TopDocs topDocs = searchOperations(null, accessStats);
         this.totalHits = Math.toIntExact(topDocs.totalHits.value);
         this.scoreDocs = topDocs.scoreDocs;
+        if (mappingLookup != null && mappingLookup.isSourceSynthetic()) {
+            Set<String> storedFields = mappingLookup.getMapping().syntheticFieldLoader().storedFieldLoaders().map(s -> s.getKey()).collect(Collectors.toSet());
+            this.storedFieldLoader = StoredFieldLoader.create(false, storedFields);
+            this.sourceLoader = new SourceLoader.Synthetic(mappingLookup.getMapping()::syntheticFieldLoader, SourceFieldMetrics.NOOP);
+        } else {
+            this.storedFieldLoader = StoredFieldLoader.create(true, Set.of(SourceFieldMapper.RECOVERY_SOURCE_NAME));
+            this.sourceLoader = null;
+        }
         fillParallelArray(scoreDocs, parallelArray);
     }
 
@@ -224,26 +253,28 @@ final class LuceneChangesSnapshot implements Translog.Snapshot {
             for (int i = 0; i < scoreDocs.length; i++) {
                 scoreDocs[i].shardIndex = i;
             }
-            parallelArray.useSequentialStoredFieldsReader = singleConsumer && scoreDocs.length >= 10 && hasSequentialAccess(scoreDocs);
-            if (parallelArray.useSequentialStoredFieldsReader == false) {
-                storedFieldsReaderOrd = -1;
-                storedFieldsReader = null;
-            }
+            // parallelArray.useSequentialStoredFieldsReader = singleConsumer && scoreDocs.length >= 10 && hasSequentialAccess(scoreDocs);
+
             // for better loading performance we sort the array by docID and
             // then visit all leaves in order.
-            if (parallelArray.useSequentialStoredFieldsReader == false) {
-                ArrayUtil.introSort(scoreDocs, Comparator.comparingInt(i -> i.doc));
-            }
+            ArrayUtil.introSort(scoreDocs, Comparator.comparingInt(i -> i.doc));
             int docBase = -1;
             int maxDoc = 0;
             List<LeafReaderContext> leaves = indexSearcher.getIndexReader().leaves();
             int readerIndex = 0;
             CombinedDocValues combinedDocValues = null;
             LeafReaderContext leaf = null;
+            LeafStoredFieldLoader leafStoredField = null;
+            SourceLoader.Leaf leafSourceLoader = null;
+            System.out.println(Arrays.toString(scoreDocs));
             for (ScoreDoc scoreDoc : scoreDocs) {
                 if (scoreDoc.doc >= docBase + maxDoc) {
                     do {
                         leaf = leaves.get(readerIndex++);
+                        leafStoredField = storedFieldLoader.getLoader(leaf, null);
+                        if (sourceLoader != null) {
+                            leafSourceLoader = sourceLoader.leaf(leaf.reader(), null);
+                        }
                         docBase = leaf.docBase;
                         maxDoc = leaf.reader().maxDoc();
                     } while (scoreDoc.doc >= docBase + maxDoc);
@@ -257,21 +288,26 @@ final class LuceneChangesSnapshot implements Translog.Snapshot {
                 parallelArray.version[index] = combinedDocValues.docVersion(segmentDocID);
                 parallelArray.isTombStone[index] = combinedDocValues.isTombstone(segmentDocID);
                 parallelArray.hasRecoverySource[index] = combinedDocValues.hasRecoverySource(segmentDocID);
+                leafStoredField.advanceTo(segmentDocID);
+                final BytesReference source;
+                if (sourceLoader != null) {
+                    assert parallelArray.hasRecoverySource[docIndex] == false;
+                    source = leafSourceLoader.source(leafStoredField, segmentDocID).internalSourceRef();
+                } else {
+                    if (parallelArray.hasRecoverySource[docIndex]) {
+                        List<?> recovery = leafStoredField.storedFields().get(SourceFieldMapper.RECOVERY_SOURCE_NAME);
+                        source = new BytesArray((BytesRef) recovery.get(0));
+                    } else {
+                        source = leafStoredField.source();
+                    }
+                }
+                parallelArray.id[index] = leafStoredField.id();
+                parallelArray.routing[index] = leafStoredField.routing();
+                parallelArray.source[index] = source;
             }
             // now sort back based on the shardIndex. we use this to store the previous index
-            if (parallelArray.useSequentialStoredFieldsReader == false) {
-                ArrayUtil.introSort(scoreDocs, Comparator.comparingInt(i -> i.shardIndex));
-            }
+            ArrayUtil.introSort(scoreDocs, Comparator.comparingInt(i -> i.shardIndex));
         }
-    }
-
-    private static boolean hasSequentialAccess(ScoreDoc[] scoreDocs) {
-        for (int i = 0; i < scoreDocs.length - 1; i++) {
-            if (scoreDocs[i].doc + 1 != scoreDocs[i + 1].doc) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private static IndexSearcher newIndexSearcher(Engine.Searcher engineSearcher) throws IOException {
@@ -316,45 +352,22 @@ final class LuceneChangesSnapshot implements Translog.Snapshot {
             skippedOperations++;
             return null;
         }
+
         final long version = parallelArray.version[docIndex];
-        final String sourceField = parallelArray.hasRecoverySource[docIndex]
-            ? SourceFieldMapper.RECOVERY_SOURCE_NAME
-            : SourceFieldMapper.NAME;
-        final FieldsVisitor fields = new FieldsVisitor(true, sourceField);
-
-        if (parallelArray.useSequentialStoredFieldsReader) {
-            if (storedFieldsReaderOrd != leaf.ord) {
-                if (leaf.reader() instanceof SequentialStoredFieldsLeafReader) {
-                    storedFieldsReader = ((SequentialStoredFieldsLeafReader) leaf.reader()).getSequentialStoredFieldsReader();
-                    storedFieldsReaderOrd = leaf.ord;
-                } else {
-                    storedFieldsReader = null;
-                    storedFieldsReaderOrd = -1;
-                }
-            }
-        }
-        if (storedFieldsReader != null) {
-            assert singleConsumer : "Sequential access optimization must not be enabled for multiple consumers";
-            assert parallelArray.useSequentialStoredFieldsReader;
-            assert storedFieldsReaderOrd == leaf.ord : storedFieldsReaderOrd + " != " + leaf.ord;
-            storedFieldsReader.document(segmentDocID, fields);
-        } else {
-            leaf.reader().document(segmentDocID, fields);
-        }
-
-        final Translog.Operation op;
         final boolean isTombstone = parallelArray.isTombStone[docIndex];
-        if (isTombstone && fields.id() == null) {
-            op = new Translog.NoOp(seqNo, primaryTerm, fields.source().utf8ToString());
+        final String id = parallelArray.id[docIndex];
+        final String routing = parallelArray.routing[docIndex];
+        final BytesReference source = parallelArray.source[docIndex];
+        final Translog.Operation op;
+        if (isTombstone && id == null) {
+            op = new Translog.NoOp(seqNo, primaryTerm, source.utf8ToString());
             assert version == 1L : "Noop tombstone should have version 1L; actual version [" + version + "]";
             assert assertDocSoftDeleted(leaf.reader(), segmentDocID) : "Noop but soft_deletes field is not set [" + op + "]";
         } else {
-            final String id = fields.id();
             if (isTombstone) {
                 op = new Translog.Delete(id, seqNo, primaryTerm, version);
                 assert assertDocSoftDeleted(leaf.reader(), segmentDocID) : "Delete op but soft_deletes field is not set [" + op + "]";
             } else {
-                final BytesReference source = fields.source();
                 if (source == null) {
                     // TODO: Callers should ask for the range that source should be retained. Thus we should always
                     // check for the existence source once we make peer-recovery to send ops after the local checkpoint.
@@ -369,7 +382,7 @@ final class LuceneChangesSnapshot implements Translog.Snapshot {
                 }
                 // TODO: pass the latest timestamp from engine.
                 final long autoGeneratedIdTimestamp = -1;
-                op = new Translog.Index(id, seqNo, primaryTerm, version, source, fields.routing(), autoGeneratedIdTimestamp);
+                op = new Translog.Index(id, seqNo, primaryTerm, version, source, routing, autoGeneratedIdTimestamp);
             }
         }
         assert fromSeqNo <= op.seqNo() && op.seqNo() <= toSeqNo && lastSeenSeqNo < op.seqNo()
@@ -401,7 +414,9 @@ final class LuceneChangesSnapshot implements Translog.Snapshot {
         final long[] primaryTerm;
         final boolean[] isTombStone;
         final boolean[] hasRecoverySource;
-        boolean useSequentialStoredFieldsReader = false;
+        final String[] id;
+        final String[] routing;
+        final BytesReference[] source;
 
         ParallelArray(int size) {
             version = new long[size];
@@ -410,11 +425,9 @@ final class LuceneChangesSnapshot implements Translog.Snapshot {
             isTombStone = new boolean[size];
             hasRecoverySource = new boolean[size];
             leafReaderContexts = new LeafReaderContext[size];
+            id = new String[size];
+            source = new BytesReference[size];
+            routing = new String[size];
         }
-    }
-
-    // for testing
-    boolean useSequentialStoredFieldsReader() {
-        return storedFieldsReader != null;
     }
 }
