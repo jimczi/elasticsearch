@@ -25,6 +25,8 @@ import org.elasticsearch.xcontent.XContentBuilder;
 import java.io.IOException;
 import java.util.Arrays;
 
+import static org.elasticsearch.TransportVersions.RRF_QUERY_REWRITE;
+
 public class RankDocsQueryBuilder extends AbstractQueryBuilder<RankDocsQueryBuilder> {
 
     public static final String NAME = "rank_docs_query";
@@ -43,7 +45,7 @@ public class RankDocsQueryBuilder extends AbstractQueryBuilder<RankDocsQueryBuil
         super(in);
         this.rankDocs = in.readArray(c -> c.readNamedWriteable(RankDoc.class), RankDoc[]::new);
         this.queryBuilders = in.readOptionalArray(c -> c.readNamedWriteable(QueryBuilder.class), QueryBuilder[]::new);
-        this.onlyRankDocs = in.readBoolean();
+        this.onlyRankDocs = in.getTransportVersion().onOrAfter(RRF_QUERY_REWRITE) ? in.readBoolean() : false;
     }
 
     RankDoc[] rankDocs() {
@@ -54,7 +56,9 @@ public class RankDocsQueryBuilder extends AbstractQueryBuilder<RankDocsQueryBuil
     protected void doWriteTo(StreamOutput out) throws IOException {
         out.writeArray(StreamOutput::writeNamedWriteable, rankDocs);
         out.writeOptionalArray(StreamOutput::writeNamedWriteable, queryBuilders);
-        out.writeBoolean(onlyRankDocs);
+        if (out.getTransportVersion().onOrAfter(RRF_QUERY_REWRITE)) {
+            out.writeBoolean(onlyRankDocs);
+        }
     }
 
     @Override
