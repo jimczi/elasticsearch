@@ -127,7 +127,7 @@ public final class StandardRetrieverBuilder extends RetrieverBuilder implements 
 
     @Override
     public void extractToSearchSourceBuilder(SearchSourceBuilder searchSourceBuilder, boolean compoundUsed) {
-        if (preFilterQueryBuilders.isEmpty() == false) {
+        if (preFilterQueryBuilders.isEmpty() == false || minScore != null) {
             BoolQueryBuilder boolQueryBuilder = new BoolQueryBuilder();
 
             for (QueryBuilder preFilterQueryBuilder : preFilterQueryBuilders) {
@@ -137,6 +137,7 @@ public final class StandardRetrieverBuilder extends RetrieverBuilder implements 
             if (queryBuilder != null) {
                 boolQueryBuilder.must(queryBuilder);
             }
+            // TODO: Handle minScore
             searchSourceBuilder.subSearches().add(new SubSearchSourceBuilder(boolQueryBuilder));
         } else if (queryBuilder != null) {
             searchSourceBuilder.subSearches().add(new SubSearchSourceBuilder(queryBuilder));

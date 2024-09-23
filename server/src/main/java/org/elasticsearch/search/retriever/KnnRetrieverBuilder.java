@@ -128,11 +128,17 @@ public final class KnnRetrieverBuilder extends RetrieverBuilder {
     @Override
     public QueryBuilder topDocsQuery() {
         assert rankDocs != null : "rankDocs should have been materialized by now";
-        BoolQueryBuilder knnTopResultsQuery = new BoolQueryBuilder().filter(new RankDocsQueryBuilder(rankDocs, null))
-            .queryName(this.retrieverName)
-            .should(new ExactKnnQueryBuilder(VectorData.fromFloats(queryVector), field, similarity));
-        preFilterQueryBuilders.forEach(knnTopResultsQuery::filter);
-        return knnTopResultsQuery;
+        var rankDocsQuery = new RankDocsQueryBuilder(
+            rankDocs,
+            new QueryBuilder[] { new ExactKnnQueryBuilder(VectorData.fromFloats(queryVector), field, similarity) },
+            true
+        );
+        if (preFilterQueryBuilders.isEmpty()) {
+            return rankDocsQuery.queryName(retrieverName);
+        }
+        BoolQueryBuilder res = new BoolQueryBuilder().must(rankDocsQuery);
+        preFilterQueryBuilders.forEach(res::filter);
+        return res.queryName(retrieverName);
     }
 
     @Override

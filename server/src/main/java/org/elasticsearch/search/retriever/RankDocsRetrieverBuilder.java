@@ -14,7 +14,6 @@ import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.rank.RankDoc;
-import org.elasticsearch.search.retriever.rankdoc.RankDocsAndScoreSortBuilder;
 import org.elasticsearch.search.retriever.rankdoc.RankDocsQueryBuilder;
 import org.elasticsearch.xcontent.XContentBuilder;
 
@@ -94,35 +93,23 @@ public class RankDocsRetrieverBuilder extends RetrieverBuilder {
 
     @Override
     public void extractToSearchSourceBuilder(SearchSourceBuilder searchSourceBuilder, boolean compoundUsed) {
-        // here we force a custom sort based on the rank of the documents
-        if (searchSourceBuilder.rescores() == null || searchSourceBuilder.rescores().isEmpty()) {
-            searchSourceBuilder.sort(List.of(new RankDocsAndScoreSortBuilder(rankDocs.get())));
-        }
-        RankDocsQueryBuilder rankQuery = isExplainRequest(searchSourceBuilder)
-            ? new RankDocsQueryBuilder(rankDocs.get(), sources.stream().map(RetrieverBuilder::topDocsQuery).toArray(QueryBuilder[]::new))
-            : new RankDocsQueryBuilder(rankDocs.get(), null);
-        BoolQueryBuilder boolQuery = new BoolQueryBuilder();
+        final RankDocsQueryBuilder rankQuery;
         // if we have aggregations we need to compute them based on all doc matches, not just the top hits
         // similarly, for profile and explain we re-run all parent queries to get all needed information
         if (hasAggregations(searchSourceBuilder)
             || isExplainRequest(searchSourceBuilder)
             || isProfileRequest(searchSourceBuilder)
             || shouldTrackTotalHits(searchSourceBuilder)) {
-            boolQuery.should(rankQuery);
-            // compute a disjunction of all the query sources that were executed to compute the top rank docs
-            QueryBuilder disjunctionOfSources = topDocsQuery();
-            if (disjunctionOfSources != null) {
-                boolQuery.must(disjunctionOfSources);
-                searchSourceBuilder.trackScores(true);
-            }
+            rankQuery = new RankDocsQueryBuilder(
+                rankDocs.get(),
+                sources.stream().map(RetrieverBuilder::topDocsQuery).toArray(QueryBuilder[]::new),
+                false
+            );
         } else {
-            boolQuery.must(rankQuery);
+            rankQuery = new RankDocsQueryBuilder(rankDocs.get(), null, false);
         }
-        // add any prefilters present in the retriever
-        for (var preFilterQueryBuilder : preFilterQueryBuilders) {
-            boolQuery.filter(preFilterQueryBuilder);
-        }
-        searchSourceBuilder.query(boolQuery);
+        // ignore prefilters of this level, they are already propagated to children
+        searchSourceBuilder.query(rankQuery);
     }
 
     private boolean hasAggregations(SearchSourceBuilder searchSourceBuilder) {
