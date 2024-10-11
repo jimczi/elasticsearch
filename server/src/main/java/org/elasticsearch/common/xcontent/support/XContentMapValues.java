@@ -250,6 +250,67 @@ public class XContentMapValues {
     }
 
     /**
+     * A record representing a suffix and a corresponding map.
+     *
+     * @param suffix the suffix associated with the map
+     * @param map    the map containing values associated with the suffix
+     */
+    public record SuffixMap(String suffix, Map<String, Object> map) {}
+
+    /**
+     * Extracts suffix maps from the specified path and map.
+     *
+     * @return a list of SuffixMap objects extracted from the map, or null if the path is empty
+     */
+    public static List<SuffixMap> extractSuffixMaps(String path, Map<String, Object> map) {
+        String[] pathElements = path.split("\\.");
+        if (pathElements.length == 0) {
+            return null;
+        }
+        List<SuffixMap> res = new ArrayList<>();
+        extractSuffixMaps(pathElements, 0, map, res);
+        return res;
+    }
+
+    private static boolean extractSuffixMaps(String[] pathElements, int index, Object currentValue, List<SuffixMap> buffer) {
+        if (index == pathElements.length) {
+            return true;
+        }
+
+        if (currentValue instanceof List<?> valueList) {
+            for (Object o : valueList) {
+                extractSuffixMaps(pathElements, index, o, buffer);
+            }
+            return false;
+        }
+
+        if (currentValue instanceof Map<?, ?>) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> map = (Map<String, Object>) currentValue;
+            String key = pathElements[index];
+            while (index < pathElements.length) {
+                if (map.containsKey(key)) {
+                    Object mapValue = map.get(key);
+                    if (extractSuffixMaps(pathElements, index+1, mapValue, buffer)) {
+                        buffer.add(new SuffixMap(key, map));
+                    }
+                    return false;
+                }
+                index++;
+                if (index < pathElements.length) {
+                    key += "." + pathElements[index];
+                }
+            }
+            buffer.add(new SuffixMap(key, map));
+            return false;
+        }
+
+        // we still want to report the suffix map even though we reached a leaf
+        // node before the end of the path, rendering the path invalid.
+        return true;
+    }
+
+    /**
      * Only keep properties in {@code map} that match the {@code includes} but
      * not the {@code excludes}. An empty list of includes is interpreted as a
      * wildcard while an empty list of excludes does not match anything.
