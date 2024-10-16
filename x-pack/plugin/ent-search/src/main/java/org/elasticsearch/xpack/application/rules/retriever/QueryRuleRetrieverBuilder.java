@@ -14,12 +14,14 @@ import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.license.LicenseUtils;
 import org.elasticsearch.search.builder.PointInTimeBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
-import org.elasticsearch.search.fetch.StoredFieldsContext;
 import org.elasticsearch.search.rank.RankDoc;
 import org.elasticsearch.search.retriever.CompoundRetrieverBuilder;
 import org.elasticsearch.search.retriever.RetrieverBuilder;
+import org.elasticsearch.search.retriever.RetrieverBuilderWrapper;
 import org.elasticsearch.search.retriever.RetrieverParserContext;
 import org.elasticsearch.search.retriever.rankdoc.RankDocsQueryBuilder;
+import org.elasticsearch.search.sort.ScoreSortBuilder;
+import org.elasticsearch.search.sort.SortBuilder;
 import org.elasticsearch.xcontent.ConstructingObjectParser;
 import org.elasticsearch.xcontent.ParseField;
 import org.elasticsearch.xcontent.XContentBuilder;
@@ -29,6 +31,7 @@ import org.elasticsearch.xpack.application.rules.RuleQueryBuilder;
 import org.elasticsearch.xpack.core.XPackPlugin;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -93,9 +96,10 @@ public final class QueryRuleRetrieverBuilder extends CompoundRetrieverBuilder<Qu
         RetrieverBuilder retrieverBuilder,
         int rankWindowSize
     ) {
-        super(List.of(new RetrieverSource(retrieverBuilder, null)), rankWindowSize);
+        super(new ArrayList<>(), rankWindowSize);
         this.rulesetIds = rulesetIds;
         this.matchCriteria = matchCriteria;
+        addChild(new QueryRuleRetrieverBuilderWrapper(retrieverBuilder));
     }
 
     public QueryRuleRetrieverBuilder(
@@ -118,21 +122,20 @@ public final class QueryRuleRetrieverBuilder extends CompoundRetrieverBuilder<Qu
 
     @Override
     protected SearchSourceBuilder createSearchSourceBuilder(PointInTimeBuilder pit, RetrieverBuilder retrieverBuilder) {
-        var sourceBuilder = new SearchSourceBuilder().pointInTimeBuilder(pit)
-            .trackTotalHits(false)
-            .storedFields(new StoredFieldsContext(false))
-            .size(rankWindowSize);
-        retrieverBuilder.extractToSearchSourceBuilder(sourceBuilder, true);
+        var ret = super.createSearchSourceBuilder(pit, retrieverBuilder);
+        checkValidSort(ret.sorts());
+        ret.query(new RuleQueryBuilder(ret.query(), matchCriteria, rulesetIds));
+        return ret;
+    }
 
-        QueryBuilder query = sourceBuilder.query();
-        if (query != null && query instanceof RuleQueryBuilder == false) {
-            QueryBuilder ruleQuery = new RuleQueryBuilder(query, matchCriteria, rulesetIds);
-            sourceBuilder.query(ruleQuery);
+    private static void checkValidSort(List<SortBuilder<?>> sortBuilders) {
+        if (sortBuilders.isEmpty()) {
+            return;
         }
 
-        addSort(sourceBuilder);
-
-        return sourceBuilder;
+        if (sortBuilders.size() > 1 || sortBuilders.get(0) instanceof ScoreSortBuilder == false) {
+            throw new IllegalArgumentException("Rule retrievers can only sort documents by relevance score, got: " + sortBuilders);
+        }
     }
 
     @Override
@@ -161,12 +164,6 @@ public final class QueryRuleRetrieverBuilder extends CompoundRetrieverBuilder<Qu
     }
 
     @Override
-    public QueryBuilder explainQuery() {
-        // the original matching set of the QueryRuleRetriever retriever is specified by its nested retriever
-        return new RankDocsQueryBuilder(rankDocs, new QueryBuilder[] { innerRetrievers.getFirst().retriever().explainQuery() }, true);
-    }
-
-    @Override
     public boolean doEquals(Object o) {
         QueryRuleRetrieverBuilder that = (QueryRuleRetrieverBuilder) o;
         return super.doEquals(o) && Objects.equals(rulesetIds, that.rulesetIds) && Objects.equals(matchCriteria, that.matchCriteria);
@@ -175,5 +172,30 @@ public final class QueryRuleRetrieverBuilder extends CompoundRetrieverBuilder<Qu
     @Override
     public int doHashCode() {
         return Objects.hash(super.doHashCode(), rulesetIds, matchCriteria);
+    }
+
+    class QueryRuleRetrieverBuilderWrapper extends RetrieverBuilderWrapper<QueryRuleRetrieverBuilderWrapper> {
+        protected QueryRuleRetrieverBuilderWrapper(RetrieverBuilder sub) {
+            super(sub);
+        }
+
+        @Override
+        protected QueryRuleRetrieverBuilderWrapper clone(RetrieverBuilder sub) {
+            return new QueryRuleRetrieverBuilderWrapper(sub);
+        }
+
+        @Override
+        public QueryBuilder topDocsQuery() {
+            return new RuleQueryBuilder(in.topDocsQuery(), matchCriteria, rulesetIds);
+        }
+
+        @Override
+        public QueryBuilder explainQuery() {
+            return new RankDocsQueryBuilder(
+                rankDocs,
+                new QueryBuilder[] { new RuleQueryBuilder(in.explainQuery(), matchCriteria, rulesetIds) },
+                true
+            );
+        }
     }
 }

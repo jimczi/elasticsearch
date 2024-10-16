@@ -18,7 +18,6 @@ import org.elasticsearch.action.search.MultiSearchResponse;
 import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.search.TransportMultiSearchAction;
-import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.search.builder.PointInTimeBuilder;
@@ -164,6 +163,11 @@ public abstract class CompoundRetrieverBuilder<T extends CompoundRetrieverBuilde
     }
 
     @Override
+    public final QueryBuilder explainQuery() {
+        throw new IllegalStateException("Should not be called, missing a rewrite?");
+    }
+
+    @Override
     public final void extractToSearchSourceBuilder(SearchSourceBuilder searchSourceBuilder, boolean compoundUsed) {
         throw new IllegalStateException("Should not be called, missing a rewrite?");
     }
@@ -218,23 +222,6 @@ public abstract class CompoundRetrieverBuilder<T extends CompoundRetrieverBuilde
         }
         retrieverBuilder.extractToSearchSourceBuilder(sourceBuilder, true);
 
-        // apply the pre-filters
-        if (preFilterQueryBuilders.size() > 0) {
-            QueryBuilder query = sourceBuilder.query();
-            BoolQueryBuilder newQuery = new BoolQueryBuilder();
-            if (query != null) {
-                newQuery.must(query);
-            }
-            preFilterQueryBuilders.forEach(newQuery::filter);
-            sourceBuilder.query(newQuery);
-        }
-
-        addSort(sourceBuilder);
-
-        return sourceBuilder;
-    }
-
-    protected void addSort(SearchSourceBuilder sourceBuilder) {
         // Record the shard id in the sort result
         List<SortBuilder<?>> sortBuilders = sourceBuilder.sorts() != null ? new ArrayList<>(sourceBuilder.sorts()) : new ArrayList<>();
         if (sortBuilders.isEmpty()) {
@@ -242,6 +229,7 @@ public abstract class CompoundRetrieverBuilder<T extends CompoundRetrieverBuilde
         }
         sortBuilders.add(new FieldSortBuilder(FieldSortBuilder.SHARD_DOC_FIELD_NAME));
         sourceBuilder.sort(sortBuilders);
+        return sourceBuilder;
     }
 
     private RankDoc[] getRankDocs(SearchResponse searchResponse) {
