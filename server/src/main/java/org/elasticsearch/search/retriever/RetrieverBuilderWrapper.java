@@ -75,6 +75,11 @@ public abstract class RetrieverBuilderWrapper<T extends RetrieverBuilder> extend
     }
 
     @Override
+    public RankDoc[] getRankDocs() {
+        return in.getRankDocs();
+    }
+
+    @Override
     public boolean isCompound() {
         return in.isCompound();
     }

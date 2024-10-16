@@ -133,7 +133,7 @@ public final class QueryRuleRetrieverBuilder extends CompoundRetrieverBuilder<Qu
             return;
         }
 
-        if (sortBuilders.size() > 1 || sortBuilders.get(0) instanceof ScoreSortBuilder == false) {
+        if (sortBuilders.get(0) instanceof ScoreSortBuilder == false) {
             throw new IllegalArgumentException("Rule retrievers can only sort documents by relevance score, got: " + sortBuilders);
         }
     }
@@ -159,6 +159,7 @@ public final class QueryRuleRetrieverBuilder extends CompoundRetrieverBuilder<Qu
         for (int i = 0; i < scoreDocs.length; i++) {
             ScoreDoc scoreDoc = scoreDocs[i];
             rankDocs[i] = new RankDoc(scoreDoc.doc, scoreDoc.score, scoreDoc.shardIndex);
+            rankDocs[i].rank = i+1;
         }
         return rankDocs;
     }
@@ -175,13 +176,13 @@ public final class QueryRuleRetrieverBuilder extends CompoundRetrieverBuilder<Qu
     }
 
     class QueryRuleRetrieverBuilderWrapper extends RetrieverBuilderWrapper<QueryRuleRetrieverBuilderWrapper> {
-        protected QueryRuleRetrieverBuilderWrapper(RetrieverBuilder sub) {
-            super(sub);
+        protected QueryRuleRetrieverBuilderWrapper(RetrieverBuilder in) {
+            super(in);
         }
 
         @Override
-        protected QueryRuleRetrieverBuilderWrapper clone(RetrieverBuilder sub) {
-            return new QueryRuleRetrieverBuilderWrapper(sub);
+        protected QueryRuleRetrieverBuilderWrapper clone(RetrieverBuilder in) {
+            return new QueryRuleRetrieverBuilderWrapper(in);
         }
 
         @Override
@@ -192,7 +193,7 @@ public final class QueryRuleRetrieverBuilder extends CompoundRetrieverBuilder<Qu
         @Override
         public QueryBuilder explainQuery() {
             return new RankDocsQueryBuilder(
-                rankDocs,
+                in.getRankDocs(),
                 new QueryBuilder[] { new RuleQueryBuilder(in.explainQuery(), matchCriteria, rulesetIds) },
                 true
             );
