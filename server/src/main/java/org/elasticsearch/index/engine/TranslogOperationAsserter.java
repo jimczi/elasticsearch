@@ -54,7 +54,7 @@ public abstract class TranslogOperationAsserter {
                         return true;
                     }
                     logger.error(
-                        "different data [{}] != [{}] and [{}] != [{}]",
+                        "Index operations mismatch: synthetic [{}] ≠ original [{}], and original [{}] ≠ synthetic [{}]",
                         Source.fromBytes(so1.source()).source(),
                         Source.fromBytes(o2.source()).source(),
                         Source.fromBytes(o1.source()).source(),
