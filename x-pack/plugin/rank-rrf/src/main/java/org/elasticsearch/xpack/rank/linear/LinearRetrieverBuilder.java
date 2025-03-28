@@ -130,6 +130,7 @@ public final class LinearRetrieverBuilder extends CompoundRetrieverBuilder<Linea
         LinearRetrieverBuilder clone = new LinearRetrieverBuilder(newChildRetrievers, rankWindowSize, weights, normalizers);
         clone.preFilterQueryBuilders = newPreFilterQueryBuilders;
         clone.retrieverName = retrieverName;
+        clone.minScore = minScore;
         return clone;
     }
 
