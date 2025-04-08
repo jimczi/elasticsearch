@@ -140,6 +140,7 @@ public class ProjectMetadata implements Iterable<IndexMetadata>, Diffable<Projec
         this.indicesLookup = indicesLookup;
         this.mappingsByHash = mappingsByHash;
         this.oldestIndexVersion = oldestIndexVersion;
+        indices.values().stream().forEach(m -> m.setProjectMetadata(this));
         assert assertConsistent();
     }
 

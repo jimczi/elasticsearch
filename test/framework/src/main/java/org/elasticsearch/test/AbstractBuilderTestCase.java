@@ -26,6 +26,8 @@ import org.elasticsearch.action.termvectors.MultiTermVectorsRequest;
 import org.elasticsearch.action.termvectors.MultiTermVectorsResponse;
 import org.elasticsearch.client.internal.Client;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
+import org.elasticsearch.cluster.metadata.ProjectId;
+import org.elasticsearch.cluster.metadata.ProjectMetadata;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.compress.CompressedXContent;
@@ -482,6 +484,8 @@ public abstract class AbstractBuilderTestCase extends ESTestCase {
             ).withDeprecationHandler(LoggingDeprecationHandler.INSTANCE);
             IndexScopedSettings indexScopedSettings = settingsModule.getIndexScopedSettings();
             idxSettings = IndexSettingsModule.newIndexSettings(index, indexSettings, indexScopedSettings);
+            var projectMetadata = ProjectMetadata.builder(ProjectId.DEFAULT).indices(Map.of(index.getName(), idxSettings.getIndexMetadata())).build();
+            idxSettings.getIndexMetadata().setProjectMetadata(projectMetadata);
             AnalysisModule analysisModule = new AnalysisModule(
                 TestEnvironment.newEnvironment(nodeSettings),
                 emptyList(),

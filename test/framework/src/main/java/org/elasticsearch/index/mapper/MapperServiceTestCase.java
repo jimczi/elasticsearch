@@ -21,6 +21,8 @@ import org.apache.lucene.store.Directory;
 import org.apache.lucene.tests.index.RandomIndexWriter;
 import org.elasticsearch.TransportVersion;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
+import org.elasticsearch.cluster.metadata.ProjectId;
+import org.elasticsearch.cluster.metadata.ProjectMetadata;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.TriFunction;
 import org.elasticsearch.common.breaker.CircuitBreaker;
@@ -323,6 +325,8 @@ public abstract class MapperServiceTestCase extends FieldTypeTestCase {
     protected static IndexSettings createIndexSettings(IndexVersion version, Settings settings) {
         settings = indexSettings(1, 0).put(settings).put(IndexMetadata.SETTING_VERSION_CREATED, version).build();
         IndexMetadata meta = IndexMetadata.builder("index").settings(settings).build();
+        var projectMetadata = ProjectMetadata.builder(ProjectId.DEFAULT).indices(Map.of("index", meta)).build();
+        meta.setProjectMetadata(projectMetadata);
         return new IndexSettings(meta, settings);
     }
 

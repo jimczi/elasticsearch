@@ -337,7 +337,7 @@ public class MetadataIndexTemplateService {
             return project;
         }
 
-        validateTemplate(finalSettings, wrappedMappings, indicesService);
+        validateTemplate(finalSettings, wrappedMappings, indicesService, project);
         validate(name, finalComponentTemplate);
 
         // Validate all composable index templates that use this component template
@@ -1153,7 +1153,7 @@ public class MetadataIndexTemplateService {
             new TemplateClusterStateUpdateTask(listener, projectId) {
                 @Override
                 public ProjectMetadata execute(ProjectMetadata project) throws Exception {
-                    validateTemplate(request.settings, request.mappings, indicesService);
+                    validateTemplate(request.settings, request.mappings, indicesService, project);
                     return innerPutTemplate(project, request, templateBuilder);
                 }
             },
@@ -1914,7 +1914,7 @@ public class MetadataIndexTemplateService {
         });
     }
 
-    private static void validateTemplate(Settings validateSettings, CompressedXContent mappings, IndicesService indicesService)
+    private static void validateTemplate(Settings validateSettings, CompressedXContent mappings, IndicesService indicesService, ProjectMetadata projectMetadata)
         throws Exception {
         // Hard to validate settings if they're non-existent, so used empty ones if none were provided
         Settings settings = validateSettings;
@@ -1945,6 +1945,7 @@ public class MetadataIndexTemplateService {
             final IndexMetadata tmpIndexMetadata = IndexMetadata.builder(temporaryIndexName).settings(dummySettings).build();
             IndexService dummyIndexService = indicesService.createIndex(tmpIndexMetadata, Collections.emptyList(), false);
             createdIndex = dummyIndexService.index();
+            tmpIndexMetadata.setProjectMetadata(projectMetadata);
 
             if (mappings != null) {
                 dummyIndexService.mapperService().merge(MapperService.SINGLE_MAPPING_NAME, mappings, MergeReason.INDEX_TEMPLATE);

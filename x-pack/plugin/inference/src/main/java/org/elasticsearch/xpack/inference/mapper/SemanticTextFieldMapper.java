@@ -7,6 +7,8 @@
 
 package org.elasticsearch.xpack.inference.mapper;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.FieldInfos;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.DocIdSetIterator;
@@ -75,6 +77,7 @@ import org.elasticsearch.xpack.core.ml.inference.results.MlTextEmbeddingResults;
 import org.elasticsearch.xpack.core.ml.inference.results.TextExpansionResults;
 import org.elasticsearch.xpack.core.ml.search.SparseVectorQueryBuilder;
 import org.elasticsearch.xpack.inference.highlight.SemanticTextHighlighter;
+import org.elasticsearch.xpack.inference.registry.ModelRegistryMetadata;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -112,6 +115,8 @@ import static org.elasticsearch.xpack.inference.services.elasticsearch.Elasticse
  * A {@link FieldMapper} for semantic text fields.
  */
 public class SemanticTextFieldMapper extends FieldMapper implements InferenceFieldMapper {
+    private static final Logger logger = LogManager.getLogger(SemanticTextFieldMapper.class);
+
     public static final NodeFeature SEMANTIC_TEXT_IN_OBJECT_FIELD_FIX = new NodeFeature("semantic_text.in_object_field_fix");
     public static final NodeFeature SEMANTIC_TEXT_SINGLE_FIELD_UPDATE_FIX = new NodeFeature("semantic_text.single_field_update_fix");
     public static final NodeFeature SEMANTIC_TEXT_DELETE_FIX = new NodeFeature("semantic_text.delete_fix");
@@ -193,6 +198,8 @@ public class SemanticTextFieldMapper extends FieldMapper implements InferenceFie
 
         private final Parameter<Map<String, String>> meta = Parameter.metaParam();
 
+        private final ModelRegistryMetadata modelRegistryMetadata;
+
         private Function<MapperBuilderContext, ObjectMapper> inferenceFieldBuilder;
 
         public static Builder from(SemanticTextFieldMapper mapper) {
@@ -207,6 +214,10 @@ public class SemanticTextFieldMapper extends FieldMapper implements InferenceFie
 
         public Builder(String name, Function<Query, BitSetProducer> bitSetProducer, IndexSettings indexSettings) {
             super(name);
+            var projectMetadata = indexSettings.getIndexMetadata().getProjectMetadata();
+            this.modelRegistryMetadata = projectMetadata != null
+                ? ModelRegistryMetadata.fromState(indexSettings.getIndexMetadata().getProjectMetadata())
+                : null;
             this.useLegacyFormat = InferenceMetadataFieldsMapper.isEnabled(indexSettings.getSettings()) == false;
             this.inferenceFieldBuilder = c -> createInferenceField(
                 c,
@@ -264,6 +275,17 @@ public class SemanticTextFieldMapper extends FieldMapper implements InferenceFie
             if (useLegacyFormat && multiFieldsBuilder.hasMultiFields()) {
                 throw new IllegalArgumentException(CONTENT_TYPE + " field [" + leafName() + "] does not support multi-fields");
             }
+            if (modelSettings.get() == null) {
+                assert modelRegistryMetadata != null;
+                var resolvedModel = modelRegistryMetadata.getMinimalServiceSettings(inferenceId.get());
+                if (resolvedModel != null) {
+                    logger.info("Resolved model named " + inferenceId.get());
+                    modelSettings.setValue(resolvedModel);
+                } else {
+                    logger.info("Unknown model named " + inferenceId.get());
+                }
+            }
+
             if (modelSettings.get() != null) {
                 validateServiceSettings(modelSettings.get());
             }

@@ -659,6 +659,8 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
     @Nullable
     private final IndexReshardingMetadata reshardingMetadata;
 
+    private ProjectMetadata projectMetadata;
+
     private IndexMetadata(
         final Index index,
         final long version,
@@ -767,6 +769,13 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
         this.shardSizeInBytesForecast = shardSizeInBytesForecast;
         assert numberOfShards * routingFactor == routingNumShards : routingNumShards + " must be a multiple of " + numberOfShards;
         this.reshardingMetadata = reshardingMetadata;
+    }
+    public void setProjectMetadata(ProjectMetadata projectMetadata) {
+        this.projectMetadata = projectMetadata;
+    }
+
+    public ProjectMetadata getProjectMetadata() {
+        return projectMetadata;
     }
 
     IndexMetadata withMappingMetadata(MappingMetadata mapping) {
