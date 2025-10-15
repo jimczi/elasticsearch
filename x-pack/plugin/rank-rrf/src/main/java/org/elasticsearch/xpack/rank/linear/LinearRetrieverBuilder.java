@@ -265,7 +265,7 @@ public final class LinearRetrieverBuilder extends CompoundRetrieverBuilder<Linea
     }
 
     @Override
-    protected RankDoc[] combineInnerRetrieverResults(List<ScoreDoc[]> rankResults, boolean isExplain) {
+    protected RankDoc[] combineInnerRetrieverResults(List<ScoreDocAndHit[]> rankResults, boolean isExplain) {
         Map<RankDoc.RankKey, LinearRankDoc> docsToRankResults = Maps.newMapWithExpectedSize(rankWindowSize);
         final String[] normalizerNames = Arrays.stream(normalizers).map(ScoreNormalizer::getName).toArray(String[]::new);
         for (int result = 0; result < rankResults.size(); result++) {

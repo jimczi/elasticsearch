@@ -9,7 +9,6 @@
 
 package org.elasticsearch.search.retriever;
 
-import org.apache.lucene.search.ScoreDoc;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.search.rank.RankDoc;
 import org.elasticsearch.xcontent.XContentBuilder;
@@ -38,7 +37,7 @@ public class TestCompoundRetrieverBuilder extends CompoundRetrieverBuilder<TestC
     }
 
     @Override
-    protected RankDoc[] combineInnerRetrieverResults(List<ScoreDoc[]> rankResults, boolean explain) {
+    protected RankDoc[] combineInnerRetrieverResults(List<ScoreDocAndHit[]> rankResults, boolean explain) {
         return new RankDoc[0];
     }
 

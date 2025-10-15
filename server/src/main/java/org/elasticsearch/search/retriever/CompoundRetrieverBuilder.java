@@ -24,6 +24,7 @@ import org.elasticsearch.features.NodeFeature;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.rest.RestStatus;
+import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.builder.PointInTimeBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.fetch.StoredFieldsContext;
@@ -80,10 +81,24 @@ public abstract class CompoundRetrieverBuilder<T extends CompoundRetrieverBuilde
      */
     protected abstract T clone(List<RetrieverSource> newChildRetrievers, List<QueryBuilder> newPreFilterQueryBuilders);
 
+
+    public static class ScoreDocAndHit extends ScoreDoc {
+        private final SearchHit hit;
+
+        public ScoreDocAndHit(int doc, float score, int shardIndex, SearchHit hit) {
+            super(doc, score, shardIndex);
+            this.hit = hit;
+        }
+
+        public SearchHit hit() {
+            return hit;
+        }
+    }
+
     /**
      * Combines the provided {@code rankResults} to return the final top documents.
      */
-    protected abstract RankDoc[] combineInnerRetrieverResults(List<ScoreDoc[]> rankResults, boolean explain);
+    protected abstract RankDoc[] combineInnerRetrieverResults(List<ScoreDocAndHit[]> rankResults, boolean explain);
 
     @Override
     public final boolean isCompound() {
@@ -159,7 +174,7 @@ public abstract class CompoundRetrieverBuilder<T extends CompoundRetrieverBuilde
             client.execute(TransportMultiSearchAction.TYPE, multiSearchRequest, new ActionListener<>() {
                 @Override
                 public void onResponse(MultiSearchResponse items) {
-                    List<ScoreDoc[]> topDocs = new ArrayList<>();
+                    List<ScoreDocAndHit[]> topDocs = new ArrayList<>();
                     List<Exception> failures = new ArrayList<>();
                     // capture the max status code returned by any of the responses
                     int statusCode = RestStatus.OK.getStatus();
@@ -174,9 +189,9 @@ public abstract class CompoundRetrieverBuilder<T extends CompoundRetrieverBuilde
                             }
                         } else {
                             assert item.getResponse() != null;
-                            var rankDocs = getRankDocs(item.getResponse());
-                            innerRetrievers.get(i).retriever().setRankDocs(rankDocs);
-                            topDocs.add(rankDocs);
+                            var rankDocAndHits = getRankDocAndHits(item.getResponse());
+                            innerRetrievers.get(i).retriever().setRankDocs(getRankDocs(rankDocAndHits));
+                            topDocs.add(rankDocAndHits);
                         }
                     }
                     if (false == failures.isEmpty()) {
@@ -341,16 +356,24 @@ public abstract class CompoundRetrieverBuilder<T extends CompoundRetrieverBuilde
         return this;
     }
 
-    private RankDoc[] getRankDocs(SearchResponse searchResponse) {
+    private RankDoc[] getRankDocs(ScoreDocAndHit[] docs) {
+        RankDoc[] newDocs = new RankDoc[docs.length];
+        for (int i = 0; i < docs.length; i++) {
+            newDocs[i] = new RankDoc(docs[i].doc, docs[i].score, docs[i].shardIndex);
+            newDocs[i].rank = i+1;
+        }
+        return newDocs;
+    }
+
+    private ScoreDocAndHit[] getRankDocAndHits(SearchResponse searchResponse) {
         int size = searchResponse.getHits().getHits().length;
-        RankDoc[] docs = new RankDoc[size];
+        ScoreDocAndHit[] docs = new ScoreDocAndHit[size];
         for (int i = 0; i < size; i++) {
             var hit = searchResponse.getHits().getAt(i);
             long sortValue = (long) hit.getRawSortValues()[hit.getRawSortValues().length - 1];
             int doc = ShardDocSortField.decodeDoc(sortValue);
             int shardRequestIndex = ShardDocSortField.decodeShardRequestIndex(sortValue);
-            docs[i] = new RankDoc(doc, hit.getScore(), shardRequestIndex);
-            docs[i].rank = i + 1;
+            docs[i] = new ScoreDocAndHit(doc, hit.getScore(), shardRequestIndex, hit);
         }
         return docs;
     }

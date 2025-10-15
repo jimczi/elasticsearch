@@ -160,7 +160,7 @@ public final class QueryRuleRetrieverBuilder extends CompoundRetrieverBuilder<Qu
     }
 
     @Override
-    protected RankDoc[] combineInnerRetrieverResults(List<ScoreDoc[]> rankResults, boolean explain) {
+    protected RankDoc[] combineInnerRetrieverResults(List<ScoreDocAndHit[]> rankResults, boolean explain) {
         assert rankResults.size() == 1;
         ScoreDoc[] scoreDocs = rankResults.getFirst();
         RankDoc[] rankDocs = new RuleQueryRankDoc[scoreDocs.length];

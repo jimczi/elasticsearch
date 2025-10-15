@@ -20,7 +20,6 @@ import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.rank.RankBuilder;
 import org.elasticsearch.search.rank.RankDoc;
 import org.elasticsearch.search.retriever.CompoundRetrieverBuilder;
-import org.elasticsearch.search.retriever.CompoundRetrieverBuilder.RetrieverSource;
 import org.elasticsearch.search.retriever.RetrieverBuilder;
 import org.elasticsearch.search.retriever.RetrieverParserContext;
 import org.elasticsearch.search.retriever.StandardRetrieverBuilder;
@@ -195,7 +194,7 @@ public final class RRFRetrieverBuilder extends CompoundRetrieverBuilder<RRFRetri
     }
 
     @Override
-    protected RRFRankDoc[] combineInnerRetrieverResults(List<ScoreDoc[]> rankResults, boolean explain) {
+    protected RRFRankDoc[] combineInnerRetrieverResults(List<ScoreDocAndHit[]> rankResults, boolean explain) {
         // combine the disjointed sets of TopDocs into a single set or RRFRankDocs
         // each RRFRankDoc will have both the position and score for each query where
         // it was within the result set for that query

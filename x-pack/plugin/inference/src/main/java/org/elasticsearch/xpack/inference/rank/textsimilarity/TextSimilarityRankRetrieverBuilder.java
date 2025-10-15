@@ -187,7 +187,7 @@ public class TextSimilarityRankRetrieverBuilder extends CompoundRetrieverBuilder
     }
 
     @Override
-    protected RankDoc[] combineInnerRetrieverResults(List<ScoreDoc[]> rankResults, boolean explain) {
+    protected RankDoc[] combineInnerRetrieverResults(List<ScoreDocAndHit[]> rankResults, boolean explain) {
         assert rankResults.size() == 1;
         ScoreDoc[] scoreDocs = rankResults.getFirst();
         List<TextSimilarityRankDoc> filteredDocs = new ArrayList<>();
