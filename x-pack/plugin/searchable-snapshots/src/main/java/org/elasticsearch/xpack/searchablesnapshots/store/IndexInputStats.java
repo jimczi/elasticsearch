@@ -10,6 +10,7 @@ import org.elasticsearch.common.unit.ByteSizeUnit;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.SuppressForbidden;
+import org.elasticsearch.index.store.ElasticsearchTrackingDirectory;
 import org.elasticsearch.xpack.searchablesnapshots.store.input.CachedBlobContainerIndexInput;
 
 import java.util.concurrent.atomic.AtomicLong;
@@ -93,10 +94,12 @@ public class IndexInputStats {
     }
 
     public void addCachedBytesRead(int bytesRead) {
+        ElasticsearchTrackingDirectory.addCachedBytesRead(bytesRead);
         cachedBytesRead.add(bytesRead);
     }
 
     public void addIndexCacheBytesRead(int bytesRead) {
+        ElasticsearchTrackingDirectory.addDiskBytesRead(bytesRead);
         indexCacheBytesRead.add(bytesRead);
     }
 
