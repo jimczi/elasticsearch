@@ -224,6 +224,10 @@ public class EsqlPlugin extends Plugin implements ActionPlugin, ExtensiblePlugin
             components = new ArrayList<>(components);
             components.add(new ViewService(services.clusterService(), services.projectResolver(), settings));
         }
+        if (operatorRunListeners.isEmpty() == false) {
+            // TODO: handle multiple listeners
+            components.add(operatorRunListeners.get(0).get());
+        }
         return components;
     }
 
