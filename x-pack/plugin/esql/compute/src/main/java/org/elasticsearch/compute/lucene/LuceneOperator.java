@@ -26,6 +26,7 @@ import org.elasticsearch.compute.operator.Operator;
 import org.elasticsearch.compute.operator.SourceOperator;
 import org.elasticsearch.core.RefCounted;
 import org.elasticsearch.core.TimeValue;
+import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.xcontent.XContentBuilder;
@@ -299,6 +300,7 @@ public abstract class LuceneOperator extends SourceOperator {
         private final int current;
         private final long rowsEmitted;
         private final Map<String, LuceneSliceQueue.PartitioningStrategy> partitioningStrategies;
+        private transient final IndexShard indexShard;
 
         protected Status(LuceneOperator operator) {
             processedSlices = operator.processedSlices;
@@ -325,6 +327,7 @@ public abstract class LuceneOperator extends SourceOperator {
             pagesEmitted = operator.pagesEmitted;
             rowsEmitted = operator.rowsEmitted;
             partitioningStrategies = operator.sliceQueue.partitioningStrategies();
+            indexShard = operator.sliceQueue.getShard();
         }
 
         Status(
@@ -353,6 +356,7 @@ public abstract class LuceneOperator extends SourceOperator {
             this.current = current;
             this.rowsEmitted = rowsEmitted;
             this.partitioningStrategies = partitioningStrategies;
+            this.indexShard = null;
         }
 
         Status(StreamInput in) throws IOException {
@@ -370,6 +374,7 @@ public abstract class LuceneOperator extends SourceOperator {
             partitioningStrategies = serializeShardPartitioning(in.getTransportVersion())
                 ? in.readMap(LuceneSliceQueue.PartitioningStrategy::readFrom)
                 : Map.of();
+            indexShard = null;
         }
 
         @Override

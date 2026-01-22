@@ -14,6 +14,7 @@ import org.elasticsearch.index.mapper.BlockLoader;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.SourceLoader;
 import org.elasticsearch.index.mapper.blockloader.BlockLoaderFunctionConfig;
+import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.search.sort.SortAndFormats;
 import org.elasticsearch.search.sort.SortBuilder;
 
@@ -30,6 +31,8 @@ public interface ShardContext extends RefCounted {
      * The index of this shard in the list of shards being processed.
      */
     int index();
+
+    IndexShard indexShard();
 
     /**
      * Get {@link IndexSearcher} holding the actual data.

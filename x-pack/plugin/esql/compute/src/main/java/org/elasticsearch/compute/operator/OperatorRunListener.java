@@ -7,10 +7,6 @@
 
 package org.elasticsearch.compute.operator;
 
-import org.elasticsearch.core.Nullable;
-
-import java.util.Objects;
-
 /**
  * Listener invoked by the Driver when an Operator has been "run"
  * (i.e., it made progress until it blocked, finished, or the driver exhausted the step budget).
@@ -22,10 +18,7 @@ import java.util.Objects;
  */
 @FunctionalInterface
 public interface OperatorRunListener {
-    /**
-     * Called after an operator has been run.
-     */
-    void onOperatorRun(Operator event);
+    void onStatusUpdate(Operator.Status status, long extraCpuNanos);
 
     interface Provider {
         OperatorRunListener get();

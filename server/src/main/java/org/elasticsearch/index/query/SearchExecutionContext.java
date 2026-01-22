@@ -51,6 +51,7 @@ import org.elasticsearch.index.mapper.SourceLoader;
 import org.elasticsearch.index.mapper.SourceToParse;
 import org.elasticsearch.index.query.support.AutoPrefilteringScope;
 import org.elasticsearch.index.query.support.NestedScope;
+import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.index.similarity.SimilarityService;
 import org.elasticsearch.script.Script;
 import org.elasticsearch.script.ScriptCompiler;
@@ -110,6 +111,7 @@ public class SearchExecutionContext extends QueryRewriteContext {
 
     private final Integer requestSize;
     private final MapperMetrics mapperMetrics;
+    private final IndexShard indexShard;
 
     /**
      * Build a {@linkplain SearchExecutionContext}.
@@ -139,6 +141,7 @@ public class SearchExecutionContext extends QueryRewriteContext {
         this(
             shardId,
             shardRequestIndex,
+            null,
             indexSettings,
             bitsetFilterCache,
             indexFieldDataLookup,
@@ -164,6 +167,7 @@ public class SearchExecutionContext extends QueryRewriteContext {
     public SearchExecutionContext(
         int shardId,
         int shardRequestIndex,
+        IndexShard indexShard,
         IndexSettings indexSettings,
         BitsetFilterCache bitsetFilterCache,
         BiFunction<MappedFieldType, FieldDataContext, IndexFieldData<?>> indexFieldDataLookup,
@@ -187,6 +191,7 @@ public class SearchExecutionContext extends QueryRewriteContext {
         this(
             shardId,
             shardRequestIndex,
+            indexShard,
             indexSettings,
             bitsetFilterCache,
             indexFieldDataLookup,
@@ -217,6 +222,7 @@ public class SearchExecutionContext extends QueryRewriteContext {
         this(
             source.shardId,
             source.shardRequestIndex,
+            source.indexShard,
             source.indexSettings,
             source.bitsetFilterCache,
             source.indexFieldDataLookup,
@@ -243,6 +249,7 @@ public class SearchExecutionContext extends QueryRewriteContext {
     private SearchExecutionContext(
         int shardId,
         int shardRequestIndex,
+        IndexShard indexShard,
         IndexSettings indexSettings,
         BitsetFilterCache bitsetFilterCache,
         BiFunction<MappedFieldType, FieldDataContext, IndexFieldData<?>> indexFieldDataLookup,
@@ -297,6 +304,7 @@ public class SearchExecutionContext extends QueryRewriteContext {
         this.searcher = searcher;
         this.requestSize = requestSize;
         this.mapperMetrics = mapperMetrics;
+        this.indexShard = indexShard;
     }
 
     private void reset() {
@@ -701,6 +709,10 @@ public class SearchExecutionContext extends QueryRewriteContext {
      */
     public IndexSearcher searcher() {
         return searcher;
+    }
+
+    public IndexShard getIndexShard() {
+        return indexShard;
     }
 
     public Integer requestSize() {

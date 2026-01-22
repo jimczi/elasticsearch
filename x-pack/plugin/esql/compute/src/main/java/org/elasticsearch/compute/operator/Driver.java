@@ -15,7 +15,7 @@ import org.elasticsearch.common.util.concurrent.AbstractRunnable;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.compute.Describable;
 import org.elasticsearch.compute.data.Page;
-import org.elasticsearch.compute.lucene.LuceneSourceOperator;
+import org.elasticsearch.compute.lucene.LuceneOperator;
 import org.elasticsearch.compute.operator.exchange.ExchangeSinkOperator;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Releasable;
@@ -282,31 +282,28 @@ public class Driver implements Releasable, Describable {
             }
 
             if (op.isFinished() == false && nextOp.needsInput()) {
-                try {
-                    driverContext.checkForEarlyTermination();
-                    assert nextOp.isFinished() == false || nextOp instanceof ExchangeSinkOperator || nextOp instanceof LimitOperator
-                        : "next operator should not be finished yet: " + nextOp;
-                    Page page = op.getOutput();
-                    if (page == null) {
-                        // No result, just move to the next iteration
-                    } else if (page.getPositionCount() == 0) {
-                        // Empty result, release any memory it holds immediately and move to the next iteration
+                driverContext.checkForEarlyTermination();
+                assert nextOp.isFinished() == false || nextOp instanceof ExchangeSinkOperator || nextOp instanceof LimitOperator
+                    : "next operator should not be finished yet: " + nextOp;
+                Page page = op.getOutput();
+                if (page == null) {
+                    // No result, just move to the next iteration
+                } else if (page.getPositionCount() == 0) {
+                    // Empty result, release any memory it holds immediately and move to the next iteration
+                    page.releaseBlocks();
+                } else {
+                    // Non-empty result from the previous operation, move it to the next operation
+                    try {
+                        driverContext.checkForEarlyTermination();
+                    } catch (DriverEarlyTerminationException | TaskCancelledException e) {
                         page.releaseBlocks();
-                    } else {
-                        // Non-empty result from the previous operation, move it to the next operation
-                        try {
-                            driverContext.checkForEarlyTermination();
-                        } catch (DriverEarlyTerminationException | TaskCancelledException e) {
-                            page.releaseBlocks();
-                            throw e;
-                        }
-                        nextOp.addInput(page);
-                        movedPage = true;
+                        throw e;
                     }
-                } finally {
-                    operatorRunListener.onOperatorRun(op);
+                    nextOp.addInput(page);
+                    movedPage = true;
                 }
             }
+
             if (op.isFinished()) {
                 driverContext.checkForEarlyTermination();
                 var originalIndex = iterator.previousIndex();
@@ -565,6 +562,15 @@ public class Driver implements Releasable, Describable {
                 }
             }
 
+            var activeOperatorStatuses = activeOperators.stream()
+                .map(op -> {
+                    var s = op.status();
+                    operatorRunListener.onStatusUpdate(s, extraCpuNanos);
+                    if (s instanceof LuceneOperator.Status ls) {
+                    }
+                    return new OperatorStatus(op.toString(), s);
+                })
+                .toList();
             return new DriverStatus(
                 sessionId,
                 shortDescription,
@@ -576,7 +582,7 @@ public class Driver implements Releasable, Describable {
                 prev.iterations() + extraIterations,
                 status,
                 List.copyOf(statusOfCompletedOperators),
-                activeOperators.stream().map(op -> new OperatorStatus(op.toString(), op.status())).toList(),
+                activeOperatorStatuses,
                 sleeps
             );
         });

@@ -18,6 +18,7 @@ import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.index.shard.IndexShard;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -125,6 +126,11 @@ public final class LuceneSliceQueue {
                 stealableSlices.add(slice.slicePosition());
             }
         }
+    }
+
+    IndexShard getShard() {
+        assert slices.length() > 0;
+        return slices.get(0).shardContext().indexShard();
     }
 
     /**

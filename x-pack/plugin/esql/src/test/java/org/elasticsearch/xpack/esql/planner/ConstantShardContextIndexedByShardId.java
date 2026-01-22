@@ -15,6 +15,7 @@ import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.SourceLoader;
 import org.elasticsearch.index.mapper.blockloader.BlockLoaderFunctionConfig;
 import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.search.sort.SortAndFormats;
 import org.elasticsearch.search.sort.SortBuilder;
 
@@ -43,6 +44,11 @@ public class ConstantShardContextIndexedByShardId implements IndexedByShardId<Es
         @Override
         public int index() {
             return 0;
+        }
+
+        @Override
+        public IndexShard indexShard() {
+            throw new UnsupportedOperationException();
         }
 
         @Override

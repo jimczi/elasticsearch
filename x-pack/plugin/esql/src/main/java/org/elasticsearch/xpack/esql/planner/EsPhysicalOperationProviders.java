@@ -59,6 +59,7 @@ import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.index.query.TermQueryBuilder;
 import org.elasticsearch.index.query.TermsQueryBuilder;
 import org.elasticsearch.index.search.NestedHelper;
+import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.search.fetch.subphase.FetchSourceContext;
@@ -459,6 +460,7 @@ public class EsPhysicalOperationProviders extends AbstractPhysicalOperationProvi
         private final SearchExecutionContext ctx;
         private final AliasFilter aliasFilter;
         private final String shardIdentifier;
+        private final IndexShard indexShard;
 
         public DefaultShardContext(int index, Releasable releasable, SearchExecutionContext ctx, AliasFilter aliasFilter) {
             this.index = index;
@@ -467,11 +469,17 @@ public class EsPhysicalOperationProviders extends AbstractPhysicalOperationProvi
             this.aliasFilter = aliasFilter;
             // Build the shardIdentifier once up front so we can reuse references to it in many places.
             this.shardIdentifier = this.ctx.getFullyQualifiedIndex().getName() + ":" + this.ctx.getShardId();
+            this.indexShard = ctx.getIndexShard();
         }
 
         @Override
         public int index() {
             return index;
+        }
+
+        @Override
+        public IndexShard indexShard() {
+            return indexShard;
         }
 
         @Override
