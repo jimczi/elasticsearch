@@ -15,6 +15,7 @@ import org.elasticsearch.common.util.concurrent.AbstractRunnable;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.compute.Describable;
 import org.elasticsearch.compute.data.Page;
+import org.elasticsearch.compute.lucene.LuceneSourceOperator;
 import org.elasticsearch.compute.operator.exchange.ExchangeSinkOperator;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Releasable;
@@ -91,6 +92,8 @@ public class Driver implements Releasable, Describable {
     private final SubscribableListener<Void> completionListener = new SubscribableListener<>();
     private final DriverScheduler scheduler = new DriverScheduler();
 
+    private final OperatorRunListener operatorRunListener;
+
     /**
      * Status reported to the tasks API. We write the status at most once every
      * {@link #statusNanos}, as soon as loop has finished and after {@link #statusNanos}
@@ -130,7 +133,8 @@ public class Driver implements Releasable, Describable {
         List<Operator> intermediateOperators,
         SinkOperator sink,
         TimeValue statusInterval,
-        Releasable releasable
+        Releasable releasable,
+        OperatorRunListener operatorRunListener
     ) {
         this.sessionId = sessionId;
         this.shortDescription = shortDescription;
@@ -160,6 +164,7 @@ public class Driver implements Releasable, Describable {
                 DriverSleeps.empty()
             )
         );
+        this.operatorRunListener = operatorRunListener;
     }
 
     public DriverContext driverContext() {
@@ -277,28 +282,31 @@ public class Driver implements Releasable, Describable {
             }
 
             if (op.isFinished() == false && nextOp.needsInput()) {
-                driverContext.checkForEarlyTermination();
-                assert nextOp.isFinished() == false || nextOp instanceof ExchangeSinkOperator || nextOp instanceof LimitOperator
-                    : "next operator should not be finished yet: " + nextOp;
-                Page page = op.getOutput();
-                if (page == null) {
-                    // No result, just move to the next iteration
-                } else if (page.getPositionCount() == 0) {
-                    // Empty result, release any memory it holds immediately and move to the next iteration
-                    page.releaseBlocks();
-                } else {
-                    // Non-empty result from the previous operation, move it to the next operation
-                    try {
-                        driverContext.checkForEarlyTermination();
-                    } catch (DriverEarlyTerminationException | TaskCancelledException e) {
+                try {
+                    driverContext.checkForEarlyTermination();
+                    assert nextOp.isFinished() == false || nextOp instanceof ExchangeSinkOperator || nextOp instanceof LimitOperator
+                        : "next operator should not be finished yet: " + nextOp;
+                    Page page = op.getOutput();
+                    if (page == null) {
+                        // No result, just move to the next iteration
+                    } else if (page.getPositionCount() == 0) {
+                        // Empty result, release any memory it holds immediately and move to the next iteration
                         page.releaseBlocks();
-                        throw e;
+                    } else {
+                        // Non-empty result from the previous operation, move it to the next operation
+                        try {
+                            driverContext.checkForEarlyTermination();
+                        } catch (DriverEarlyTerminationException | TaskCancelledException e) {
+                            page.releaseBlocks();
+                            throw e;
+                        }
+                        nextOp.addInput(page);
+                        movedPage = true;
                     }
-                    nextOp.addInput(page);
-                    movedPage = true;
+                } finally {
+                    operatorRunListener.onOperatorRun(op);
                 }
             }
-
             if (op.isFinished()) {
                 driverContext.checkForEarlyTermination();
                 var originalIndex = iterator.previousIndex();

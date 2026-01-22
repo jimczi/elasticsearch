@@ -37,6 +37,7 @@ import org.elasticsearch.compute.operator.LocalSourceOperator.LocalSourceFactory
 import org.elasticsearch.compute.operator.MvExpandOperator;
 import org.elasticsearch.compute.operator.Operator;
 import org.elasticsearch.compute.operator.Operator.OperatorFactory;
+import org.elasticsearch.compute.operator.OperatorRunListener;
 import org.elasticsearch.compute.operator.OutputOperator.OutputOperatorFactory;
 import org.elasticsearch.compute.operator.RowInTableLookupOperator;
 import org.elasticsearch.compute.operator.SampleOperator;
@@ -171,6 +172,7 @@ public class LocalExecutionPlanner {
     private final LookupFromIndexService lookupFromIndexService;
     private final InferenceService inferenceService;
     private final PhysicalOperationProviders physicalOperationProviders;
+    private final OperatorRunListener operatorRunListener;
 
     public LocalExecutionPlanner(
         String sessionId,
@@ -185,7 +187,8 @@ public class LocalExecutionPlanner {
         EnrichLookupService enrichLookupService,
         LookupFromIndexService lookupFromIndexService,
         InferenceService inferenceService,
-        PhysicalOperationProviders physicalOperationProviders
+        PhysicalOperationProviders physicalOperationProviders,
+        OperatorRunListener operatorRunListener
     ) {
 
         this.sessionId = sessionId;
@@ -201,6 +204,7 @@ public class LocalExecutionPlanner {
         this.lookupFromIndexService = lookupFromIndexService;
         this.inferenceService = inferenceService;
         this.physicalOperationProviders = physicalOperationProviders;
+        this.operatorRunListener = operatorRunListener;
     }
 
     /**
@@ -246,7 +250,8 @@ public class LocalExecutionPlanner {
                     context.shardContexts,
                     physicalOperation,
                     statusInterval,
-                    settings
+                    settings,
+                    operatorRunListener
                 ),
                 context.driverParallelism().get()
             )
@@ -1119,7 +1124,8 @@ public class LocalExecutionPlanner {
         IndexedByShardId<? extends ShardContext> shardContexts,
         PhysicalOperation physicalOperation,
         TimeValue statusInterval,
-        Settings settings
+        Settings settings,
+        OperatorRunListener operatorRunListener
     ) implements Function<String, Driver>, Describable {
         @Override
         public Driver apply(String sessionId) {
@@ -1152,7 +1158,8 @@ public class LocalExecutionPlanner {
                     operators,
                     sink,
                     statusInterval,
-                    localBreaker
+                    localBreaker,
+                    operatorRunListener
                 );
             } finally {
                 if (false == success) {

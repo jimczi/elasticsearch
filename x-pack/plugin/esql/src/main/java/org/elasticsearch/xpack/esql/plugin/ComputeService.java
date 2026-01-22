@@ -25,6 +25,7 @@ import org.elasticsearch.compute.operator.Driver;
 import org.elasticsearch.compute.operator.DriverCompletionInfo;
 import org.elasticsearch.compute.operator.DriverTaskRunner;
 import org.elasticsearch.compute.operator.FailureCollector;
+import org.elasticsearch.compute.operator.OperatorRunListener;
 import org.elasticsearch.compute.operator.PlanTimeProfile;
 import org.elasticsearch.compute.operator.exchange.ExchangeService;
 import org.elasticsearch.compute.operator.exchange.ExchangeSink;
@@ -149,6 +150,7 @@ public class ComputeService {
     private final ClusterComputeHandler clusterComputeHandler;
     private final ExchangeService exchangeService;
     private final PlannerSettings plannerSettings;
+    private final OperatorRunListener operatorRunListener;
 
     @SuppressWarnings("this-escape")
     public ComputeService(
@@ -157,7 +159,8 @@ public class ComputeService {
         LookupFromIndexService lookupFromIndexService,
         ThreadPool threadPool,
         BigArrays bigArrays,
-        BlockFactory blockFactory
+        BlockFactory blockFactory,
+        OperatorRunListener operatorRunListener
     ) {
         this.searchService = transportActionServices.searchService();
         this.transportService = transportActionServices.transportService();
@@ -188,6 +191,7 @@ public class ComputeService {
             dataNodeComputeHandler
         );
         this.plannerSettings = transportActionServices.plannerSettings();
+        this.operatorRunListener = operatorRunListener;
     }
 
     PlannerSettings plannerSettings() {
@@ -667,7 +671,8 @@ public class ComputeService {
                 enrichLookupService,
                 lookupFromIndexService,
                 inferenceService,
-                physicalOperationProviders
+                physicalOperationProviders,
+                operatorRunListener
             );
 
             LOGGER.debug("Received physical plan for {}:\n{}", context.description(), plan);

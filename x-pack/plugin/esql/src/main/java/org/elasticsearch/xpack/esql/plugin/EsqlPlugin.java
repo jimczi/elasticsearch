@@ -32,6 +32,7 @@ import org.elasticsearch.compute.operator.DriverStatus;
 import org.elasticsearch.compute.operator.HashAggregationOperator;
 import org.elasticsearch.compute.operator.LimitOperator;
 import org.elasticsearch.compute.operator.MvExpandOperator;
+import org.elasticsearch.compute.operator.OperatorRunListener;
 import org.elasticsearch.compute.operator.SampleOperator;
 import org.elasticsearch.compute.operator.exchange.ExchangeService;
 import org.elasticsearch.compute.operator.exchange.ExchangeSinkOperator;
@@ -186,6 +187,7 @@ public class EsqlPlugin extends Plugin implements ActionPlugin, ExtensiblePlugin
     );
 
     private final List<PlanCheckerProvider> extraCheckerProviders = new ArrayList<>();
+    private final List<OperatorRunListener.Provider> operatorRunListeners = new ArrayList<>();
 
     @Override
     public Collection<?> createComponents(PluginServices services) {
@@ -396,6 +398,7 @@ public class EsqlPlugin extends Plugin implements ActionPlugin, ExtensiblePlugin
     @Override
     public void loadExtensions(ExtensionLoader loader) {
         extraCheckerProviders.addAll(loader.loadExtensions(PlanCheckerProvider.class));
+        operatorRunListeners.addAll(loader.loadExtensions(OperatorRunListener.Provider.class));
     }
 
     @Override
