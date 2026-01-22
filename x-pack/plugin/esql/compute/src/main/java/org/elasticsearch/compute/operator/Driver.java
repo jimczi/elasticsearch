@@ -566,8 +566,6 @@ public class Driver implements Releasable, Describable {
                 .map(op -> {
                     var s = op.status();
                     operatorRunListener.onStatusUpdate(s, extraCpuNanos);
-                    if (s instanceof LuceneOperator.Status ls) {
-                    }
                     return new OperatorStatus(op.toString(), s);
                 })
                 .toList();

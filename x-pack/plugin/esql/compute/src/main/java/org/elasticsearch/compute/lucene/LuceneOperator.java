@@ -300,7 +300,7 @@ public abstract class LuceneOperator extends SourceOperator {
         private final int current;
         private final long rowsEmitted;
         private final Map<String, LuceneSliceQueue.PartitioningStrategy> partitioningStrategies;
-        private transient final IndexShard indexShard;
+        private final transient IndexShard indexShard;
 
         protected Status(LuceneOperator operator) {
             processedSlices = operator.processedSlices;
