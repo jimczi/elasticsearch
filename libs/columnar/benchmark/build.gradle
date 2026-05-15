@@ -1,0 +1,37 @@
+/*
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
+ */
+
+apply plugin: org.elasticsearch.gradle.internal.ElasticsearchJavaBasePlugin
+apply plugin: 'java-library'
+apply plugin: 'application'
+
+application {
+  mainClass = 'org.openjdk.jmh.Main'
+}
+
+tasks.named("assemble").configure { enabled = false }
+
+base {
+  archivesName = 'elasticsearch-columnar-benchmarks'
+}
+
+tasks.named("javadoc").configure { enabled = false }
+
+dependencies {
+  api project(':libs:columnar')
+  api "org.apache.lucene:lucene-core:${versions.lucene}"
+  api "org.openjdk.jmh:jmh-core:$versions.jmh"
+  annotationProcessor "org.openjdk.jmh:jmh-generator-annprocess:$versions.jmh"
+  runtimeOnly 'net.sf.jopt-simple:jopt-simple:5.0.2'
+  runtimeOnly 'org.apache.commons:commons-math3:3.6.1'
+}
+
+tasks.named("compileJava").configure {
+  options.compilerArgs.addAll(["-processor", "org.openjdk.jmh.generators.BenchmarkProcessor"])
+}

@@ -1,0 +1,6 @@
+org.elasticsearch.columnar.encoder.RawBlockEncoder
+org.elasticsearch.columnar.encoder.BitPackBlockEncoder
+org.elasticsearch.columnar.encoder.DeltaPackedBlockEncoder
+org.elasticsearch.columnar.encoder.GcdDeltaPackedBlockEncoder
+org.elasticsearch.columnar.encoder.GcdBitPackBlockEncoder
+org.elasticsearch.columnar.numericpipeline.NumericPipelineEncoder

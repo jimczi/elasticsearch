@@ -56,6 +56,7 @@ dependencies {
   implementation (testFixtures(project(path: ':libs:simdvec')))
   implementation project(path: ':libs:swisshash')
   implementation project(path: ':libs:exponential-histogram')
+  implementation project(path: ':libs:columnar')
   implementation(project(':x-pack:plugin:searchable-snapshots')) {
     capabilities {
       requireCapability("org.elasticsearch.plugin:searchable-snapshots-test-artifacts")
