@@ -64,6 +64,7 @@ import org.elasticsearch.common.logging.activity.ActivityLogWriterProvider;
 import org.elasticsearch.common.logging.activity.ActivityLogger;
 import org.elasticsearch.common.logging.activity.QueryLogger;
 import org.elasticsearch.common.regex.Regex;
+import org.elasticsearch.common.resource.ResourcePriority;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
 import org.elasticsearch.common.util.ArrayUtils;
@@ -88,6 +89,8 @@ import org.elasticsearch.node.ResponseCollectorService;
 import org.elasticsearch.rest.action.search.SearchResponseMetrics;
 import org.elasticsearch.search.SearchPhaseResult;
 import org.elasticsearch.search.SearchService;
+import org.elasticsearch.search.admission.CoordinatorSearchAdmission;
+import org.elasticsearch.search.admission.SearchAdmissionService;
 import org.elasticsearch.search.aggregations.AggregationReduceContext;
 import org.elasticsearch.search.builder.PointInTimeBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
@@ -175,6 +178,8 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
     private final RemoteClusterService remoteClusterService;
     private final SearchPhaseController searchPhaseController;
     private final SearchService searchService;
+    private final CoordinatorSearchAdmission coordinatorSearchAdmission;
+    private final boolean coordinatorAdmissionEnabled;
     private final ProjectResolver projectResolver;
     private final ResponseCollectorService responseCollectorService;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
@@ -211,7 +216,8 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         UsageService usageService,
         ActionLoggingFieldsProvider fieldProvider,
         ActivityLogWriterProvider logWriterProvider,
-        CrossProjectModeDecider crossProjectModeDecider
+        CrossProjectModeDecider crossProjectModeDecider,
+        CoordinatorSearchAdmission coordinatorSearchAdmission
     ) {
         super(TYPE.name(), transportService, actionFilters, SearchRequest::new, EsExecutors.DIRECT_EXECUTOR_SERVICE);
         this.threadPool = threadPool;
@@ -243,6 +249,8 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         this.usageService = usageService;
         this.forceConnectTimeoutSecs = settings.getAsTime("search.ccs.force_connect_timeout", null);
         this.crossProjectModeDecider = crossProjectModeDecider;
+        this.coordinatorSearchAdmission = coordinatorSearchAdmission;
+        this.coordinatorAdmissionEnabled = SearchService.SEARCH_ADMISSION_CONTROL_COORDINATOR_ENABLED.get(settings);
         this.activityLogger = new QueryLogger<>(
             clusterService.getClusterSettings(),
             new SearchLogProducer(),
@@ -2181,6 +2189,89 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
                 }));
                 return;
             }
+            // Coordinator distributed admission: before running the phases, reserve capacity on every participating
+            // local node (all-or-nothing) so an accepted search is guaranteed it can run. Off by default, and only when
+            // every node supports the reserve/release actions (mixed-cluster safe). Remote (CCS) shards are reserved by
+            // their own cluster and excluded from the local demand.
+            if (coordinatorAdmissionEnabled == false
+                || clusterState.getMinTransportVersion().supports(SearchAdmissionService.SEARCH_ADMISSION_TRANSPORT_VERSION) == false) {
+                runSearchPhases(
+                    task,
+                    searchRequest,
+                    executor,
+                    shardIterators,
+                    skippedByClusterAlias,
+                    timeProvider,
+                    connectionLookup,
+                    clusterState,
+                    aliasFilter,
+                    concreteIndexBoosts,
+                    clusters,
+                    searchRequestAttributes,
+                    listener
+                );
+                return;
+            }
+            final Map<DiscoveryNode, Integer> demand = computeAdmissionDemand(shardIterators, clusterState.nodes());
+            if (demand.isEmpty()) {
+                runSearchPhases(
+                    task,
+                    searchRequest,
+                    executor,
+                    shardIterators,
+                    skippedByClusterAlias,
+                    timeProvider,
+                    connectionLookup,
+                    clusterState,
+                    aliasFilter,
+                    concreteIndexBoosts,
+                    clusters,
+                    searchRequestAttributes,
+                    listener
+                );
+                return;
+            }
+            // The lease id is the search task id so a data node recognises shard work covered by this lease.
+            final String leaseId = new TaskId(clusterService.localNode().getId(), task.getId()).toString();
+            coordinatorSearchAdmission.admit(leaseId, demand, ResourcePriority.NORMAL, ActionListener.wrap(releasable -> {
+                final ActionListener<SearchResponse> releasing = ActionListener.runAfter(listener, releasable::close);
+                try {
+                    runSearchPhases(
+                        task,
+                        searchRequest,
+                        executor,
+                        shardIterators,
+                        skippedByClusterAlias,
+                        timeProvider,
+                        connectionLookup,
+                        clusterState,
+                        aliasFilter,
+                        concreteIndexBoosts,
+                        clusters,
+                        searchRequestAttributes,
+                        releasing
+                    );
+                } catch (Exception e) {
+                    releasing.onFailure(e); // releases the lease and fails the search
+                }
+            }, listener::onFailure));
+        }
+
+        private void runSearchPhases(
+            SearchTask task,
+            SearchRequest searchRequest,
+            Executor executor,
+            List<SearchShardIterator> shardIterators,
+            Map<String, Integer> skippedByClusterAlias,
+            SearchTimeProvider timeProvider,
+            BiFunction<String, String, Transport.Connection> connectionLookup,
+            ClusterState clusterState,
+            Map<String, AliasFilter> aliasFilter,
+            Map<String, Float> concreteIndexBoosts,
+            SearchResponse.Clusters clusters,
+            Map<String, Object> searchRequestAttributes,
+            ActionListener<SearchResponse> responseListener
+        ) {
             // for synchronous CCS minimize_roundtrips=false, use the CCSSingleCoordinatorSearchProgressListener
             // (AsyncSearchTask will not return SearchProgressListener.NOOP, since it uses its own progress listener
             // which delegates to CCSSingleCoordinatorSearchProgressListener when minimizing roundtrips)
@@ -2213,7 +2304,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
                         executor,
                         queryResultConsumer,
                         searchRequest,
-                        listener,
+                        responseListener,
                         shardIterators,
                         skippedByClusterAlias,
                         timeProvider,
@@ -2238,7 +2329,7 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
                         executor,
                         queryResultConsumer,
                         searchRequest,
-                        listener,
+                        responseListener,
                         shardIterators,
                         skippedByClusterAlias,
                         timeProvider,
@@ -2259,6 +2350,28 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
                     queryResultConsumer.close();
                 }
             }
+        }
+
+        private static Map<DiscoveryNode, Integer> computeAdmissionDemand(
+            List<SearchShardIterator> shardIterators,
+            org.elasticsearch.cluster.node.DiscoveryNodes nodes
+        ) {
+            final Map<DiscoveryNode, Integer> demand = new HashMap<>();
+            for (SearchShardIterator it : shardIterators) {
+                // Remote (CCS) shards are reserved by their own cluster.
+                if (it.getClusterAlias() != null && RemoteClusterAware.LOCAL_CLUSTER_GROUP_KEY.equals(it.getClusterAlias()) == false) {
+                    continue;
+                }
+                final List<String> targets = it.getTargetNodeIds();
+                if (targets.isEmpty()) {
+                    continue; // unassigned shard
+                }
+                final DiscoveryNode node = nodes.get(targets.get(0)); // the preferred copy's node
+                if (node != null) {
+                    demand.merge(node, 1, Integer::sum);
+                }
+            }
+            return demand;
         }
     }
 

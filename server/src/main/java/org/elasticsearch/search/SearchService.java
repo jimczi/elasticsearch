@@ -465,6 +465,41 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         Property.NodeScope
     );
 
+    /**
+     * Enables coordinator-side distributed admission: before a search runs, the coordinator reserves capacity on every
+     * participating node (all-or-nothing) so an accepted search is guaranteed it can run. Off by default; requires
+     * {@link #SEARCH_ADMISSION_CONTROL_SLOTS_PER_THREAD} {@code > 0} on the data nodes to have an effect.
+     */
+    public static final Setting<Boolean> SEARCH_ADMISSION_CONTROL_COORDINATOR_ENABLED = Setting.boolSetting(
+        "search.admission_control.coordinator.enabled",
+        false,
+        Property.NodeScope
+    );
+
+    /** How long a search may wait in the coordinator admission queue for capacity before it is rejected. */
+    public static final Setting<TimeValue> SEARCH_ADMISSION_CONTROL_COORDINATOR_ACCEPT_TIMEOUT = Setting.timeSetting(
+        "search.admission_control.coordinator.accept_timeout",
+        TimeValue.timeValueSeconds(30),
+        TimeValue.ZERO,
+        Property.NodeScope
+    );
+
+    /** Backoff between coordinator reserve-all retries while a search waits for capacity. */
+    public static final Setting<TimeValue> SEARCH_ADMISSION_CONTROL_COORDINATOR_RETRY_INTERVAL = Setting.timeSetting(
+        "search.admission_control.coordinator.retry_interval",
+        TimeValue.timeValueMillis(50),
+        TimeValue.timeValueMillis(1),
+        Property.NodeScope
+    );
+
+    /** Maximum number of searches that may wait in the coordinator admission queue at once. */
+    public static final Setting<Integer> SEARCH_ADMISSION_CONTROL_COORDINATOR_MAX_QUEUED = Setting.intSetting(
+        "search.admission_control.coordinator.max_queued_searches",
+        100,
+        0,
+        Property.NodeScope
+    );
+
     public static final int DEFAULT_SIZE = 10;
     public static final int DEFAULT_FROM = 0;
     private static final StackTraceElement[] EMPTY_STACK_TRACE_ARRAY = new StackTraceElement[0];

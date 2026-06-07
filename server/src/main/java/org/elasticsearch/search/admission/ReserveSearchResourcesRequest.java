@@ -24,11 +24,13 @@ import java.io.IOException;
 public class ReserveSearchResourcesRequest extends AbstractTransportRequest {
 
     private final String leaseId;
+    private final String coordinatorNodeId;
     private final int slots;
     private final ResourcePriority priority;
 
-    public ReserveSearchResourcesRequest(String leaseId, int slots, ResourcePriority priority) {
+    public ReserveSearchResourcesRequest(String leaseId, String coordinatorNodeId, int slots, ResourcePriority priority) {
         this.leaseId = leaseId;
+        this.coordinatorNodeId = coordinatorNodeId;
         this.slots = slots;
         this.priority = priority;
     }
@@ -36,6 +38,7 @@ public class ReserveSearchResourcesRequest extends AbstractTransportRequest {
     public ReserveSearchResourcesRequest(StreamInput in) throws IOException {
         super(in);
         this.leaseId = in.readString();
+        this.coordinatorNodeId = in.readString();
         this.slots = in.readVInt();
         this.priority = in.readEnum(ResourcePriority.class);
     }
@@ -44,12 +47,18 @@ public class ReserveSearchResourcesRequest extends AbstractTransportRequest {
     public void writeTo(StreamOutput out) throws IOException {
         super.writeTo(out);
         out.writeString(leaseId);
+        out.writeString(coordinatorNodeId);
         out.writeVInt(slots);
         out.writeEnum(priority);
     }
 
     public String leaseId() {
         return leaseId;
+    }
+
+    /** The coordinating node that issued this reservation; its leases are released if it disconnects. */
+    public String coordinatorNodeId() {
+        return coordinatorNodeId;
     }
 
     public int slots() {

@@ -9,6 +9,7 @@
 
 package org.elasticsearch.search.admission;
 
+import org.elasticsearch.TransportVersion;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionListenerResponseHandler;
 import org.elasticsearch.action.ActionResponse;
@@ -44,6 +45,12 @@ public class SearchAdmissionService implements NodeAdmissionClient {
 
     public static final String RESERVE_ACTION_NAME = "internal:admission/search/reserve";
     public static final String RELEASE_ACTION_NAME = "internal:admission/search/release";
+
+    /**
+     * Transport version that introduces the reserve/release actions. Coordinator distributed admission is only used when
+     * every participating node is at least this version, so an older node in a mixed cluster is never sent a reserve.
+     */
+    public static final TransportVersion SEARCH_ADMISSION_TRANSPORT_VERSION = TransportVersion.fromName("search_admission");
 
     private final TransportService transportService;
     private final SearchService searchService;
@@ -142,7 +149,7 @@ public class SearchAdmissionService implements NodeAdmissionClient {
         transportService.sendRequest(
             transportService.getConnection(node),
             RESERVE_ACTION_NAME,
-            new ReserveSearchResourcesRequest(leaseId, slots, priority),
+            new ReserveSearchResourcesRequest(leaseId, transportService.getLocalNode().getId(), slots, priority),
             TransportRequestOptions.EMPTY,
             new ActionListenerResponseHandler<>(
                 listener.delegateFailure((l, empty) -> l.onResponse(null)),
@@ -171,12 +178,11 @@ public class SearchAdmissionService implements NodeAdmissionClient {
     // -- transport handlers ------------------------------------------------------------------------------------------
 
     private void handleReserve(ReserveSearchResourcesRequest request, TransportChannel channel, Task task) {
-        String ownerNodeId = task.getParentTaskId().isSet() ? task.getParentTaskId().getNodeId() : null;
         ChannelActionListener<ActionResponse.Empty> channelListener = new ChannelActionListener<>(channel);
         reserveLocally(
             request.slots(),
             request.priority(),
-            ownerNodeId,
+            request.coordinatorNodeId(),
             request.leaseId(),
             channelListener.map(ignored -> ActionResponse.Empty.INSTANCE)
         );

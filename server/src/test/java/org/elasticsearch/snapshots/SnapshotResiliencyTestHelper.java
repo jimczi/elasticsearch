@@ -96,6 +96,7 @@ import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.common.util.concurrent.DeterministicTaskQueue;
 import org.elasticsearch.common.util.concurrent.PrioritizedEsThreadPoolExecutor;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.env.NodeEnvironment;
 import org.elasticsearch.env.TestEnvironment;
@@ -150,6 +151,7 @@ import org.elasticsearch.rest.action.search.SearchResponseMetrics;
 import org.elasticsearch.script.ScriptCompiler;
 import org.elasticsearch.script.ScriptService;
 import org.elasticsearch.search.SearchService;
+import org.elasticsearch.search.admission.CoordinatorSearchAdmission;
 import org.elasticsearch.search.crossproject.CrossProjectModeDecider;
 import org.elasticsearch.search.fetch.FetchPhase;
 import org.elasticsearch.search.fetch.chunk.ActiveFetchPhaseTasks;
@@ -959,7 +961,9 @@ public class SnapshotResiliencyTestHelper {
                         usageService,
                         new IndicesServiceTests.TestActionActionLoggingFieldsProvider(),
                         ActivityLogWriterProvider.NOOP,
-                        CrossProjectModeDecider.NOOP
+                        CrossProjectModeDecider.NOOP,
+                        // coordinator admission is off by default here, so the client is never invoked
+                        new CoordinatorSearchAdmission(null, threadPool, TimeValue.timeValueSeconds(30), TimeValue.timeValueMillis(50), 100)
                     )
                 );
                 actions.put(

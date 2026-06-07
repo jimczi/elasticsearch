@@ -227,6 +227,7 @@ import org.elasticsearch.script.ScriptService;
 import org.elasticsearch.search.SearchModule;
 import org.elasticsearch.search.SearchService;
 import org.elasticsearch.search.SearchUtils;
+import org.elasticsearch.search.admission.CoordinatorSearchAdmission;
 import org.elasticsearch.search.admission.SearchAdmissionMetrics;
 import org.elasticsearch.search.admission.SearchAdmissionService;
 import org.elasticsearch.search.aggregations.support.AggregationUsageService;
@@ -1323,6 +1324,14 @@ class NodeConstruction {
         searchTransportService.setSearchService(searchService);
         final SearchAdmissionService searchAdmissionService = new SearchAdmissionService(transportService, searchService);
         new SearchAdmissionMetrics(telemetryProvider.getMeterRegistry(), searchService::searchAdmissionStats);
+        final Settings nodeSettings = settingsModule.getSettings();
+        final CoordinatorSearchAdmission coordinatorSearchAdmission = new CoordinatorSearchAdmission(
+            searchAdmissionService,
+            threadPool,
+            SearchService.SEARCH_ADMISSION_CONTROL_COORDINATOR_ACCEPT_TIMEOUT.get(nodeSettings),
+            SearchService.SEARCH_ADMISSION_CONTROL_COORDINATOR_RETRY_INTERVAL.get(nodeSettings),
+            SearchService.SEARCH_ADMISSION_CONTROL_COORDINATOR_MAX_QUEUED.get(nodeSettings)
+        );
 
         final SearchTaskWatchdog searchTaskWatchdog = new SearchTaskWatchdog(
             settingsModule.getClusterSettings(),
@@ -1421,6 +1430,7 @@ class NodeConstruction {
             b.bind(MetadataIndexTemplateService.class).toInstance(metadataIndexTemplateService);
             b.bind(SearchService.class).toInstance(searchService);
             b.bind(SearchAdmissionService.class).toInstance(searchAdmissionService);
+            b.bind(CoordinatorSearchAdmission.class).toInstance(coordinatorSearchAdmission);
             b.bind(SearchTaskWatchdog.class).toInstance(searchTaskWatchdog);
             b.bind(SearchResponseMetrics.class).toInstance(searchResponseMetrics);
             b.bind(SearchTransportService.class).toInstance(searchTransportService);

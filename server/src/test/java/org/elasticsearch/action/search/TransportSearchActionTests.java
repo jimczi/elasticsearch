@@ -76,6 +76,7 @@ import org.elasticsearch.search.DummyQueryBuilder;
 import org.elasticsearch.search.SearchHits;
 import org.elasticsearch.search.SearchService;
 import org.elasticsearch.search.SearchShardTarget;
+import org.elasticsearch.search.admission.CoordinatorSearchAdmission;
 import org.elasticsearch.search.aggregations.InternalAggregations;
 import org.elasticsearch.search.builder.PointInTimeBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
@@ -2098,7 +2099,9 @@ public class TransportSearchActionTests extends ESTestCase {
                 new UsageService(),
                 new TestActionActionLoggingFieldsProvider(),
                 ActivityLogWriterProvider.NOOP,
-                CrossProjectModeDecider.NOOP
+                CrossProjectModeDecider.NOOP,
+                // coordinator admission is off by default in these tests, so the client is never invoked
+                new CoordinatorSearchAdmission(null, threadPool, TimeValue.timeValueSeconds(30), TimeValue.timeValueMillis(50), 100)
             );
 
             CountDownLatch latch = new CountDownLatch(1);
