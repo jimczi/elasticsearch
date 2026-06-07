@@ -7,6 +7,7 @@
 
 package org.elasticsearch.xpack.esql.plugin;
 
+import org.elasticsearch.compute.data.BlockFactory;
 import org.elasticsearch.compute.lucene.IndexedByShardId;
 import org.elasticsearch.compute.operator.exchange.ExchangeSink;
 import org.elasticsearch.compute.operator.exchange.ExchangeSource;
@@ -16,6 +17,12 @@ import org.elasticsearch.xpack.esql.session.Configuration;
 
 import java.util.function.Supplier;
 
+/**
+ * @param blockFactory the per-query {@link BlockFactory} this compute must allocate through, or {@code null} to use the
+ *                     node's shared block factory. A non-null factory is built over the admission's per-query memory
+ *                     breaker so the query's allocations are bounded by its reserved budget (see
+ *                     {@code SearchService.SearchAdmission}).
+ */
 record ComputeContext(
     String sessionId,
     String description,
@@ -25,8 +32,35 @@ record ComputeContext(
     Configuration configuration,
     FoldContext foldCtx,
     Supplier<ExchangeSource> exchangeSourceSupplier,
-    Supplier<ExchangeSink> exchangeSinkSupplier
+    Supplier<ExchangeSink> exchangeSinkSupplier,
+    BlockFactory blockFactory
 ) {
+    /** Builds a context that uses the node's shared block factory (no per-query memory budget). */
+    ComputeContext(
+        String sessionId,
+        String description,
+        String clusterAlias,
+        EsqlFlags flags,
+        IndexedByShardId<ComputeSearchContext> searchContexts,
+        Configuration configuration,
+        FoldContext foldCtx,
+        Supplier<ExchangeSource> exchangeSourceSupplier,
+        Supplier<ExchangeSink> exchangeSinkSupplier
+    ) {
+        this(
+            sessionId,
+            description,
+            clusterAlias,
+            flags,
+            searchContexts,
+            configuration,
+            foldCtx,
+            exchangeSourceSupplier,
+            exchangeSinkSupplier,
+            null
+        );
+    }
+
     IndexedByShardId<? extends SearchExecutionContext> searchExecutionContexts() {
         return searchContexts.map(s -> s.searchContext().getSearchExecutionContext());
     }

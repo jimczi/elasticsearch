@@ -19,6 +19,8 @@ import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.project.ProjectResolver;
 import org.elasticsearch.cluster.routing.SplitShardCountSummary;
 import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.resource.ResourcePriority;
+import org.elasticsearch.compute.data.BlockFactory;
 import org.elasticsearch.compute.lucene.EmptyIndexedByShardId;
 import org.elasticsearch.compute.lucene.IndexedByShardId;
 import org.elasticsearch.compute.operator.DriverCompletionInfo;
@@ -563,39 +565,54 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
                     }
                 }
             };
-            acquireSearchContexts(
-                clusterAlias,
-                shards,
-                configuration,
-                request.aliasFilters(),
-                ActionListener.wrap(acquiredSearchContexts -> {
-                    assert ThreadPool.assertCurrentThreadPool(ThreadPool.Names.SEARCH);
-                    if (acquiredSearchContexts.isEmpty()) {
-                        batchListener.onResponse(DriverCompletionInfo.EMPTY);
-                        return;
-                    }
-                    var computeContext = new ComputeContext(
-                        sessionId,
-                        ComputeService.DATA_DESCRIPTION,
-                        clusterAlias,
-                        flags,
-                        acquiredSearchContexts,
-                        configuration,
-                        configuration.newFoldContext(),
-                        null,
-                        () -> exchangeSink.createExchangeSink(pagesProduced::incrementAndGet)
-                    );
-                    computeService.runCompute(
-                        parentTask,
-                        computeContext,
-                        request.plan(),
-                        computeService.plannerSettings().get(),
-                        LocalPhysicalOptimization.ENABLED,
-                        planTimeProfile,
-                        batchListener
-                    );
-                }, batchListener::onFailure)
-            );
+            // Reserve a node-local admission slot per shard in this batch so ES|QL data-node execution shares the same
+            // budget as classic _search shard execution. The slot is released when the batch settles, before the next
+            // batch is scheduled. When admission control is disabled this is an inline no-op and behaviour is unchanged.
+            searchService.admitSearchWork(shards.size(), ResourcePriority.NORMAL, searchExecutor, ActionListener.wrap(admission -> {
+                final ActionListener<DriverCompletionInfo> admitted = ActionListener.runBefore(
+                    batchListener,
+                    admission.releasable()::close
+                );
+                // When the memory dimension is active, bound this batch's drivers by their reserved memory budget via a
+                // per-query block factory; otherwise use the node's shared block factory (null).
+                final BlockFactory blockFactory = admission.memoryBreaker() == null
+                    ? null
+                    : computeService.queryBlockFactory(admission.memoryBreaker());
+                acquireSearchContexts(
+                    clusterAlias,
+                    shards,
+                    configuration,
+                    request.aliasFilters(),
+                    ActionListener.wrap(acquiredSearchContexts -> {
+                        assert ThreadPool.assertCurrentThreadPool(ThreadPool.Names.SEARCH);
+                        if (acquiredSearchContexts.isEmpty()) {
+                            admitted.onResponse(DriverCompletionInfo.EMPTY);
+                            return;
+                        }
+                        var computeContext = new ComputeContext(
+                            sessionId,
+                            ComputeService.DATA_DESCRIPTION,
+                            clusterAlias,
+                            flags,
+                            acquiredSearchContexts,
+                            configuration,
+                            configuration.newFoldContext(),
+                            null,
+                            () -> exchangeSink.createExchangeSink(pagesProduced::incrementAndGet),
+                            blockFactory
+                        );
+                        computeService.runCompute(
+                            parentTask,
+                            computeContext,
+                            request.plan(),
+                            computeService.plannerSettings().get(),
+                            LocalPhysicalOptimization.ENABLED,
+                            planTimeProfile,
+                            admitted
+                        );
+                    }, admitted::onFailure)
+                );
+            }, batchListener::onFailure));
         }
 
         private void acquireSearchContexts(

@@ -43,6 +43,14 @@ import org.elasticsearch.common.component.Lifecycle;
 import org.elasticsearch.common.logging.LoggerMessageFormat;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.common.lucene.search.Queries;
+import org.elasticsearch.common.resource.QueryMemoryBreaker;
+import org.elasticsearch.common.resource.QueryMemoryBreakerService;
+import org.elasticsearch.common.resource.Reservation;
+import org.elasticsearch.common.resource.ResourceLaneBudget;
+import org.elasticsearch.common.resource.ResourcePool;
+import org.elasticsearch.common.resource.ResourcePoolStats;
+import org.elasticsearch.common.resource.ResourcePriority;
+import org.elasticsearch.common.resource.ResourceRejectedException;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
 import org.elasticsearch.common.settings.Settings;
@@ -152,6 +160,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -361,6 +370,87 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         Property.NodeScope
     );
 
+    /**
+     * Node-local admission control for shard-level search execution. The coordinating layer accepts every search and
+     * fans it out, so without a node-local bound a node can be handed far more concurrent shard work than it can run;
+     * the only existing limit is the (very deep) SEARCH thread-pool queue, which fails late rather than gracefully.
+     *
+     * <p>When this factor is greater than {@code 0}, the node admits at most {@code factor * <SEARCH pool threads>}
+     * concurrent shard search tasks; further tasks wait briefly (see {@link #SEARCH_ADMISSION_CONTROL_MAX_QUEUE_LENGTH}
+     * and {@link #SEARCH_ADMISSION_CONTROL_ACQUIRE_TIMEOUT}) and are then rejected. {@code 0} (the default) disables
+     * admission control entirely, leaving behaviour identical to before. Node-scoped: changing it requires a restart.
+     */
+    public static final Setting<Integer> SEARCH_ADMISSION_CONTROL_SLOTS_PER_THREAD = Setting.intSetting(
+        "search.admission_control.shard_slots_per_thread",
+        0, // disabled by default
+        0,
+        Property.NodeScope
+    );
+
+    /** Maximum number of shard search tasks that may wait for an admission slot before new ones are rejected. */
+    public static final Setting<Integer> SEARCH_ADMISSION_CONTROL_MAX_QUEUE_LENGTH = Setting.intSetting(
+        "search.admission_control.max_queue_length",
+        100,
+        0,
+        Property.NodeScope
+    );
+
+    /** How long a shard search task waits for an admission slot before it is rejected. */
+    public static final Setting<TimeValue> SEARCH_ADMISSION_CONTROL_ACQUIRE_TIMEOUT = Setting.timeSetting(
+        "search.admission_control.acquire_timeout",
+        TimeValue.timeValueSeconds(30),
+        TimeValue.ZERO,
+        Property.NodeScope
+    );
+
+    /**
+     * Total memory-entitlement budget for shard-search admission. A reservation reserves both a slot and a slice of this
+     * budget (see {@link #SEARCH_ADMISSION_CONTROL_QUERY_MEMORY}); the budget is an admission-time entitlement, while the
+     * request circuit breaker remains the fine-grained enforcer of actual bytes. {@code 0} (the default) leaves the
+     * memory dimension effectively unbounded so only the slot dimension binds.
+     */
+    public static final Setting<ByteSizeValue> SEARCH_ADMISSION_CONTROL_MEMORY_LIMIT = Setting.memorySizeSetting(
+        "search.admission_control.memory_limit",
+        ByteSizeValue.ZERO,
+        Property.NodeScope
+    );
+
+    /**
+     * Memory entitlement reserved per shard of admitted work, drawn from {@link #SEARCH_ADMISSION_CONTROL_MEMORY_LIMIT}.
+     * {@code 0} (the default) means the memory dimension is not consumed, leaving behaviour driven by the slot dimension
+     * alone.
+     */
+    public static final Setting<ByteSizeValue> SEARCH_ADMISSION_CONTROL_QUERY_MEMORY = Setting.memorySizeSetting(
+        "search.admission_control.query_memory",
+        ByteSizeValue.ZERO,
+        Property.NodeScope
+    );
+
+    /**
+     * Guaranteed slot floor for the boosted ({@link ResourcePriority#HIGH}) lane, as a fraction of total slot capacity.
+     * Capacity used by other lanes above their own floors can be reclaimed to restore this floor. {@code 0} (the default)
+     * means no reservation, so the lane simply competes for shared capacity.
+     */
+    public static final Setting<Double> SEARCH_ADMISSION_CONTROL_BOOSTED_SLOT_FLOOR = Setting.doubleSetting(
+        "search.admission_control.boosted.slot_floor_fraction",
+        0.0,
+        0.0,
+        1.0,
+        Property.NodeScope
+    );
+
+    /**
+     * Guaranteed slot floor for the unboosted ({@link ResourcePriority#LOW}) lane, as a fraction of total slot capacity.
+     * This is the unboosted minimum-progress floor: it is never reclaimed, so unboosted work cannot be fully starved.
+     */
+    public static final Setting<Double> SEARCH_ADMISSION_CONTROL_UNBOOSTED_SLOT_FLOOR = Setting.doubleSetting(
+        "search.admission_control.unboosted.slot_floor_fraction",
+        0.0,
+        0.0,
+        1.0,
+        Property.NodeScope
+    );
+
     public static final int DEFAULT_SIZE = 10;
     public static final int DEFAULT_FROM = 0;
     private static final StackTraceElement[] EMPTY_STACK_TRACE_ARRAY = new StackTraceElement[0];
@@ -381,6 +471,10 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     private final CircuitBreaker circuitBreaker;
     private final OnlinePrewarmingService onlinePrewarmingService;
     private final int prewarmingMaxPoolFactorThreshold;
+    // Node-local shard-search admission control; null when disabled (search.admission_control.shard_slots_per_thread == 0).
+    private final ResourcePool searchAdmissionPool;
+    private final TimeValue searchAdmissionTimeout;
+    private final long searchAdmissionQueryMemoryBytes;
     private volatile Executor searchExecutor;
     private volatile boolean enableQueryPhaseParallelCollection;
     private volatile boolean enableFetchPhaseChunked;
@@ -504,6 +598,30 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(MEMORY_ACCOUNTING_BUFFER_SIZE, newValue -> this.memoryAccountingBufferSize = newValue.getBytes());
         prewarmingMaxPoolFactorThreshold = PREWARMING_THRESHOLD_THREADPOOL_SIZE_FACTOR_POOL_SIZE.get(settings);
+
+        int admissionSlotsPerThread = SEARCH_ADMISSION_CONTROL_SLOTS_PER_THREAD.get(settings);
+        if (admissionSlotsPerThread > 0) {
+            int searchThreads = threadPool.info(Names.SEARCH).getMax();
+            long slotCapacity = (long) admissionSlotsPerThread * searchThreads;
+            long memoryLimit = SEARCH_ADMISSION_CONTROL_MEMORY_LIMIT.get(settings).getBytes();
+            // 0 means "unbounded memory dimension" — only the slot dimension binds.
+            long memoryCapacity = memoryLimit <= 0 ? Long.MAX_VALUE : memoryLimit;
+            this.searchAdmissionPool = new ResourcePool(
+                "search_shard",
+                slotCapacity,
+                memoryCapacity,
+                SEARCH_ADMISSION_CONTROL_MAX_QUEUE_LENGTH.get(settings),
+                laneFloors(settings, slotCapacity),
+                threadPool,
+                threadPool.generic()
+            );
+            this.searchAdmissionTimeout = SEARCH_ADMISSION_CONTROL_ACQUIRE_TIMEOUT.get(settings);
+            this.searchAdmissionQueryMemoryBytes = SEARCH_ADMISSION_CONTROL_QUERY_MEMORY.get(settings).getBytes();
+        } else {
+            this.searchAdmissionPool = null;
+            this.searchAdmissionTimeout = null;
+            this.searchAdmissionQueryMemoryBytes = 0;
+        }
 
         if (PIT_RELOCATION_FEATURE_FLAG.isEnabled()) {
             pitRelocationEnabled = PIT_RELOCATION_ENABLED.get(settings);
@@ -1010,12 +1128,33 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         return indicesService.indexServiceSafe(request.shardId().getIndex()).getShard(request.shardId().id());
     }
 
-    private static <T extends RefCounted> void runAsync(
-        Executor executor,
-        CheckedSupplier<T, Exception> executable,
-        ActionListener<T> listener
-    ) {
-        executor.execute(ActionRunnable.supplyAndDecRef(listener, executable));
+    private <T extends RefCounted> void runAsync(Executor executor, CheckedSupplier<T, Exception> executable, ActionListener<T> listener) {
+        final ResourcePool admissionPool = searchAdmissionPool;
+        if (admissionPool == null) {
+            executor.execute(ActionRunnable.supplyAndDecRef(listener, executable));
+            return;
+        }
+        // Admission control enabled: reserve a slot before the shard task runs and release it when the task settles.
+        // The reservation may be granted inline, after a short wait in the bounded queue, or rejected (queue full or
+        // timed out) — in which case the listener is failed with a ResourceRejectedException, surfaced to the
+        // coordinator as a shard failure.
+        admissionPool.acquireAsync(
+            1,
+            searchAdmissionQueryMemoryBytes,
+            ResourcePriority.NORMAL,
+            searchAdmissionTimeout,
+            listener.delegateFailureAndWrap((delegate, reservation) -> {
+                // Release the slot exactly once when the shard task completes, fails, or is rejected by the executor.
+                final ActionListener<T> releasingListener = ActionListener.runAfter(delegate, reservation::close);
+                try {
+                    executor.execute(ActionRunnable.supplyAndDecRef(releasingListener, executable));
+                } catch (Exception e) {
+                    // Defensive: most executors route rejection through AbstractRunnable#onRejection, but if execute throws
+                    // synchronously the runAfter would not fire, so fail the listener (which releases the slot) here.
+                    releasingListener.onFailure(e);
+                }
+            })
+        );
     }
 
     /**
@@ -2105,10 +2244,22 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         }
         context.terminateAfter(source.terminateAfter());
         if (source.aggregations() != null && includeAggregations) {
+            // When admission control reserves a per-query memory budget, make aggregations allocate through a per-query
+            // breaker so a search that exceeds its budget fails alone rather than tripping the shared node breaker.
+            BigArrays aggBigArrays = bigArrays;
+            if (searchAdmissionPool != null && searchAdmissionQueryMemoryBytes > 0) {
+                QueryMemoryBreaker queryBreaker = QueryMemoryBreaker.create(
+                    circuitBreaker,
+                    "search_query[" + context.id() + "]",
+                    searchAdmissionQueryMemoryBytes
+                );
+                context.addReleasable(queryBreaker); // reconciles any residual to the node breaker at context close
+                aggBigArrays = bigArrays.withBreakerService(new QueryMemoryBreakerService(bigArrays.breakerService(), queryBreaker));
+            }
             AggregationContext aggContext = new ProductionAggregationContext(
                 indicesService.getAnalysis(),
                 context.getSearchExecutionContext(),
-                bigArrays,
+                aggBigArrays,
                 clusterService.getClusterSettings(),
                 source.aggregations().bytesToPreallocate(),
                 /*
@@ -2315,6 +2466,104 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
      */
     public int getActiveContexts() {
         return this.activeReaders.size();
+    }
+
+    /**
+     * Returns a snapshot of the node-local shard-search admission control counters, or {@code null} if admission control
+     * is disabled ({@code search.admission_control.shard_slots_per_thread} is {@code 0}).
+     */
+    public ResourcePoolStats searchAdmissionStats() {
+        return searchAdmissionPool == null ? null : searchAdmissionPool.stats();
+    }
+
+    // visible for testing
+    ResourcePool searchAdmissionPool() {
+        return searchAdmissionPool;
+    }
+
+    // Builds the per-lane slot floors from settings. Memory floors are left at zero for now; lanes only reserve slots.
+    private static Map<ResourcePriority, ResourceLaneBudget> laneFloors(Settings settings, long slotCapacity) {
+        Map<ResourcePriority, ResourceLaneBudget> floors = new EnumMap<>(ResourcePriority.class);
+        long boosted = (long) (SEARCH_ADMISSION_CONTROL_BOOSTED_SLOT_FLOOR.get(settings) * slotCapacity);
+        long unboosted = (long) (SEARCH_ADMISSION_CONTROL_UNBOOSTED_SLOT_FLOOR.get(settings) * slotCapacity);
+        if (boosted > 0) {
+            floors.put(ResourcePriority.HIGH, new ResourceLaneBudget(boosted, 0));
+        }
+        if (unboosted > 0) {
+            floors.put(ResourcePriority.LOW, new ResourceLaneBudget(unboosted, 0));
+        }
+        return floors;
+    }
+
+    /**
+     * The result of admitting a unit of search work: the per-query memory breaker the work must allocate through, and a
+     * {@link Releasable} that returns the reserved slots and memory when the work finishes.
+     *
+     * @param memoryBreaker a per-query {@link QueryMemoryBreaker} sized to the reserved memory budget when the memory
+     *                      dimension is active, otherwise {@code null} (the caller should use its shared/default breaker).
+     *                      Allocating through it makes a query that exceeds its budget fail alone rather than tripping the
+     *                      node breaker and affecting other queries.
+     * @param releasable    closed by the caller when the work finishes (success/failure/cancellation); returns the slots
+     *                      and reconciles the per-query breaker.
+     */
+    public record SearchAdmission(CircuitBreaker memoryBreaker, Releasable releasable) {}
+
+    /**
+     * Reserves {@code slots} units of the node-local shard-search admission budget for a unit of search work, so that
+     * other search APIs (notably ES|QL data-node execution) share the same budget as classic {@code _search} shard
+     * execution rather than maintaining a parallel limiter.
+     *
+     * <p>The {@code listener} is completed with a {@link SearchAdmission}. When admission control is disabled, or
+     * {@code slots} is not positive (e.g. an empty batch), it is completed inline with a no-op admission (null breaker)
+     * and behaviour is unchanged. When the budget is exhausted the listener is failed with a
+     * {@link ResourceRejectedException}. A granted admission is delivered on {@code resumeExecutor} so the caller keeps
+     * running on the search thread pool; the no-op (disabled) grant is delivered inline to avoid an extra hop on the
+     * default path.
+     */
+    public void admitSearchWork(int slots, ResourcePriority priority, Executor resumeExecutor, ActionListener<SearchAdmission> listener) {
+        final ResourcePool pool = searchAdmissionPool;
+        if (pool == null || slots <= 0) {
+            listener.onResponse(new SearchAdmission(null, () -> {}));
+            return;
+        }
+        // Each shard of work reserves a slot plus its share of the memory entitlement budget.
+        final long memoryBytes = (long) slots * searchAdmissionQueryMemoryBytes;
+        pool.acquireAsync(slots, memoryBytes, priority, searchAdmissionTimeout, new ActionListener<>() {
+            @Override
+            public void onResponse(Reservation reservation) {
+                resumeExecutor.execute(new AbstractRunnable() {
+                    @Override
+                    protected void doRun() {
+                        // A non-positive budget means the memory dimension is off; hand back a null breaker so the
+                        // caller keeps using its shared breaker, and only the slot reservation needs releasing.
+                        long budget = reservation.memoryBytes();
+                        if (budget > 0) {
+                            QueryMemoryBreaker queryBreaker = QueryMemoryBreaker.create(circuitBreaker, pool.name() + "[query]", budget);
+                            listener.onResponse(new SearchAdmission(queryBreaker, Releasables.wrap(queryBreaker, reservation)));
+                        } else {
+                            listener.onResponse(new SearchAdmission(null, reservation));
+                        }
+                    }
+
+                    @Override
+                    public void onRejection(Exception e) {
+                        reservation.close();
+                        listener.onFailure(e);
+                    }
+
+                    @Override
+                    public void onFailure(Exception e) {
+                        reservation.close();
+                        listener.onFailure(e);
+                    }
+                });
+            }
+
+            @Override
+            public void onFailure(Exception e) {
+                listener.onFailure(e);
+            }
+        });
     }
 
     public long getActivePITContexts() {

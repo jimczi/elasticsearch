@@ -227,6 +227,8 @@ import org.elasticsearch.script.ScriptService;
 import org.elasticsearch.search.SearchModule;
 import org.elasticsearch.search.SearchService;
 import org.elasticsearch.search.SearchUtils;
+import org.elasticsearch.search.admission.SearchAdmissionMetrics;
+import org.elasticsearch.search.admission.SearchAdmissionService;
 import org.elasticsearch.search.aggregations.support.AggregationUsageService;
 import org.elasticsearch.search.crossproject.CrossProjectModeDecider;
 import org.elasticsearch.search.crossproject.ProjectRoutingResolver;
@@ -1319,6 +1321,8 @@ class NodeConstruction {
             onlinePrewarmingService
         );
         searchTransportService.setSearchService(searchService);
+        final SearchAdmissionService searchAdmissionService = new SearchAdmissionService(transportService, searchService);
+        new SearchAdmissionMetrics(telemetryProvider.getMeterRegistry(), searchService::searchAdmissionStats);
 
         final SearchTaskWatchdog searchTaskWatchdog = new SearchTaskWatchdog(
             settingsModule.getClusterSettings(),
@@ -1416,6 +1420,7 @@ class NodeConstruction {
             b.bind(MetadataUpdateSettingsService.class).toInstance(metadataUpdateSettingsService);
             b.bind(MetadataIndexTemplateService.class).toInstance(metadataIndexTemplateService);
             b.bind(SearchService.class).toInstance(searchService);
+            b.bind(SearchAdmissionService.class).toInstance(searchAdmissionService);
             b.bind(SearchTaskWatchdog.class).toInstance(searchTaskWatchdog);
             b.bind(SearchResponseMetrics.class).toInstance(searchResponseMetrics);
             b.bind(SearchTransportService.class).toInstance(searchTransportService);

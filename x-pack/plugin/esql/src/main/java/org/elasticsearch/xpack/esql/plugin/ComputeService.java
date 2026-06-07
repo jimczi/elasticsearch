@@ -15,6 +15,7 @@ import org.elasticsearch.action.search.ShardSearchFailure;
 import org.elasticsearch.cluster.RemoteException;
 import org.elasticsearch.cluster.project.ProjectResolver;
 import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.common.util.Maps;
 import org.elasticsearch.common.util.concurrent.RunOnce;
@@ -1125,6 +1126,14 @@ public class ComputeService {
         ExceptionsHelper.reThrowIfNotNull(failureCollector.getFailure());
     }
 
+    /**
+     * Builds a per-query {@link BlockFactory} over {@code breaker} (a per-query memory breaker) so the query's
+     * allocations on this node are bounded by its reserved memory budget. Shares the node {@link BigArrays}.
+     */
+    BlockFactory queryBlockFactory(CircuitBreaker breaker) {
+        return new BlockFactory(breaker, bigArrays);
+    }
+
     void runCompute(
         CancellableTask task,
         ComputeContext context,
@@ -1161,13 +1170,16 @@ public class ComputeService {
             directoryBytesRead
         );
 
+        // Use the per-query block factory (bounded by the query's reserved memory budget) when admission provided one;
+        // otherwise fall back to the node's shared block factory.
+        BlockFactory queryBlockFactory = context.blockFactory() != null ? context.blockFactory() : blockFactory;
         try {
             LocalExecutionPlanner planner = new LocalExecutionPlanner(
                 context.sessionId(),
                 context.clusterAlias(),
                 task,
                 bigArrays,
-                blockFactory,
+                queryBlockFactory,
                 clusterService.getSettings(),
                 context.configuration(),
                 context.exchangeSourceSupplier(),
