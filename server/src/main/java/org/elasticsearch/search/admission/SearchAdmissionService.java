@@ -15,6 +15,7 @@ import org.elasticsearch.action.ActionListenerResponseHandler;
 import org.elasticsearch.action.ActionResponse;
 import org.elasticsearch.action.support.ChannelActionListener;
 import org.elasticsearch.cluster.node.DiscoveryNode;
+import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.resource.ResourcePriority;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.search.SearchService;
@@ -82,8 +83,10 @@ public class SearchAdmissionService implements NodeAdmissionClient {
                 releaseForNode(node.getId());
             }
         });
-        // Let shard execution skip its node-local acquire when the coordinator already holds a lease for the query.
+        // Let shard execution skip its node-local acquire when the coordinator already holds a lease for the query, and
+        // run under the lease's per-query memory budget.
         searchService.setAdmissionLeaseCoverage(this::isCovered);
+        searchService.setAdmissionLeaseBreaker(this::breakerFor);
     }
 
     /**
@@ -92,6 +95,19 @@ public class SearchAdmissionService implements NodeAdmissionClient {
      */
     public boolean isCovered(TaskId parentTaskId) {
         return parentTaskId.isSet() && leases.containsKey(parentTaskId.toString());
+    }
+
+    /**
+     * The per-query memory breaker of the lease covering {@code parentTaskId}, or {@code null} if there is no lease or
+     * the lease reserved no memory budget. Shard work on this node runs under this breaker so the whole query is bounded
+     * by the budget the coordinator reserved here.
+     */
+    public CircuitBreaker breakerFor(TaskId parentTaskId) {
+        if (parentTaskId.isSet() == false) {
+            return null;
+        }
+        Lease lease = leases.get(parentTaskId.toString());
+        return lease == null ? null : lease.admission().memoryBreaker();
     }
 
     // -- node-local lease lifecycle ----------------------------------------------------------------------------------

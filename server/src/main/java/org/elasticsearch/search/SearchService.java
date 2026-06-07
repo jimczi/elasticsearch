@@ -527,6 +527,9 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     // Tells whether a shard's parent (coordinator) task already holds a distributed admission lease covering this node,
     // in which case the shard skips the node-local acquire. Defaults to "never covered"; wired by SearchAdmissionService.
     private volatile Predicate<TaskId> admissionLeaseCoverage = parentTaskId -> false;
+    // Returns the per-query memory breaker of the distributed admission lease covering a shard's parent task, or null.
+    // When present, the shard runs its work under the budget the coordinator reserved on this node for the whole query.
+    private volatile Function<TaskId, CircuitBreaker> admissionLeaseBreaker = parentTaskId -> null;
     private volatile Executor searchExecutor;
     private volatile boolean enableQueryPhaseParallelCollection;
     private volatile boolean enableFetchPhaseChunked;
@@ -1979,7 +1982,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
             if (request.scroll() != null) {
                 context.scrollContext().scroll = request.scroll();
             }
-            parseSource(context, request.source(), includeAggregations);
+            parseSource(context, request.source(), includeAggregations, task.getParentTaskId());
 
             // if the from and size are still not set, default them
             if (context.from() == -1) {
@@ -2244,7 +2247,8 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         }
     }
 
-    private void parseSource(DefaultSearchContext context, SearchSourceBuilder source, boolean includeAggregations) throws IOException {
+    private void parseSource(DefaultSearchContext context, SearchSourceBuilder source, boolean includeAggregations, TaskId parentTaskId)
+        throws IOException {
         // nothing to parse...
         if (source == null) {
             return;
@@ -2311,7 +2315,14 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
             // When admission control reserves a per-query memory budget, make aggregations allocate through a per-query
             // breaker so a search that exceeds its budget fails alone rather than tripping the shared node breaker.
             BigArrays aggBigArrays = bigArrays;
-            if (searchAdmissionPool != null && searchAdmissionQueryMemoryBytes > 0) {
+            final CircuitBreaker leaseBreaker = admissionLeaseBreaker.apply(parentTaskId);
+            if (leaseBreaker != null) {
+                // Execution-under-lease: run under the per-query budget the coordinator reserved on this node for the
+                // whole query (shared across the query's shards). The lease owns the breaker; it is released with the
+                // lease, so it is not registered for close on this shard context.
+                aggBigArrays = bigArrays.withBreakerService(new QueryMemoryBreakerService(bigArrays.breakerService(), leaseBreaker));
+            } else if (searchAdmissionPool != null && searchAdmissionQueryMemoryBytes > 0) {
+                // No coordinator lease (node-local admission only): bound by the configured per-query entitlement.
                 QueryMemoryBreaker queryBreaker = QueryMemoryBreaker.create(
                     circuitBreaker,
                     "search_query[" + context.id() + "]",
@@ -2563,6 +2574,15 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
      */
     public void setAdmissionLeaseCoverage(Predicate<TaskId> admissionLeaseCoverage) {
         this.admissionLeaseCoverage = admissionLeaseCoverage;
+    }
+
+    /**
+     * Installs the lookup from a shard's parent (coordinator) task to the per-query memory breaker of the distributed
+     * admission lease covering it, so shard work runs under the budget the coordinator reserved on this node. Wired by
+     * {@code SearchAdmissionService}.
+     */
+    public void setAdmissionLeaseBreaker(Function<TaskId, CircuitBreaker> admissionLeaseBreaker) {
+        this.admissionLeaseBreaker = admissionLeaseBreaker;
     }
 
     // Builds the per-lane slot floors from settings. Memory floors are left at zero for now; lanes only reserve slots.
