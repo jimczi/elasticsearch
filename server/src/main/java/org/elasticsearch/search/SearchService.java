@@ -1972,7 +1972,16 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         boolean includeAggregations
     ) throws IOException {
         checkCancelled(task);
-        final DefaultSearchContext context = createSearchContext(readerContext, request, defaultSearchTimeout, resultsType);
+        // Run the whole shard under the coordinator-reserved per-query budget when a distributed admission lease covers
+        // it; otherwise the node request breaker (the per-query agg entitlement, if any, is applied in parseSource).
+        final CircuitBreaker leaseBreaker = admissionLeaseBreaker.apply(task.getParentTaskId());
+        final DefaultSearchContext context = createSearchContext(
+            readerContext,
+            request,
+            defaultSearchTimeout,
+            resultsType,
+            leaseBreaker != null ? leaseBreaker : circuitBreaker
+        );
         resultsType.addResultsObject(context);
 
         // Release the memory used for query construction once the search context is closed.
@@ -1982,7 +1991,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
             if (request.scroll() != null) {
                 context.scrollContext().scroll = request.scroll();
             }
-            parseSource(context, request.source(), includeAggregations, task.getParentTaskId());
+            parseSource(context, request.source(), includeAggregations);
 
             // if the from and size are still not set, default them
             if (context.from() == -1) {
@@ -2009,7 +2018,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         final ShardSearchContextId id = new ShardSearchContextId(sessionId, idGenerator.incrementAndGet(), reader.getSearcherId());
         try (ReaderContext readerContext = new ReaderContext(id, indexService, indexShard, reader, -1L, true, 0L)) {
             // Use ResultsType.QUERY so that the created search context can execute queries correctly.
-            DefaultSearchContext searchContext = createSearchContext(readerContext, request, timeout, ResultsType.QUERY);
+            DefaultSearchContext searchContext = createSearchContext(readerContext, request, timeout, ResultsType.QUERY, circuitBreaker);
             searchContext.addReleasable(readerContext.markAsUsed(0L));
             searchContext.addReleasable(searchContext.getSearchExecutionContext()::releaseQueryConstructionMemory);
             return searchContext;
@@ -2021,7 +2030,8 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         ReaderContext reader,
         ShardSearchRequest request,
         TimeValue timeout,
-        ResultsType resultsType
+        ResultsType resultsType,
+        CircuitBreaker queryBreaker
     ) throws IOException {
         boolean success = false;
         DefaultSearchContext searchContext = null;
@@ -2044,7 +2054,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                 enableQueryPhaseParallelCollection,
                 minimumDocsPerSlice,
                 memoryAccountingBufferSize,
-                circuitBreaker
+                queryBreaker
             );
             // we clone the query shard context here just for rewriting otherwise we
             // might end up with incorrect state since we are using now() or script services
@@ -2247,8 +2257,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         }
     }
 
-    private void parseSource(DefaultSearchContext context, SearchSourceBuilder source, boolean includeAggregations, TaskId parentTaskId)
-        throws IOException {
+    private void parseSource(DefaultSearchContext context, SearchSourceBuilder source, boolean includeAggregations) throws IOException {
         // nothing to parse...
         if (source == null) {
             return;
@@ -2315,14 +2324,16 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
             // When admission control reserves a per-query memory budget, make aggregations allocate through a per-query
             // breaker so a search that exceeds its budget fails alone rather than tripping the shared node breaker.
             BigArrays aggBigArrays = bigArrays;
-            final CircuitBreaker leaseBreaker = admissionLeaseBreaker.apply(parentTaskId);
-            if (leaseBreaker != null) {
-                // Execution-under-lease: run under the per-query budget the coordinator reserved on this node for the
-                // whole query (shared across the query's shards). The lease owns the breaker; it is released with the
-                // lease, so it is not registered for close on this shard context.
-                aggBigArrays = bigArrays.withBreakerService(new QueryMemoryBreakerService(bigArrays.breakerService(), leaseBreaker));
+            if (context.circuitBreaker() != circuitBreaker) {
+                // A distributed-admission lease covers this shard: the whole shard runs under the lease's per-query
+                // breaker (set as the context breaker), so route aggregation allocations there too. The lease owns the
+                // breaker, so it is not registered for close on this shard context.
+                aggBigArrays = bigArrays.withBreakerService(
+                    new QueryMemoryBreakerService(bigArrays.breakerService(), context.circuitBreaker())
+                );
             } else if (searchAdmissionPool != null && searchAdmissionQueryMemoryBytes > 0) {
-                // No coordinator lease (node-local admission only): bound by the configured per-query entitlement.
+                // No coordinator lease (node-local admission only): bound aggregations by the configured per-query
+                // entitlement.
                 QueryMemoryBreaker queryBreaker = QueryMemoryBreaker.create(
                     circuitBreaker,
                     "search_query[" + context.id() + "]",

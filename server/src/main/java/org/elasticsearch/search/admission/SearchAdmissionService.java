@@ -94,7 +94,7 @@ public class SearchAdmissionService implements NodeAdmissionClient {
      * admission lease on this node. The coordinator uses the search task id as the lease id, so coverage is a lookup.
      */
     public boolean isCovered(TaskId parentTaskId) {
-        return parentTaskId.isSet() && leases.containsKey(parentTaskId.toString());
+        return parentTaskId != null && parentTaskId.isSet() && leases.containsKey(parentTaskId.toString());
     }
 
     /**
@@ -103,7 +103,7 @@ public class SearchAdmissionService implements NodeAdmissionClient {
      * by the budget the coordinator reserved here.
      */
     public CircuitBreaker breakerFor(TaskId parentTaskId) {
-        if (parentTaskId.isSet() == false) {
+        if (parentTaskId == null || parentTaskId.isSet() == false) {
             return null;
         }
         Lease lease = leases.get(parentTaskId.toString());

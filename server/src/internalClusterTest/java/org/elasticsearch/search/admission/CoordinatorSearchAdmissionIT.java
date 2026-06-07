@@ -42,7 +42,7 @@ public class CoordinatorSearchAdmissionIT extends ESIntegTestCase {
             .build();
     }
 
-    public void testSearchRejectedUpFrontWhenSaturatedThenAdmittedWhenFreed() {
+    public void testSearchRejectedUpFrontWhenSaturatedThenAdmittedWhenFreed() throws Exception {
         assertAcked(
             prepareCreate("test").setSettings(Settings.builder().put("index.number_of_shards", 2).put("index.number_of_replicas", 0))
         );
@@ -66,13 +66,15 @@ public class CoordinatorSearchAdmissionIT extends ESIntegTestCase {
         releaseAllNodes("hold");
         assertNoFailures(client().prepareSearch("test").setQuery(QueryBuilders.matchAllQuery()));
 
-        // No leases or slots are leaked after the admitted search completes.
-        for (SearchService searchService : internalCluster().getInstances(SearchService.class)) {
-            assertEquals(0, searchService.searchAdmissionStats().currentUsedSlots());
-        }
-        for (SearchAdmissionService admission : internalCluster().getInstances(SearchAdmissionService.class)) {
-            assertEquals(0, admission.openLeaseCount());
-        }
+        // Leases/slots are released asynchronously after the search completes, so poll until everything is freed.
+        assertBusy(() -> {
+            for (SearchService searchService : internalCluster().getInstances(SearchService.class)) {
+                assertEquals(0, searchService.searchAdmissionStats().currentUsedSlots());
+            }
+            for (SearchAdmissionService admission : internalCluster().getInstances(SearchAdmissionService.class)) {
+                assertEquals(0, admission.openLeaseCount());
+            }
+        });
     }
 
     private void saturateAllNodes(String leasePrefix) {

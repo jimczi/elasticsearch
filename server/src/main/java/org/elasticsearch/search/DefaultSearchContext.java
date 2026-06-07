@@ -104,6 +104,10 @@ import static org.elasticsearch.search.SearchService.DEFAULT_SIZE;
 final class DefaultSearchContext extends SearchContext {
 
     private final ReaderContext readerContext;
+    // The breaker this shard's memory is charged to: a per-query/distributed-admission-lease breaker when one is in
+    // effect, otherwise null (falling back to the node request breaker). See circuitBreaker().
+    @Nullable
+    private final CircuitBreaker circuitBreaker;
     private final ShardSearchRequest request;
     private final SearchShardTarget shardTarget;
     private final LongSupplier relativeTimeSupplier;
@@ -182,6 +186,7 @@ final class DefaultSearchContext extends SearchContext {
         @Nullable CircuitBreaker circuitBreaker
     ) throws IOException {
         this.readerContext = readerContext;
+        this.circuitBreaker = circuitBreaker;
         this.request = request;
         this.fetchPhase = fetchPhase;
         boolean success = false;
@@ -978,7 +983,9 @@ final class DefaultSearchContext extends SearchContext {
 
     @Override
     public CircuitBreaker circuitBreaker() {
-        return indexService.breakerService().getBreaker(CircuitBreaker.REQUEST);
+        // When a per-query / distributed-admission-lease breaker is in effect, charge this shard's memory to it so the
+        // whole shard (query construction, the memory-accounting buffer, aggregations) runs under that budget.
+        return circuitBreaker != null ? circuitBreaker : indexService.breakerService().getBreaker(CircuitBreaker.REQUEST);
     }
 
     @Override

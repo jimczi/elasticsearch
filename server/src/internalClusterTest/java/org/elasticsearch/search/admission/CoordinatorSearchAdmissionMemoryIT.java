@@ -18,13 +18,13 @@ import org.elasticsearch.search.aggregations.AggregationBuilders;
 import org.elasticsearch.test.ESIntegTestCase;
 
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertAcked;
-import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertNoFailures;
 import static org.hamcrest.Matchers.notNullValue;
 
 /**
  * Verifies execution-under-lease memory enforcement (RD3): with coordinator admission and a tiny per-query memory
- * budget, the query's shard aggregations run under the budget the coordinator reserved on each node and fail with a
- * query-scoped {@link CircuitBreakingException}; a non-aggregation search is unaffected; and no leases or slots leak.
+ * budget, the <em>whole</em> shard — query phase and aggregations alike — runs under the budget the coordinator reserved
+ * on each node, so even a plain query fails with a query-scoped {@link CircuitBreakingException}; and no leases or slots
+ * leak afterwards.
  */
 @ESIntegTestCase.ClusterScope(scope = ESIntegTestCase.Scope.TEST, numDataNodes = 2)
 public class CoordinatorSearchAdmissionMemoryIT extends ESIntegTestCase {
@@ -40,7 +40,7 @@ public class CoordinatorSearchAdmissionMemoryIT extends ESIntegTestCase {
             .build();
     }
 
-    public void testAggregationFailsUnderLeaseBudgetButPlainSearchSucceeds() {
+    public void testWholeShardRunsUnderLeaseBudget() throws Exception {
         assertAcked(
             prepareCreate("test").setSettings(Settings.builder().put("index.number_of_shards", 2).put("index.number_of_replicas", 0))
         );
@@ -50,21 +50,25 @@ public class CoordinatorSearchAdmissionMemoryIT extends ESIntegTestCase {
         indicesAdmin().prepareRefresh("test").get();
         ensureGreen("test");
 
-        Exception e = expectThrows(
+        // Even a plain query phase (no aggregations) is bounded by the per-query lease budget, so it trips the breaker.
+        Exception plain = expectThrows(Exception.class, () -> client().prepareSearch("test").setQuery(QueryBuilders.matchAllQuery()).get());
+        assertThat(ExceptionsHelper.unwrap(plain, CircuitBreakingException.class), notNullValue());
+
+        // An aggregation search is bounded by the same budget.
+        Exception agg = expectThrows(
             Exception.class,
             () -> client().prepareSearch("test").addAggregation(AggregationBuilders.terms("by_v").field("v")).get()
         );
-        assertThat(ExceptionsHelper.unwrap(e, CircuitBreakingException.class), notNullValue());
+        assertThat(ExceptionsHelper.unwrap(agg, CircuitBreakingException.class), notNullValue());
 
-        // A non-aggregation search builds no aggregation context, so the per-query budget does not apply.
-        assertNoFailures(client().prepareSearch("test").setQuery(QueryBuilders.matchAllQuery()));
-
-        // The failed and the successful searches both released their leases.
-        for (SearchService searchService : internalCluster().getInstances(SearchService.class)) {
-            assertEquals(0, searchService.searchAdmissionStats().currentUsedSlots());
-        }
-        for (SearchAdmissionService admission : internalCluster().getInstances(SearchAdmissionService.class)) {
-            assertEquals(0, admission.openLeaseCount());
-        }
+        // The failed searches release their leases asynchronously after settling, so poll until everything is freed.
+        assertBusy(() -> {
+            for (SearchService searchService : internalCluster().getInstances(SearchService.class)) {
+                assertEquals(0, searchService.searchAdmissionStats().currentUsedSlots());
+            }
+            for (SearchAdmissionService admission : internalCluster().getInstances(SearchAdmissionService.class)) {
+                assertEquals(0, admission.openLeaseCount());
+            }
+        });
     }
 }
