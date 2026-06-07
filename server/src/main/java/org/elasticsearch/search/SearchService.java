@@ -148,6 +148,7 @@ import org.elasticsearch.search.suggest.completion.CompletionSuggestion;
 import org.elasticsearch.tasks.CancellableTask;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.tasks.TaskCancelledException;
+import org.elasticsearch.tasks.TaskId;
 import org.elasticsearch.telemetry.tracing.Tracer;
 import org.elasticsearch.threadpool.Scheduler;
 import org.elasticsearch.threadpool.Scheduler.Cancellable;
@@ -178,6 +179,7 @@ import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -475,6 +477,9 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     private final ResourcePool searchAdmissionPool;
     private final TimeValue searchAdmissionTimeout;
     private final long searchAdmissionQueryMemoryBytes;
+    // Tells whether a shard's parent (coordinator) task already holds a distributed admission lease covering this node,
+    // in which case the shard skips the node-local acquire. Defaults to "never covered"; wired by SearchAdmissionService.
+    private volatile Predicate<TaskId> admissionLeaseCoverage = parentTaskId -> false;
     private volatile Executor searchExecutor;
     private volatile boolean enableQueryPhaseParallelCollection;
     private volatile boolean enableFetchPhaseChunked;
@@ -882,7 +887,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         final IndexShard shard = getShard(request);
         rewriteAndFetchShardRequest(shard, request, task, listener.delegateFailure((l, rewritten) -> {
             // fork the execution in the search thread pool
-            ensureAfterSeqNoRefreshed(shard, request, () -> executeDfsPhase(request, task), l);
+            ensureAfterSeqNoRefreshed(shard, request, () -> executeDfsPhase(request, task), l, task.getParentTaskId());
         }));
     }
 
@@ -989,20 +994,24 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
             final Releasable markAsUsed = readerContext.markAsUsed(getKeepAlive(request));
             completionListenerRef.set(wrapFailureListener(listener, readerContext, markAsUsed));
             return executeQueryPhase(request, task, readerContext);
-        }, ActionListener.wrap(result -> completionListenerRef.get().onResponse(result), e -> completionListenerRef.get().onFailure(e)));
+        },
+            ActionListener.wrap(result -> completionListenerRef.get().onResponse(result), e -> completionListenerRef.get().onFailure(e)),
+            task.getParentTaskId()
+        );
     }
 
     private <T extends RefCounted> void ensureAfterSeqNoRefreshed(
         IndexShard shard,
         ShardSearchRequest request,
         CheckedSupplier<T, Exception> executable,
-        ActionListener<T> listener
+        ActionListener<T> listener,
+        TaskId parentTaskId
     ) {
         final long waitForCheckpoint = request.waitForCheckpoint();
         final Executor executor = getExecutor(shard);
         try {
             if (waitForCheckpoint <= UNASSIGNED_SEQ_NO) {
-                runAsync(executor, executable, listener);
+                runAsync(executor, executable, listener, parentTaskId);
                 // we successfully submitted the async task to the search pool so let's prewarm the shard
                 if (isExecutorQueuedBeyondPrewarmingFactor(executor, prewarmingMaxPoolFactorThreshold) == false) {
                     onlinePrewarmingService.prewarm(shard);
@@ -1082,7 +1091,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                         if (timeoutTask != null) {
                             timeoutTask.cancel();
                         }
-                        runAsync(executor, executable, listener);
+                        runAsync(executor, executable, listener, parentTaskId);
                         // we successfully submitted the async task to the search pool so let's prewarm the shard
                         if (isExecutorQueuedBeyondPrewarmingFactor(executor, prewarmingMaxPoolFactorThreshold) == false) {
                             onlinePrewarmingService.prewarm(shard);
@@ -1128,9 +1137,16 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         return indicesService.indexServiceSafe(request.shardId().getIndex()).getShard(request.shardId().id());
     }
 
-    private <T extends RefCounted> void runAsync(Executor executor, CheckedSupplier<T, Exception> executable, ActionListener<T> listener) {
+    private <T extends RefCounted> void runAsync(
+        Executor executor,
+        CheckedSupplier<T, Exception> executable,
+        ActionListener<T> listener,
+        TaskId parentTaskId
+    ) {
         final ResourcePool admissionPool = searchAdmissionPool;
-        if (admissionPool == null) {
+        // Skip the node-local acquire when the coordinator already reserved this node's capacity for the whole query
+        // (distributed admission): the slot is accounted by the coordinator lease, so re-acquiring would double count.
+        if (admissionPool == null || (parentTaskId != null && parentTaskId.isSet() && admissionLeaseCoverage.test(parentTaskId))) {
             executor.execute(ActionRunnable.supplyAndDecRef(listener, executable));
             return;
         }
@@ -1256,7 +1272,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                 // we handle the failure in the failure listener below
                 throw e;
             }
-        }, wrapFailureListener(listener, readerContext, markAsUsed));
+        }, wrapFailureListener(listener, readerContext, markAsUsed), task.getParentTaskId());
     }
 
     private QueryFetchSearchResult executeFetchPhase(ReaderContext reader, SearchContext context, long afterQueryTime) {
@@ -1471,7 +1487,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                 // we handle the failure in the failure listener below
                 throw e;
             }
-        }, wrapFailureListener(listener, readerContext, markAsUsed));
+        }, wrapFailureListener(listener, readerContext, markAsUsed), task.getParentTaskId());
         // we successfully submitted the async task to the search pool so let's prewarm the shard
         if (isExecutorQueuedBeyondPrewarmingFactor(executor, prewarmingMaxPoolFactorThreshold) == false) {
             onlinePrewarmingService.prewarm(readerContext.indexShard());
@@ -1541,7 +1557,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                     // we handle the failure in the failure listener below
                     throw e;
                 }
-            }, wrapFailureListener(l, readerContext, markAsUsed));
+            }, wrapFailureListener(l, readerContext, markAsUsed), task.getParentTaskId());
             // we successfully submitted the async task to the search pool so let's prewarm the shard
             if (isExecutorQueuedBeyondPrewarmingFactor(executor, prewarmingMaxPoolFactorThreshold) == false) {
                 onlinePrewarmingService.prewarm(readerContext.indexShard());
@@ -1609,7 +1625,8 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                 releaseCircuitBreakerOnResponse(listener, result -> result.result().fetchResult()),
                 readerContext,
                 markAsUsed
-            )
+            ),
+            task.getParentTaskId()
         );
     }
 
@@ -2479,6 +2496,15 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     // visible for testing
     ResourcePool searchAdmissionPool() {
         return searchAdmissionPool;
+    }
+
+    /**
+     * Installs the predicate used to decide whether a shard's parent (coordinator) task already holds a distributed
+     * admission lease covering this node, so the shard can skip its node-local acquire. Wired by
+     * {@code SearchAdmissionService} at startup.
+     */
+    public void setAdmissionLeaseCoverage(Predicate<TaskId> admissionLeaseCoverage) {
+        this.admissionLeaseCoverage = admissionLeaseCoverage;
     }
 
     // Builds the per-lane slot floors from settings. Memory floors are left at zero for now; lanes only reserve slots.

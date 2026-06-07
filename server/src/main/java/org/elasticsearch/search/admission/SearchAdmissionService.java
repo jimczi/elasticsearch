@@ -19,6 +19,7 @@ import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.search.SearchService;
 import org.elasticsearch.search.SearchService.SearchAdmission;
 import org.elasticsearch.tasks.Task;
+import org.elasticsearch.tasks.TaskId;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportChannel;
 import org.elasticsearch.transport.TransportConnectionListener;
@@ -74,6 +75,16 @@ public class SearchAdmissionService implements NodeAdmissionClient {
                 releaseForNode(node.getId());
             }
         });
+        // Let shard execution skip its node-local acquire when the coordinator already holds a lease for the query.
+        searchService.setAdmissionLeaseCoverage(this::isCovered);
+    }
+
+    /**
+     * Whether a shard whose parent (coordinator) task is {@code parentTaskId} is already covered by a distributed
+     * admission lease on this node. The coordinator uses the search task id as the lease id, so coverage is a lookup.
+     */
+    public boolean isCovered(TaskId parentTaskId) {
+        return parentTaskId.isSet() && leases.containsKey(parentTaskId.toString());
     }
 
     // -- node-local lease lifecycle ----------------------------------------------------------------------------------
