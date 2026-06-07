@@ -23,10 +23,15 @@ package org.elasticsearch.common.resource;
  * stays agnostic about that policy.
  */
 public enum ResourcePriority {
-    /** Lowest priority. Admitted from the queue only after all waiting {@link #NORMAL} and {@link #HIGH} requests. */
+    /** Lowest priority. Admitted from the queue only after all waiting {@link #NORMAL}, {@link #HIGH} and {@link #SYSTEM} requests. */
     LOW,
     /** Default priority for ordinary foreground work. */
     NORMAL,
-    /** Highest priority. Admitted from the queue ahead of all waiting {@link #NORMAL} and {@link #LOW} requests. */
-    HIGH
+    /** Elevated priority for boosted foreground work; admitted ahead of {@link #NORMAL} and {@link #LOW}. */
+    HIGH,
+    /**
+     * Reserved for system-index work, isolated from user lanes. Highest precedence so system operations stay responsive,
+     * but bounded by its own guaranteed floor (like any lane) so a heavy system query cannot starve user searches.
+     */
+    SYSTEM
 }

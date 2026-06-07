@@ -453,6 +453,18 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         Property.NodeScope
     );
 
+    /**
+     * Guaranteed slot floor for the system ({@link ResourcePriority#SYSTEM}) lane, as a fraction of total slot capacity.
+     * System-index searches run in this isolated lane so user load cannot starve them, nor they user searches.
+     */
+    public static final Setting<Double> SEARCH_ADMISSION_CONTROL_SYSTEM_SLOT_FLOOR = Setting.doubleSetting(
+        "search.admission_control.system.slot_floor_fraction",
+        0.0,
+        0.0,
+        1.0,
+        Property.NodeScope
+    );
+
     public static final int DEFAULT_SIZE = 10;
     public static final int DEFAULT_FROM = 0;
     private static final StackTraceElement[] EMPTY_STACK_TRACE_ARRAY = new StackTraceElement[0];
@@ -2499,6 +2511,17 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     }
 
     /**
+     * A per-query memory breaker sized to the configured per-query budget, layered over the node request breaker, or
+     * {@code null} when the memory dimension is disabled. Unlike {@link #admitSearchWork} this reserves no slot — it is
+     * for bounding additional per-query work (e.g. the ES|QL node-level reduction) by the same memory budget.
+     */
+    public QueryMemoryBreaker newQueryMemoryBreaker(String name) {
+        return searchAdmissionPool != null && searchAdmissionQueryMemoryBytes > 0
+            ? QueryMemoryBreaker.create(circuitBreaker, name, searchAdmissionQueryMemoryBytes)
+            : null;
+    }
+
+    /**
      * Installs the predicate used to decide whether a shard's parent (coordinator) task already holds a distributed
      * admission lease covering this node, so the shard can skip its node-local acquire. Wired by
      * {@code SearchAdmissionService} at startup.
@@ -2512,11 +2535,15 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         Map<ResourcePriority, ResourceLaneBudget> floors = new EnumMap<>(ResourcePriority.class);
         long boosted = (long) (SEARCH_ADMISSION_CONTROL_BOOSTED_SLOT_FLOOR.get(settings) * slotCapacity);
         long unboosted = (long) (SEARCH_ADMISSION_CONTROL_UNBOOSTED_SLOT_FLOOR.get(settings) * slotCapacity);
+        long system = (long) (SEARCH_ADMISSION_CONTROL_SYSTEM_SLOT_FLOOR.get(settings) * slotCapacity);
         if (boosted > 0) {
             floors.put(ResourcePriority.HIGH, new ResourceLaneBudget(boosted, 0));
         }
         if (unboosted > 0) {
             floors.put(ResourcePriority.LOW, new ResourceLaneBudget(unboosted, 0));
+        }
+        if (system > 0) {
+            floors.put(ResourcePriority.SYSTEM, new ResourceLaneBudget(system, 0));
         }
         return floors;
     }

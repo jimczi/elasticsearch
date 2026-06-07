@@ -19,6 +19,7 @@ import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.project.ProjectResolver;
 import org.elasticsearch.cluster.routing.SplitShardCountSummary;
 import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.resource.QueryMemoryBreaker;
 import org.elasticsearch.common.resource.ResourcePriority;
 import org.elasticsearch.compute.data.BlockFactory;
 import org.elasticsearch.compute.lucene.EmptyIndexedByShardId;
@@ -31,6 +32,7 @@ import org.elasticsearch.compute.operator.exchange.ExchangeSinkHandler;
 import org.elasticsearch.compute.operator.exchange.ExchangeSourceHandler;
 import org.elasticsearch.core.IOUtils;
 import org.elasticsearch.core.Releasable;
+import org.elasticsearch.core.Releasables;
 import org.elasticsearch.core.Tuple;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.shard.IndexShard;
@@ -716,6 +718,7 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
         DataNodeRequest request,
         boolean failFastOnShardFailure,
         AcquiredSearchContexts searchContexts,
+        BlockFactory reduceBlockFactory,
         PlannerSettings plannerSettings,
         PlanTimeProfile planTimeProfile,
         ActionListener<DataNodeComputeResponse> listener
@@ -766,7 +769,8 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
                         request.configuration(),
                         new FoldContext(request.pragmas().foldLimit().getBytes()),
                         exchangeSource::createExchangeSource,
-                        () -> externalSink.createExchangeSink(() -> {})
+                        () -> externalSink.createExchangeSink(() -> {}),
+                        reduceBlockFactory
                     ),
                     reducePlan,
                     plannerSettings,
@@ -843,6 +847,13 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
         // the sender doesn't support retry on shard failures, so we need to fail fast here.
         final boolean failFastOnShardFailures = supportShardLevelRetryFailure(channel.getVersion()) == false;
         var computeSearchContexts = new AcquiredSearchContexts(request.shards().size());
+        // Bound the node-level reduction by the per-query memory budget too (the data drivers are bounded per batch by
+        // admitSearchWork). Null when the memory dimension is disabled, in which case the reduce uses the shared factory.
+        final QueryMemoryBreaker reduceBreaker = searchService.newQueryMemoryBreaker("esql_reduce[" + sessionId + "]");
+        final BlockFactory reduceBlockFactory = reduceBreaker == null ? null : computeService.queryBlockFactory(reduceBreaker);
+        final Releasable requestReleasable = reduceBreaker == null
+            ? computeSearchContexts
+            : Releasables.wrap(computeSearchContexts, reduceBreaker);
         runComputeOnDataNode(
             (CancellableTask) task,
             sessionId,
@@ -850,9 +861,10 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
             request.withPlan(reductionPlan.dataNodePlan()),
             failFastOnShardFailures,
             computeSearchContexts,
+            reduceBlockFactory,
             computeService.plannerSettings().get(),
             planTimeProfile,
-            ActionListener.releaseAfter(listener, computeSearchContexts)
+            ActionListener.releaseAfter(listener, requestReleasable)
         );
     }
 
