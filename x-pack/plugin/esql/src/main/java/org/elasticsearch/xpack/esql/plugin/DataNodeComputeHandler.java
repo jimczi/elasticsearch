@@ -15,6 +15,7 @@ import org.elasticsearch.action.OriginalIndices;
 import org.elasticsearch.action.support.ChannelActionListener;
 import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.action.support.RefCountingRunnable;
+import org.elasticsearch.action.support.ThreadedActionListener;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.project.ProjectResolver;
 import org.elasticsearch.cluster.routing.SplitShardCountSummary;
@@ -254,12 +255,18 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
                     })
                 );
                 if (useCoordinatorAdmission) {
+                    // The reserve response arrives on a transport thread; fork back to the search executor so dispatch
+                    // (and, on rejection, the sender's failure handling, which asserts the SEARCH pool) runs where it
+                    // would have without admission.
                     searchAdmissionService.reserve(
                         node,
                         childSessionId,
                         shards.size(),
                         ResourcePriority.NORMAL,
-                        ActionListener.wrap(granted -> openExchangeAndDispatch.run(), listener::onFailure)
+                        new ThreadedActionListener<>(
+                            searchExecutor,
+                            ActionListener.wrap(granted -> openExchangeAndDispatch.run(), listener::onFailure)
+                        )
                     );
                 } else {
                     openExchangeAndDispatch.run();
