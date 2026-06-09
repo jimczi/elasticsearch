@@ -102,7 +102,8 @@ public class PlanExecutorMetricsTests extends ESTestCase {
         return new TransportActionServices(
             createMockTransportService(),
             mock(SearchService.class),
-            null,
+            null, // searchAdmissionService
+            null, // exchangeService
             clusterService,
             mock(ProjectResolver.class),
             mock(IndexNameExpressionResolver.class),

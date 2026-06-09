@@ -2596,6 +2596,16 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         this.admissionLeaseBreaker = admissionLeaseBreaker;
     }
 
+    /** Whether {@code parentTaskId} is covered by a distributed admission lease on this node (so work may skip the local acquire). */
+    public boolean isCoveredByAdmissionLease(TaskId parentTaskId) {
+        return admissionLeaseCoverage.test(parentTaskId);
+    }
+
+    /** The per-query memory breaker of the distributed admission lease covering {@code parentTaskId}, or {@code null}. */
+    public CircuitBreaker admissionLeaseBreakerFor(TaskId parentTaskId) {
+        return admissionLeaseBreaker.apply(parentTaskId);
+    }
+
     // Builds the per-lane slot floors from settings. Memory floors are left at zero for now; lanes only reserve slots.
     private static Map<ResourcePriority, ResourceLaneBudget> laneFloors(Settings settings, long slotCapacity) {
         Map<ResourcePriority, ResourceLaneBudget> floors = new EnumMap<>(ResourcePriority.class);

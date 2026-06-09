@@ -216,6 +216,7 @@ public class ComputeService {
             clusterService,
             projectResolver,
             searchService,
+            transportActionServices.searchAdmissionService(),
             transportService,
             exchangeService,
             searchExecutor

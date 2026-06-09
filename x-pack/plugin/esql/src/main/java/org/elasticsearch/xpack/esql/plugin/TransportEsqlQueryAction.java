@@ -36,6 +36,7 @@ import org.elasticsearch.injection.guice.Inject;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.search.SearchService;
+import org.elasticsearch.search.admission.SearchAdmissionService;
 import org.elasticsearch.search.crossproject.CrossProjectModeDecider;
 import org.elasticsearch.tasks.CancellableTask;
 import org.elasticsearch.tasks.Task;
@@ -122,6 +123,7 @@ public class TransportEsqlQueryAction extends HandledTransportAction<EsqlQueryRe
         ActionFilters actionFilters,
         PlanExecutor planExecutor,
         SearchService searchService,
+        SearchAdmissionService searchAdmissionService,
         ExchangeService exchangeService,
         ClusterService clusterService,
         ViewResolver viewResolver,
@@ -199,6 +201,7 @@ public class TransportEsqlQueryAction extends HandledTransportAction<EsqlQueryRe
         this.services = new TransportActionServices(
             transportService,
             searchService,
+            searchAdmissionService,
             exchangeService,
             clusterService,
             projectResolver,

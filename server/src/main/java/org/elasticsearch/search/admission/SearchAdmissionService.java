@@ -110,6 +110,20 @@ public class SearchAdmissionService implements NodeAdmissionClient {
         return lease == null ? null : lease.admission().memoryBreaker();
     }
 
+    /**
+     * Whether a lease with this exact id is held on this node. Used by ES|QL, where the lease id is the per-node child
+     * session id carried in the data-node request (rather than a parent task id).
+     */
+    public boolean isLeasePresent(String leaseId) {
+        return leases.containsKey(leaseId);
+    }
+
+    /** The per-query memory breaker of the lease with this exact id, or {@code null} if absent or it reserved no budget. */
+    public CircuitBreaker breakerForLease(String leaseId) {
+        Lease lease = leases.get(leaseId);
+        return lease == null ? null : lease.admission().memoryBreaker();
+    }
+
     // -- node-local lease lifecycle ----------------------------------------------------------------------------------
 
     /**

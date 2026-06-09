@@ -19,6 +19,7 @@ import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.project.ProjectResolver;
 import org.elasticsearch.cluster.routing.SplitShardCountSummary;
 import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.resource.QueryMemoryBreaker;
 import org.elasticsearch.common.resource.ResourcePriority;
 import org.elasticsearch.compute.data.BlockFactory;
@@ -40,6 +41,7 @@ import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.search.SearchService;
+import org.elasticsearch.search.admission.SearchAdmissionService;
 import org.elasticsearch.search.internal.AliasFilter;
 import org.elasticsearch.search.internal.SearchContext;
 import org.elasticsearch.search.internal.ShardSearchRequest;
@@ -86,6 +88,8 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
 
     private final ComputeService computeService;
     private final SearchService searchService;
+    private final SearchAdmissionService searchAdmissionService;
+    private final boolean coordinatorAdmissionEnabled;
     private final ClusterService clusterService;
     private final ProjectResolver projectResolver;
     private final TransportService transportService;
@@ -98,6 +102,7 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
         ClusterService clusterService,
         ProjectResolver projectResolver,
         SearchService searchService,
+        SearchAdmissionService searchAdmissionService,
         TransportService transportService,
         ExchangeService exchangeService,
         Executor searchExecutor
@@ -106,6 +111,8 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
         this.clusterService = clusterService;
         this.projectResolver = projectResolver;
         this.searchService = searchService;
+        this.searchAdmissionService = searchAdmissionService;
+        this.coordinatorAdmissionEnabled = SearchService.SEARCH_ADMISSION_CONTROL_COORDINATOR_ENABLED.get(clusterService.getSettings());
         this.transportService = transportService;
         this.exchangeService = exchangeService;
         this.searchExecutor = searchExecutor;
@@ -164,15 +171,23 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
                 }
                 var queryPragmas = configuration.pragmas();
                 var childSessionId = computeService.newChildSession(sessionId);
+                // Distributed admission: when enabled and the target node supports it, reserve this node's capacity
+                // (keyed by the child session id) before dispatching and release it when the node's compute settles; the
+                // data node then runs under that lease instead of acquiring per batch. Off by default.
+                final boolean useCoordinatorAdmission = coordinatorAdmissionEnabled
+                    && connection.getTransportVersion().supports(SearchAdmissionService.SEARCH_ADMISSION_TRANSPORT_VERSION);
+                final ActionListener<DataNodeComputeResponse> dispatchListener = useCoordinatorAdmission
+                    ? ActionListener.runAfter(listener, () -> searchAdmissionService.release(node, childSessionId, ActionListener.noop()))
+                    : listener;
                 // For each target node, first open a remote exchange on the remote node, then link the exchange source to
                 // the new remote exchange sink, and initialize the computation on the target node via data-node-request.
-                ExchangeService.openExchange(
+                final Runnable openExchangeAndDispatch = () -> ExchangeService.openExchange(
                     transportService,
                     connection,
                     childSessionId,
                     queryPragmas.exchangeBufferSize(),
                     searchExecutor,
-                    listener.delegateFailureAndWrap((l, unused) -> {
+                    dispatchListener.delegateFailureAndWrap((l, unused) -> {
                         final Runnable onGroupFailure;
                         final CancellableTask groupTask;
                         if (configuration.allowPartialResults()) {
@@ -238,6 +253,17 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
                         }
                     })
                 );
+                if (useCoordinatorAdmission) {
+                    searchAdmissionService.reserve(
+                        node,
+                        childSessionId,
+                        shards.size(),
+                        ResourcePriority.NORMAL,
+                        ActionListener.wrap(granted -> openExchangeAndDispatch.run(), listener::onFailure)
+                    );
+                } else {
+                    openExchangeAndDispatch.run();
+                }
             }
         }.startComputeOnDataNodes(
             concreteIndices,
@@ -502,6 +528,10 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
         private final Map<ShardId, Exception> shardLevelFailures;
         private final AcquiredSearchContexts searchContexts;
         private final PlanTimeProfile planTimeProfile;
+        // When true, a coordinator lease already covers this query on this node: skip the per-batch admission acquire and
+        // run the batch drivers under the lease's per-query breaker (may be null when the lease reserved no memory).
+        private final boolean coveredByLease;
+        private final CircuitBreaker leaseBreaker;
 
         DataNodeRequestExecutor(
             EsqlFlags flags,
@@ -512,7 +542,9 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
             boolean failFastOnShardFailure,
             Map<ShardId, Exception> shardLevelFailures,
             ComputeListener computeListener,
-            AcquiredSearchContexts searchContexts
+            AcquiredSearchContexts searchContexts,
+            boolean coveredByLease,
+            CircuitBreaker leaseBreaker
         ) {
             this.flags = flags;
             this.request = request;
@@ -525,6 +557,8 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
             this.blockingSink = exchangeSink.createExchangeSink(() -> {});
             this.searchContexts = searchContexts;
             this.planTimeProfile = new PlanTimeProfile();
+            this.coveredByLease = coveredByLease;
+            this.leaseBreaker = leaseBreaker;
         }
 
         void start() {
@@ -534,7 +568,6 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
         private void runBatch(int startBatchIndex) {
             final Configuration configuration = request.configuration();
             final String clusterAlias = request.clusterAlias();
-            final var sessionId = request.sessionId();
             final int endBatchIndex = Math.min(startBatchIndex + maxConcurrentShards, request.shards().size());
             final AtomicInteger pagesProduced = new AtomicInteger();
             List<DataNodeRequest.Shard> shards = request.shards().subList(startBatchIndex, endBatchIndex);
@@ -567,54 +600,73 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
                     }
                 }
             };
-            // Reserve a node-local admission slot per shard in this batch so ES|QL data-node execution shares the same
-            // budget as classic _search shard execution. The slot is released when the batch settles, before the next
-            // batch is scheduled. When admission control is disabled this is an inline no-op and behaviour is unchanged.
-            searchService.admitSearchWork(shards.size(), ResourcePriority.NORMAL, searchExecutor, ActionListener.wrap(admission -> {
-                final ActionListener<DriverCompletionInfo> admitted = ActionListener.runBefore(
-                    batchListener,
-                    admission.releasable()::close
-                );
-                // When the memory dimension is active, bound this batch's drivers by their reserved memory budget via a
-                // per-query block factory; otherwise use the node's shared block factory (null).
-                final BlockFactory blockFactory = admission.memoryBreaker() == null
-                    ? null
-                    : computeService.queryBlockFactory(admission.memoryBreaker());
-                acquireSearchContexts(
-                    clusterAlias,
-                    shards,
-                    configuration,
-                    request.aliasFilters(),
-                    ActionListener.wrap(acquiredSearchContexts -> {
-                        assert ThreadPool.assertCurrentThreadPool(ThreadPool.Names.SEARCH);
-                        if (acquiredSearchContexts.isEmpty()) {
-                            admitted.onResponse(DriverCompletionInfo.EMPTY);
-                            return;
-                        }
-                        var computeContext = new ComputeContext(
-                            sessionId,
-                            ComputeService.DATA_DESCRIPTION,
-                            clusterAlias,
-                            flags,
-                            acquiredSearchContexts,
-                            configuration,
-                            configuration.newFoldContext(),
-                            null,
-                            () -> exchangeSink.createExchangeSink(pagesProduced::incrementAndGet),
-                            blockFactory
-                        );
-                        computeService.runCompute(
-                            parentTask,
-                            computeContext,
-                            request.plan(),
-                            computeService.plannerSettings().get(),
-                            LocalPhysicalOptimization.ENABLED,
-                            planTimeProfile,
-                            admitted
-                        );
-                    }, admitted::onFailure)
-                );
-            }, batchListener::onFailure));
+            if (coveredByLease) {
+                // The coordinator already reserved this node's capacity for the query, so skip the per-batch acquire and
+                // run the batch drivers under the lease's per-query breaker (released when the query settles).
+                final BlockFactory blockFactory = leaseBreaker == null ? null : computeService.queryBlockFactory(leaseBreaker);
+                executeBatch(clusterAlias, shards, configuration, pagesProduced, blockFactory, batchListener);
+            } else {
+                // Reserve a node-local admission slot per shard in this batch so ES|QL data-node execution shares the same
+                // budget as classic _search shard execution. The slot is released when the batch settles, before the next
+                // batch is scheduled. When admission control is disabled this is an inline no-op and behaviour is unchanged.
+                searchService.admitSearchWork(shards.size(), ResourcePriority.NORMAL, searchExecutor, ActionListener.wrap(admission -> {
+                    final ActionListener<DriverCompletionInfo> admitted = ActionListener.runBefore(
+                        batchListener,
+                        admission.releasable()::close
+                    );
+                    // When the memory dimension is active, bound this batch's drivers by their reserved memory budget via a
+                    // per-query block factory; otherwise use the node's shared block factory (null).
+                    final BlockFactory blockFactory = admission.memoryBreaker() == null
+                        ? null
+                        : computeService.queryBlockFactory(admission.memoryBreaker());
+                    executeBatch(clusterAlias, shards, configuration, pagesProduced, blockFactory, admitted);
+                }, batchListener::onFailure));
+            }
+        }
+
+        /** Acquires the batch's search contexts and launches its compute drivers under the given block factory. */
+        private void executeBatch(
+            String clusterAlias,
+            List<DataNodeRequest.Shard> shards,
+            Configuration configuration,
+            AtomicInteger pagesProduced,
+            BlockFactory blockFactory,
+            ActionListener<DriverCompletionInfo> listener
+        ) {
+            acquireSearchContexts(
+                clusterAlias,
+                shards,
+                configuration,
+                request.aliasFilters(),
+                ActionListener.wrap(acquiredSearchContexts -> {
+                    assert ThreadPool.assertCurrentThreadPool(ThreadPool.Names.SEARCH);
+                    if (acquiredSearchContexts.isEmpty()) {
+                        listener.onResponse(DriverCompletionInfo.EMPTY);
+                        return;
+                    }
+                    var computeContext = new ComputeContext(
+                        request.sessionId(),
+                        ComputeService.DATA_DESCRIPTION,
+                        clusterAlias,
+                        flags,
+                        acquiredSearchContexts,
+                        configuration,
+                        configuration.newFoldContext(),
+                        null,
+                        () -> exchangeSink.createExchangeSink(pagesProduced::incrementAndGet),
+                        blockFactory
+                    );
+                    computeService.runCompute(
+                        parentTask,
+                        computeContext,
+                        request.plan(),
+                        computeService.plannerSettings().get(),
+                        LocalPhysicalOptimization.ENABLED,
+                        planTimeProfile,
+                        listener
+                    );
+                }, listener::onFailure)
+            );
         }
 
         private void acquireSearchContexts(
@@ -719,6 +771,8 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
         boolean failFastOnShardFailure,
         AcquiredSearchContexts searchContexts,
         BlockFactory reduceBlockFactory,
+        boolean coveredByLease,
+        CircuitBreaker leaseBreaker,
         PlannerSettings plannerSettings,
         PlanTimeProfile planTimeProfile,
         ActionListener<DataNodeComputeResponse> listener
@@ -751,7 +805,9 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
                     failFastOnShardFailure,
                     shardLevelFailures,
                     computeListener,
-                    searchContexts
+                    searchContexts,
+                    coveredByLease,
+                    leaseBreaker
                 );
                 dataNodeRequestExecutor.start();
                 // run the node-level reduction
@@ -847,13 +903,24 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
         // the sender doesn't support retry on shard failures, so we need to fail fast here.
         final boolean failFastOnShardFailures = supportShardLevelRetryFailure(channel.getVersion()) == false;
         var computeSearchContexts = new AcquiredSearchContexts(request.shards().size());
-        // Bound the node-level reduction by the per-query memory budget too (the data drivers are bounded per batch by
-        // admitSearchWork). Null when the memory dimension is disabled, in which case the reduce uses the shared factory.
-        final QueryMemoryBreaker reduceBreaker = searchService.newQueryMemoryBreaker("esql_reduce[" + sessionId + "]");
-        final BlockFactory reduceBlockFactory = reduceBreaker == null ? null : computeService.queryBlockFactory(reduceBreaker);
-        final Releasable requestReleasable = reduceBreaker == null
-            ? computeSearchContexts
-            : Releasables.wrap(computeSearchContexts, reduceBreaker);
+        // Distributed admission: when a coordinator lease covers this query on this node (keyed by the child session
+        // id), run the node reduction and the data drivers under the lease's per-query budget instead of charging per
+        // batch. The lease owns its breaker, so it is not closed with the request.
+        final boolean coveredByLease = coordinatorAdmissionEnabled && searchAdmissionService.isLeasePresent(sessionId);
+        final CircuitBreaker leaseBreaker = coveredByLease ? searchAdmissionService.breakerForLease(sessionId) : null;
+        final BlockFactory reduceBlockFactory;
+        final Releasable requestReleasable;
+        if (coveredByLease) {
+            reduceBlockFactory = leaseBreaker == null ? null : computeService.queryBlockFactory(leaseBreaker);
+            requestReleasable = computeSearchContexts;
+        } else {
+            // Bound the node-level reduction by the per-query memory budget too (the data drivers are bounded per batch
+            // by admitSearchWork). Null when the memory dimension is disabled, in which case the reduce uses the shared
+            // factory.
+            final QueryMemoryBreaker reduceBreaker = searchService.newQueryMemoryBreaker("esql_reduce[" + sessionId + "]");
+            reduceBlockFactory = reduceBreaker == null ? null : computeService.queryBlockFactory(reduceBreaker);
+            requestReleasable = reduceBreaker == null ? computeSearchContexts : Releasables.wrap(computeSearchContexts, reduceBreaker);
+        }
         runComputeOnDataNode(
             (CancellableTask) task,
             sessionId,
@@ -862,6 +929,8 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
             failFastOnShardFailures,
             computeSearchContexts,
             reduceBlockFactory,
+            coveredByLease,
+            leaseBreaker,
             computeService.plannerSettings().get(),
             planTimeProfile,
             ActionListener.releaseAfter(listener, requestReleasable)
