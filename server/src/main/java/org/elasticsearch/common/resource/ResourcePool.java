@@ -94,6 +94,7 @@ public final class ResourcePool implements Releasable {
     private final long[] usedSlotsByLane = new long[LANE_COUNT];
     private final long[] usedMemoryByLane = new long[LANE_COUNT];
     private final long[] reclaimedByLane = new long[LANE_COUNT];
+    private final long[] acquiredByLane = new long[LANE_COUNT]; // monotonic per-lane acquire count
     // Live reservations per lane, in acquisition order, so reclaim can pick the oldest borrowers first.
     private final List<LinkedHashSet<ReservationImpl>> liveByLane = new ArrayList<>(LANE_COUNT);
     private final List<PendingRequest> queue = new ArrayList<>();
@@ -378,7 +379,8 @@ public final class ResourcePool implements Releasable {
                         usedMemoryByLane[i],
                         Math.max(0, usedSlotsByLane[i] - floorSlots[i]),
                         Math.max(0, usedMemoryByLane[i] - floorMemory[i]),
-                        reclaimedByLane[i]
+                        reclaimedByLane[i],
+                        acquiredByLane[i]
                     )
                 );
             }
@@ -452,6 +454,7 @@ public final class ResourcePool implements Releasable {
         peakUsedSlots = Math.max(peakUsedSlots, usedSlots);
         peakUsedMemory = Math.max(peakUsedMemory, usedMemory);
         totalAcquired++;
+        acquiredByLane[lane]++;
         ReservationImpl reservation = new ReservationImpl(priority, slots, memoryBytes, onReclaim);
         liveByLane.get(lane).add(reservation);
         return reservation;

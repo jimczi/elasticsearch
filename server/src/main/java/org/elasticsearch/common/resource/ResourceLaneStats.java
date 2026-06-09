@@ -20,6 +20,7 @@ package org.elasticsearch.common.resource;
  * @param borrowedSlots    slots currently used above the lane's floor (reclaimable by other lanes)
  * @param borrowedMemory   memory currently used above the lane's floor, in bytes (reclaimable by other lanes)
  * @param totalReclaimed   reservations in this lane whose reclaim hook has been invoked over the pool's lifetime
+ * @param totalAcquired    reservations admitted into this lane over the pool's lifetime (monotonic)
  */
 public record ResourceLaneStats(
     ResourcePriority lane,
@@ -29,5 +30,6 @@ public record ResourceLaneStats(
     long usedMemory,
     long borrowedSlots,
     long borrowedMemory,
-    long totalReclaimed
+    long totalReclaimed,
+    long totalAcquired
 ) {}

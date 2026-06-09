@@ -51,6 +51,7 @@ import org.elasticsearch.common.resource.ResourcePool;
 import org.elasticsearch.common.resource.ResourcePoolStats;
 import org.elasticsearch.common.resource.ResourcePriority;
 import org.elasticsearch.common.resource.ResourceRejectedException;
+import org.elasticsearch.common.resource.SearchLaneResolver;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
 import org.elasticsearch.common.settings.Settings;
@@ -466,6 +467,24 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     );
 
     /**
+     * Selects the policy that maps a shard search to its admission lane (see {@link SearchLaneResolver}). {@code none}
+     * (the default) keeps every search in the {@link ResourcePriority#NORMAL} lane so the lane machinery stays inert;
+     * {@code system} isolates system-index searches into the {@link ResourcePriority#SYSTEM} lane.
+     */
+    public static final Setting<String> SEARCH_ADMISSION_CONTROL_LANE_STRATEGY = Setting.simpleString(
+        "search.admission_control.lane_strategy",
+        "none",
+        value -> {
+            if (value.equals("none") == false && value.equals("system") == false) {
+                throw new IllegalArgumentException(
+                    "[search.admission_control.lane_strategy] must be one of [none, system] but was [" + value + "]"
+                );
+            }
+        },
+        Property.NodeScope
+    );
+
+    /**
      * Enables coordinator-side distributed admission: before a search runs, the coordinator reserves capacity on every
      * participating node (all-or-nothing) so an accepted search is guaranteed it can run. Off by default; requires
      * {@link #SEARCH_ADMISSION_CONTROL_SLOTS_PER_THREAD} {@code > 0} on the data nodes to have an effect.
@@ -524,6 +543,9 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     private final ResourcePool searchAdmissionPool;
     private final TimeValue searchAdmissionTimeout;
     private final long searchAdmissionQueryMemoryBytes;
+    // Policy that maps a shard search to its admission lane (e.g. isolating system-index searches). Default keeps every
+    // search in the NORMAL lane, so the per-lane floor/borrow/reclaim machinery stays inert until a strategy is chosen.
+    private final SearchLaneResolver laneResolver;
     // Tells whether a shard's parent (coordinator) task already holds a distributed admission lease covering this node,
     // in which case the shard skips the node-local acquire. Defaults to "never covered"; wired by SearchAdmissionService.
     private volatile Predicate<TaskId> admissionLeaseCoverage = parentTaskId -> false;
@@ -677,6 +699,11 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
             this.searchAdmissionTimeout = null;
             this.searchAdmissionQueryMemoryBytes = 0;
         }
+        this.laneResolver = switch (SEARCH_ADMISSION_CONTROL_LANE_STRATEGY.get(settings)) {
+            case "none" -> SearchLaneResolver.NORMAL_ONLY;
+            case "system" -> SearchLaneResolver.SYSTEM_AWARE;
+            default -> throw new IllegalArgumentException("unexpected value for [" + SEARCH_ADMISSION_CONTROL_LANE_STRATEGY.getKey() + "]");
+        };
 
         if (PIT_RELOCATION_FEATURE_FLAG.isEnabled()) {
             pitRelocationEnabled = PIT_RELOCATION_ENABLED.get(settings);
@@ -1061,7 +1088,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         final Executor executor = getExecutor(shard);
         try {
             if (waitForCheckpoint <= UNASSIGNED_SEQ_NO) {
-                runAsync(executor, executable, listener, parentTaskId);
+                runAsync(executor, executable, listener, parentTaskId, laneFor(shard));
                 // we successfully submitted the async task to the search pool so let's prewarm the shard
                 if (isExecutorQueuedBeyondPrewarmingFactor(executor, prewarmingMaxPoolFactorThreshold) == false) {
                     onlinePrewarmingService.prewarm(shard);
@@ -1141,7 +1168,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                         if (timeoutTask != null) {
                             timeoutTask.cancel();
                         }
-                        runAsync(executor, executable, listener, parentTaskId);
+                        runAsync(executor, executable, listener, parentTaskId, laneFor(shard));
                         // we successfully submitted the async task to the search pool so let's prewarm the shard
                         if (isExecutorQueuedBeyondPrewarmingFactor(executor, prewarmingMaxPoolFactorThreshold) == false) {
                             onlinePrewarmingService.prewarm(shard);
@@ -1187,11 +1214,17 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         return indicesService.indexServiceSafe(request.shardId().getIndex()).getShard(request.shardId().id());
     }
 
+    /** The admission lane this shard's search runs in, per the configured {@link SearchLaneResolver} policy. */
+    private ResourcePriority laneFor(IndexShard shard) {
+        return laneResolver.resolve(new SearchLaneResolver.Work(shard.indexSettings().getIndexMetadata().isSystem()));
+    }
+
     private <T extends RefCounted> void runAsync(
         Executor executor,
         CheckedSupplier<T, Exception> executable,
         ActionListener<T> listener,
-        TaskId parentTaskId
+        TaskId parentTaskId,
+        ResourcePriority lane
     ) {
         final ResourcePool admissionPool = searchAdmissionPool;
         // Skip the node-local acquire when the coordinator already reserved this node's capacity for the whole query
@@ -1207,7 +1240,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         admissionPool.acquireAsync(
             1,
             searchAdmissionQueryMemoryBytes,
-            ResourcePriority.NORMAL,
+            lane,
             searchAdmissionTimeout,
             listener.delegateFailureAndWrap((delegate, reservation) -> {
                 // Release the slot exactly once when the shard task completes, fails, or is rejected by the executor.
@@ -1322,7 +1355,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                 // we handle the failure in the failure listener below
                 throw e;
             }
-        }, wrapFailureListener(listener, readerContext, markAsUsed), task.getParentTaskId());
+        }, wrapFailureListener(listener, readerContext, markAsUsed), task.getParentTaskId(), laneFor(readerContext.indexShard()));
     }
 
     private QueryFetchSearchResult executeFetchPhase(ReaderContext reader, SearchContext context, long afterQueryTime) {
@@ -1537,7 +1570,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                 // we handle the failure in the failure listener below
                 throw e;
             }
-        }, wrapFailureListener(listener, readerContext, markAsUsed), task.getParentTaskId());
+        }, wrapFailureListener(listener, readerContext, markAsUsed), task.getParentTaskId(), laneFor(readerContext.indexShard()));
         // we successfully submitted the async task to the search pool so let's prewarm the shard
         if (isExecutorQueuedBeyondPrewarmingFactor(executor, prewarmingMaxPoolFactorThreshold) == false) {
             onlinePrewarmingService.prewarm(readerContext.indexShard());
@@ -1607,7 +1640,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                     // we handle the failure in the failure listener below
                     throw e;
                 }
-            }, wrapFailureListener(l, readerContext, markAsUsed), task.getParentTaskId());
+            }, wrapFailureListener(l, readerContext, markAsUsed), task.getParentTaskId(), laneFor(readerContext.indexShard()));
             // we successfully submitted the async task to the search pool so let's prewarm the shard
             if (isExecutorQueuedBeyondPrewarmingFactor(executor, prewarmingMaxPoolFactorThreshold) == false) {
                 onlinePrewarmingService.prewarm(readerContext.indexShard());
@@ -1676,7 +1709,8 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                 readerContext,
                 markAsUsed
             ),
-            task.getParentTaskId()
+            task.getParentTaskId(),
+            laneFor(readerContext.indexShard())
         );
     }
 
