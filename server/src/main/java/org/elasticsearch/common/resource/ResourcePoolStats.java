@@ -9,6 +9,13 @@
 
 package org.elasticsearch.common.resource;
 
+import org.elasticsearch.common.io.stream.StreamInput;
+import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.common.io.stream.Writeable;
+import org.elasticsearch.xcontent.ToXContentFragment;
+import org.elasticsearch.xcontent.XContentBuilder;
+
+import java.io.IOException;
 import java.util.List;
 
 /**
@@ -55,7 +62,71 @@ public record ResourcePoolStats(
     long totalTimedOut,
     long totalReclaimed,
     List<ResourceLaneStats> lanes
-) {
+) implements Writeable, ToXContentFragment {
+
+    public ResourcePoolStats(StreamInput in) throws IOException {
+        this(
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVInt(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readCollectionAsImmutableList(ResourceLaneStats::new)
+        );
+    }
+
+    @Override
+    public void writeTo(StreamOutput out) throws IOException {
+        out.writeVLong(slotCapacity);
+        out.writeVLong(memoryCapacity);
+        out.writeVLong(currentUsedSlots);
+        out.writeVLong(currentUsedMemory);
+        out.writeVLong(peakUsedSlots);
+        out.writeVLong(peakUsedMemory);
+        out.writeVInt(currentQueueLength);
+        out.writeVLong(totalAcquired);
+        out.writeVLong(totalReleased);
+        out.writeVLong(totalRejected);
+        out.writeVLong(totalQueued);
+        out.writeVLong(totalQueueRejected);
+        out.writeVLong(totalCancelled);
+        out.writeVLong(totalTimedOut);
+        out.writeVLong(totalReclaimed);
+        out.writeCollection(lanes);
+    }
+
+    @Override
+    public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
+        builder.field("slot_capacity", slotCapacity);
+        builder.field("current_used_slots", currentUsedSlots);
+        builder.field("current_available_slots", currentAvailableSlots());
+        builder.field("peak_used_slots", peakUsedSlots);
+        builder.field("memory_capacity", memoryCapacity);
+        builder.field("current_used_memory", currentUsedMemory);
+        builder.field("peak_used_memory", peakUsedMemory);
+        builder.field("current_queue_length", currentQueueLength);
+        builder.field("total_acquired", totalAcquired);
+        builder.field("total_released", totalReleased);
+        builder.field("total_rejected", totalRejected);
+        builder.field("total_queued", totalQueued);
+        builder.field("total_queue_rejected", totalQueueRejected);
+        builder.field("total_cancelled", totalCancelled);
+        builder.field("total_timed_out", totalTimedOut);
+        builder.field("total_reclaimed", totalReclaimed);
+        builder.xContentList("lanes", lanes);
+        return builder;
+    }
+
     /** Slots not currently held by any live reservation. Never negative. */
     public long currentAvailableSlots() {
         return slotCapacity - currentUsedSlots;

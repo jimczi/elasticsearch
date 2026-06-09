@@ -9,6 +9,14 @@
 
 package org.elasticsearch.common.resource;
 
+import org.elasticsearch.common.io.stream.StreamInput;
+import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.common.io.stream.Writeable;
+import org.elasticsearch.xcontent.ToXContentObject;
+import org.elasticsearch.xcontent.XContentBuilder;
+
+import java.io.IOException;
+
 /**
  * Per-lane slice of a {@link ResourcePoolStats} snapshot.
  *
@@ -32,4 +40,48 @@ public record ResourceLaneStats(
     long borrowedMemory,
     long totalReclaimed,
     long totalAcquired
-) {}
+) implements Writeable, ToXContentObject {
+
+    public ResourceLaneStats(StreamInput in) throws IOException {
+        this(
+            in.readEnum(ResourcePriority.class),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong(),
+            in.readVLong()
+        );
+    }
+
+    @Override
+    public void writeTo(StreamOutput out) throws IOException {
+        out.writeEnum(lane);
+        out.writeVLong(floorSlots);
+        out.writeVLong(floorMemory);
+        out.writeVLong(usedSlots);
+        out.writeVLong(usedMemory);
+        out.writeVLong(borrowedSlots);
+        out.writeVLong(borrowedMemory);
+        out.writeVLong(totalReclaimed);
+        out.writeVLong(totalAcquired);
+    }
+
+    @Override
+    public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
+        builder.startObject();
+        builder.field("lane", lane.name());
+        builder.field("floor_slots", floorSlots);
+        builder.field("floor_memory", floorMemory);
+        builder.field("used_slots", usedSlots);
+        builder.field("used_memory", usedMemory);
+        builder.field("borrowed_slots", borrowedSlots);
+        builder.field("borrowed_memory", borrowedMemory);
+        builder.field("total_reclaimed", totalReclaimed);
+        builder.field("total_acquired", totalAcquired);
+        builder.endObject();
+        return builder;
+    }
+}
