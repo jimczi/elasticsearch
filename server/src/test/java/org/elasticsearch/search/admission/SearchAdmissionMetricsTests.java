@@ -34,15 +34,15 @@ public class SearchAdmissionMetricsTests extends ESTestCase {
 
         meter.getRecorder().collect();
 
-        assertEquals(3L, scalar(meter, InstrumentType.LONG_GAUGE, "es.search.admission.slots.current_used"));
-        assertEquals(7L, scalar(meter, InstrumentType.LONG_GAUGE, "es.search.admission.slots.current_available"));
-        assertEquals(100L, scalar(meter, InstrumentType.LONG_GAUGE, "es.search.admission.memory.current_used"));
-        assertEquals(0L, scalar(meter, InstrumentType.LONG_GAUGE, "es.search.admission.queue.current_size"));
+        assertEquals(3L, scalar(meter, InstrumentType.LONG_GAUGE, "es.search.admission.used_slots.current"));
+        assertEquals(7L, scalar(meter, InstrumentType.LONG_GAUGE, "es.search.admission.available_slots.current"));
+        assertEquals(100L, scalar(meter, InstrumentType.LONG_GAUGE, "es.search.admission.used_memory.current"));
+        assertEquals(0L, scalar(meter, InstrumentType.LONG_GAUGE, "es.search.admission.queue.size"));
         assertEquals(1L, scalar(meter, InstrumentType.LONG_ASYNC_COUNTER, "es.search.admission.rejected.total"));
 
         // Per-lane gauge: HIGH holds the 3 slots, the others none.
         List<Measurement> lanes = meter.getRecorder()
-            .getMeasurements(InstrumentType.LONG_GAUGE, "es.search.admission.lane.current_used_slots");
+            .getMeasurements(InstrumentType.LONG_GAUGE, "es.search.admission.lane_used_slots.current");
         assertEquals(3L, laneSlots(lanes, ResourcePriority.HIGH));
         assertEquals(0L, laneSlots(lanes, ResourcePriority.NORMAL));
 
@@ -55,9 +55,9 @@ public class SearchAdmissionMetricsTests extends ESTestCase {
 
         meter.getRecorder().collect();
 
-        assertEquals(0L, scalar(meter, InstrumentType.LONG_GAUGE, "es.search.admission.slots.current_used"));
+        assertEquals(0L, scalar(meter, InstrumentType.LONG_GAUGE, "es.search.admission.used_slots.current"));
         assertEquals(0L, scalar(meter, InstrumentType.LONG_ASYNC_COUNTER, "es.search.admission.rejected.total"));
-        assertTrue(meter.getRecorder().getMeasurements(InstrumentType.LONG_GAUGE, "es.search.admission.lane.current_used_slots").isEmpty());
+        assertTrue(meter.getRecorder().getMeasurements(InstrumentType.LONG_GAUGE, "es.search.admission.lane_used_slots.current").isEmpty());
     }
 
     private static long scalar(RecordingMeterRegistry meter, InstrumentType type, String name) {

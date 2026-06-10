@@ -31,25 +31,25 @@ public class SearchAdmissionMetrics {
 
     public SearchAdmissionMetrics(MeterRegistry meter, Supplier<ResourcePoolStats> stats) {
         meter.registerLongGauge(
-            "es.search.admission.slots.current_used",
+            "es.search.admission.used_slots.current",
             "Shard-search admission slots currently held by live reservations",
             "slots",
             () -> gauge(stats, ResourcePoolStats::currentUsedSlots)
         );
         meter.registerLongGauge(
-            "es.search.admission.slots.current_available",
+            "es.search.admission.available_slots.current",
             "Shard-search admission slots currently free",
             "slots",
             () -> gauge(stats, ResourcePoolStats::currentAvailableSlots)
         );
         meter.registerLongGauge(
-            "es.search.admission.memory.current_used",
+            "es.search.admission.used_memory.current",
             "Shard-search admission memory entitlement currently held by live reservations",
             "bytes",
             () -> gauge(stats, ResourcePoolStats::currentUsedMemory)
         );
         meter.registerLongGauge(
-            "es.search.admission.queue.current_size",
+            "es.search.admission.queue.size",
             "Requests currently waiting for a shard-search admission slot",
             "requests",
             () -> gauge(stats, s -> s.currentQueueLength())
@@ -73,7 +73,7 @@ public class SearchAdmissionMetrics {
             () -> gauge(stats, ResourcePoolStats::totalReclaimed)
         );
         meter.registerLongsGauge(
-            "es.search.admission.lane.current_used_slots",
+            "es.search.admission.lane_used_slots.current",
             "Shard-search admission slots currently held per priority lane",
             "slots",
             () -> laneGauge(stats)
