@@ -26,6 +26,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Coordinator-side distributed admission for a single search: reserves capacity on <em>every</em> participating node
@@ -49,6 +50,9 @@ public class CoordinatorSearchAdmission {
 
     // Number of searches currently waiting (retrying) for admission; bounds the coordinator queue.
     private final AtomicInteger queued = new AtomicInteger();
+    // Lifetime coordination-layer counters: searches this node admitted (all nodes reserved) vs rejected at acceptance.
+    private final LongAdder admittedTotal = new LongAdder();
+    private final LongAdder rejectedTotal = new LongAdder();
 
     public CoordinatorSearchAdmission(
         NodeAdmissionClient client,
@@ -70,12 +74,41 @@ public class CoordinatorSearchAdmission {
      * the search cannot be admitted within the accept deadline.
      */
     public void admit(String leaseId, Map<DiscoveryNode, Integer> demand, ResourcePriority priority, ActionListener<Releasable> listener) {
+        // Count the coordination-layer outcome (accept vs reject) for observability.
+        final ActionListener<Releasable> counting = new ActionListener<>() {
+            @Override
+            public void onResponse(Releasable releasable) {
+                admittedTotal.increment();
+                listener.onResponse(releasable);
+            }
+
+            @Override
+            public void onFailure(Exception e) {
+                rejectedTotal.increment();
+                listener.onFailure(e);
+            }
+        };
         if (demand.isEmpty()) {
-            listener.onResponse(() -> {});
+            counting.onResponse(() -> {});
             return;
         }
         long deadlineNanos = threadPool.relativeTimeInNanos() + acceptTimeout.nanos();
-        attempt(leaseId, demand, priority, deadlineNanos, false, listener);
+        attempt(leaseId, demand, priority, deadlineNanos, false, counting);
+    }
+
+    /** Searches currently waiting in the coordinator accept queue (retrying their all-or-nothing reservation). */
+    public int queued() {
+        return queued.get();
+    }
+
+    /** Searches this node admitted at the coordinator over its lifetime (every participating node reserved). */
+    public long totalAdmitted() {
+        return admittedTotal.sum();
+    }
+
+    /** Searches this node rejected at acceptance over its lifetime (could not reserve all nodes within the deadline). */
+    public long totalRejected() {
+        return rejectedTotal.sum();
     }
 
     private void attempt(

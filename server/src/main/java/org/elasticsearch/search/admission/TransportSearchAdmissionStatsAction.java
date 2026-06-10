@@ -42,6 +42,7 @@ public class TransportSearchAdmissionStatsAction extends TransportNodesAction<
 
     private final SearchService searchService;
     private final SearchAdmissionService searchAdmissionService;
+    private final CoordinatorSearchAdmission coordinatorSearchAdmission;
 
     @Inject
     public TransportSearchAdmissionStatsAction(
@@ -50,7 +51,8 @@ public class TransportSearchAdmissionStatsAction extends TransportNodesAction<
         TransportService transportService,
         ActionFilters actionFilters,
         SearchService searchService,
-        SearchAdmissionService searchAdmissionService
+        SearchAdmissionService searchAdmissionService,
+        CoordinatorSearchAdmission coordinatorSearchAdmission
     ) {
         super(
             TYPE.name(),
@@ -62,6 +64,7 @@ public class TransportSearchAdmissionStatsAction extends TransportNodesAction<
         );
         this.searchService = searchService;
         this.searchAdmissionService = searchAdmissionService;
+        this.coordinatorSearchAdmission = coordinatorSearchAdmission;
     }
 
     @Override
@@ -86,7 +89,14 @@ public class TransportSearchAdmissionStatsAction extends TransportNodesAction<
     @Override
     protected NodeSearchAdmissionStats nodeOperation(NodeRequest request, Task task) {
         ResourcePoolStats stats = searchService.searchAdmissionStats(); // null when admission is disabled on this node
-        return new NodeSearchAdmissionStats(transportService.getLocalNode(), stats, searchAdmissionService.openLeaseCount());
+        return new NodeSearchAdmissionStats(
+            transportService.getLocalNode(),
+            stats,
+            searchAdmissionService.openLeaseCount(),
+            coordinatorSearchAdmission.queued(),
+            coordinatorSearchAdmission.totalAdmitted(),
+            coordinatorSearchAdmission.totalRejected()
+        );
     }
 
     public static class NodeRequest extends AbstractTransportRequest {

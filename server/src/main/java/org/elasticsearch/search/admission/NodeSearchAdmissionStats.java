@@ -29,17 +29,34 @@ public class NodeSearchAdmissionStats extends BaseNodeResponse implements ToXCon
     @Nullable
     private final ResourcePoolStats poolStats;
     private final int openLeases;
+    // Coordination-layer counters for this node acting as a search coordinator.
+    private final int coordQueued;
+    private final long coordAdmitted;
+    private final long coordRejected;
 
-    public NodeSearchAdmissionStats(DiscoveryNode node, @Nullable ResourcePoolStats poolStats, int openLeases) {
+    public NodeSearchAdmissionStats(
+        DiscoveryNode node,
+        @Nullable ResourcePoolStats poolStats,
+        int openLeases,
+        int coordQueued,
+        long coordAdmitted,
+        long coordRejected
+    ) {
         super(node);
         this.poolStats = poolStats;
         this.openLeases = openLeases;
+        this.coordQueued = coordQueued;
+        this.coordAdmitted = coordAdmitted;
+        this.coordRejected = coordRejected;
     }
 
     public NodeSearchAdmissionStats(StreamInput in) throws IOException {
         super(in);
         this.poolStats = in.readOptionalWriteable(ResourcePoolStats::new);
         this.openLeases = in.readVInt();
+        this.coordQueued = in.readVInt();
+        this.coordAdmitted = in.readVLong();
+        this.coordRejected = in.readVLong();
     }
 
     @Override
@@ -47,6 +64,9 @@ public class NodeSearchAdmissionStats extends BaseNodeResponse implements ToXCon
         super.writeTo(out);
         out.writeOptionalWriteable(poolStats);
         out.writeVInt(openLeases);
+        out.writeVInt(coordQueued);
+        out.writeVLong(coordAdmitted);
+        out.writeVLong(coordRejected);
     }
 
     @Nullable
@@ -64,6 +84,11 @@ public class NodeSearchAdmissionStats extends BaseNodeResponse implements ToXCon
         builder.field("name", getNode().getName());
         builder.field("enabled", poolStats != null);
         builder.field("open_leases", openLeases);
+        builder.startObject("coordinator");
+        builder.field("queued", coordQueued);
+        builder.field("total_admitted", coordAdmitted);
+        builder.field("total_rejected", coordRejected);
+        builder.endObject();
         if (poolStats != null) {
             poolStats.toXContent(builder, params);
         }
