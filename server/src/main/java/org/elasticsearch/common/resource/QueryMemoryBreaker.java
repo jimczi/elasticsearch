@@ -13,6 +13,7 @@ import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.breaker.CircuitBreakingException;
 import org.elasticsearch.core.Releasable;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -41,6 +42,10 @@ public final class QueryMemoryBreaker implements CircuitBreaker, Releasable {
     private final String name;
     private final AtomicLong used = new AtomicLong();
     private final AtomicLong trippedCount = new AtomicLong();
+    // Once closed, this breaker has settled its contribution to the parent (see close()); it must never touch the parent
+    // again, otherwise a release that lands after close — releasable ordering, or a lease breaker shared across a query's
+    // shards/drivers — would subtract from the parent a second time and drive its used-bytes negative.
+    private final AtomicBoolean closed = new AtomicBoolean();
     private volatile long limit;
 
     private QueryMemoryBreaker(CircuitBreaker parent, String name, long limit) {
@@ -67,6 +72,11 @@ public final class QueryMemoryBreaker implements CircuitBreaker, Releasable {
 
     @Override
     public void addEstimateBytesAndMaybeBreak(long bytes, String label) throws CircuitBreakingException {
+        if (closed.get()) {
+            // Settled: track locally but do not touch the parent (a post-close release would otherwise not be paired).
+            used.addAndGet(bytes);
+            return;
+        }
         // Reserve against this query's budget first, so a breach charges nothing and fails only this query.
         long current = used.addAndGet(bytes);
         if (bytes > 0 && current > limit) {
@@ -85,7 +95,9 @@ public final class QueryMemoryBreaker implements CircuitBreaker, Releasable {
     @Override
     public void addWithoutBreaking(long bytes) {
         used.addAndGet(bytes);
-        parent.addWithoutBreaking(bytes);
+        if (closed.get() == false) {
+            parent.addWithoutBreaking(bytes);
+        }
     }
 
     @Override
@@ -107,12 +119,19 @@ public final class QueryMemoryBreaker implements CircuitBreaker, Releasable {
         );
     }
 
-    /** Returns any bytes still tracked to the parent so a leaked allocation does not permanently inflate it. */
+    /**
+     * Settles this breaker exactly once: returns any bytes still tracked to the parent (so a leaked allocation does not
+     * permanently inflate it) and marks the breaker closed, after which {@link #addWithoutBreaking} and
+     * {@link #addEstimateBytesAndMaybeBreak} no longer touch the parent — releases that arrive after close are already
+     * accounted for by the residual returned here and must not subtract from the parent a second time.
+     */
     @Override
     public void close() {
-        long residual = used.getAndSet(0);
-        if (residual != 0) {
-            parent.addWithoutBreaking(-residual);
+        if (closed.compareAndSet(false, true)) {
+            long residual = used.getAndSet(0);
+            if (residual != 0) {
+                parent.addWithoutBreaking(-residual);
+            }
         }
     }
 

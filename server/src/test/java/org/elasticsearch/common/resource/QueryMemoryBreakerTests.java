@@ -90,6 +90,33 @@ public class QueryMemoryBreakerTests extends ESTestCase {
         assertEquals(0, parent.getUsed());
     }
 
+    public void testReleaseAfterCloseDoesNotDriveParentNegative() {
+        CircuitBreaker parent = new LimitedBreaker("parent", 10_000);
+        QueryMemoryBreaker breaker = (QueryMemoryBreaker) QueryMemoryBreaker.wrap(parent, "q", 1000);
+
+        breaker.addEstimateBytesAndMaybeBreak(300, "a");
+        assertEquals(300, parent.getUsed());
+
+        // The lease/context closes while an allocation is still outstanding (releasable ordering, or a lease breaker
+        // shared across a query's shards/drivers). close() returns the outstanding bytes to the parent.
+        breaker.close();
+        assertEquals(0, parent.getUsed());
+
+        // The shard/driver now releases its bytes. This must NOT subtract from the parent a second time.
+        breaker.addWithoutBreaking(-300);
+        assertEquals("parent breaker must not go negative when a release lands after close", 0, parent.getUsed());
+    }
+
+    public void testCloseIsIdempotent() {
+        CircuitBreaker parent = new LimitedBreaker("parent", 10_000);
+        QueryMemoryBreaker breaker = (QueryMemoryBreaker) QueryMemoryBreaker.wrap(parent, "q", 1000);
+
+        breaker.addEstimateBytesAndMaybeBreak(200, "a");
+        breaker.close();
+        breaker.close(); // second settle is a no-op
+        assertEquals(0, parent.getUsed());
+    }
+
     /** Minimal parent breaker: tracks bytes and trips at a fixed limit, like the node REQUEST breaker. */
     private static final class LimitedBreaker implements CircuitBreaker {
         private final String name;
