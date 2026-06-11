@@ -409,6 +409,18 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     );
 
     /**
+     * Minimum age a shard reservation must reach before a higher-priority lane may preempt (reclaim) it. A higher value
+     * avoids cancelling near-done short work just to free its slot — which only thrashes — at the cost of a higher lane
+     * waiting a little longer for its floor. {@code 0} (the default) disables the gate, so any borrower can be preempted.
+     */
+    public static final Setting<TimeValue> SEARCH_ADMISSION_CONTROL_RECLAIM_MIN_AGE = Setting.timeSetting(
+        "search.admission_control.reclaim_min_age",
+        TimeValue.ZERO,
+        TimeValue.ZERO,
+        Property.NodeScope
+    );
+
+    /**
      * Total memory-entitlement budget for shard-search admission. A reservation reserves both a slot and a slice of this
      * budget (see {@link #SEARCH_ADMISSION_CONTROL_QUERY_MEMORY}); the budget is an admission-time entitlement, while the
      * request circuit breaker remains the fine-grained enforcer of actual bytes. {@code 0} (the default) leaves the
@@ -697,6 +709,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                 threadPool,
                 threadPool.generic()
             );
+            this.searchAdmissionPool.setMinReclaimAge(SEARCH_ADMISSION_CONTROL_RECLAIM_MIN_AGE.get(settings).nanos());
             this.searchAdmissionTimeout = SEARCH_ADMISSION_CONTROL_ACQUIRE_TIMEOUT.get(settings);
             this.searchAdmissionQueryMemoryBytes = SEARCH_ADMISSION_CONTROL_QUERY_MEMORY.get(settings).getBytes();
         } else {

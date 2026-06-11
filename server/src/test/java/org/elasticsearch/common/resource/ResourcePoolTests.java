@@ -294,6 +294,27 @@ public class ResourcePoolTests extends ESTestCase {
         assertEquals(1, pool.stats().totalReclaimed());
     }
 
+    public void testReclaimAgeGateSkipsYoungBorrowers() {
+        ResourcePool pool = new ResourcePool("test", 10, Long.MAX_VALUE, 4, Map.of(ResourcePriority.HIGH, new ResourceLaneBudget(5, 0)));
+        pool.setMinReclaimAge(TimeValue.timeValueHours(1).nanos()); // nothing is old enough to be preempted
+
+        AtomicReference<Reservation> lowHolder = new AtomicReference<>();
+        Reservation low = pool.acquire(10, 0, ResourcePriority.LOW, () -> lowHolder.get().close());
+        lowHolder.set(low);
+
+        // HIGH asks for its floor, but the borrower is too young to preempt, so HIGH waits rather than reclaiming.
+        PlainActionFuture<Reservation> high = new PlainActionFuture<>();
+        pool.acquireAsync(5, 0, ResourcePriority.HIGH, high);
+        assertFalse(high.isDone());
+        assertEquals(0, pool.stats().totalReclaimed());
+
+        // When the young borrower finishes on its own, HIGH proceeds normally — no cancellation, no thrash.
+        low.close();
+        assertTrue(high.isDone());
+        assertEquals(5, high.actionGet().slots());
+        assertEquals(0, pool.stats().totalReclaimed());
+    }
+
     public void testReclaimProtectsVictimFloor() {
         // LOW is guaranteed 4 slots; HIGH is guaranteed 3. Total capacity 10.
         ResourcePool pool = new ResourcePool(

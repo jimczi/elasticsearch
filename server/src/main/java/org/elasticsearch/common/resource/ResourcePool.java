@@ -82,6 +82,9 @@ public final class ResourcePool implements Releasable {
 
     // Used only by the timeout-bearing acquireAsync overload; null when the pool was built without a scheduler.
     private final Scheduler scheduler;
+    // Minimum age a reservation must reach before it can be preempted (reclaimed). Lets near-done short work drain
+    // naturally instead of being cancelled-and-rerun, which would just thrash. 0 disables the gate.
+    private volatile long minReclaimAgeNanos = 0;
     private final Executor timeoutExecutor;
 
     private final ReentrantLock lock = new ReentrantLock();
@@ -203,6 +206,14 @@ public final class ResourcePool implements Releasable {
 
     public String name() {
         return name;
+    }
+
+    /**
+     * Sets the minimum age a reservation must reach before it can be preempted (reclaimed). A higher value avoids
+     * cancelling near-done short work just to reclaim its slot (which only thrashes); {@code 0} disables the gate.
+     */
+    public void setMinReclaimAge(long nanos) {
+        this.minReclaimAgeNanos = Math.max(0, nanos);
     }
 
     public long slotCapacity() {
@@ -564,6 +575,9 @@ public final class ResourcePool implements Releasable {
                 if (candidate.reclaimRequested || candidate.onReclaim == null) {
                     continue;
                 }
+                if (minReclaimAgeNanos > 0 && System.nanoTime() - candidate.grantedNanos < minReclaimAgeNanos) {
+                    continue; // too young to preempt — let near-done short work drain naturally instead of thrashing
+                }
                 if (projectedSlots[victimLane] - candidate.slots < floorSlots[victimLane]
                     || projectedMemory[victimLane] - candidate.memoryBytes < floorMemory[victimLane]) {
                     continue; // reclaiming this one would breach the victim lane's own floor
@@ -739,6 +753,7 @@ public final class ResourcePool implements Releasable {
         private final long slots;
         private final long memoryBytes;
         private final Runnable onReclaim;
+        private final long grantedNanos = System.nanoTime(); // for the reclaim age gate
         private boolean released = false;
         // Set true (under the pool lock) when this reservation has been picked for reclaim, so it is not picked twice.
         private boolean reclaimRequested = false;
