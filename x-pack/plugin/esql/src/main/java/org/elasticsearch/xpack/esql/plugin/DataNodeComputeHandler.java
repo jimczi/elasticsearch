@@ -16,6 +16,8 @@ import org.elasticsearch.action.support.ChannelActionListener;
 import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.action.support.RefCountingRunnable;
 import org.elasticsearch.action.support.ThreadedActionListener;
+import org.elasticsearch.cluster.metadata.IndexMetadata;
+import org.elasticsearch.cluster.metadata.ProjectMetadata;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.project.ProjectResolver;
 import org.elasticsearch.cluster.routing.SplitShardCountSummary;
@@ -119,6 +121,20 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
         this.searchExecutor = searchExecutor;
         this.threadPool = transportService.getThreadPool();
         transportService.registerRequestHandler(ComputeService.DATA_ACTION_NAME, searchExecutor, DataNodeRequest::new, this);
+    }
+
+    /** The admission lane for a batch: the highest-priority lane among the indices its shards belong to (their tiers). */
+    private ResourcePriority laneFor(List<DataNodeRequest.Shard> shards) {
+        final ProjectMetadata project = projectResolver.getProjectMetadata(clusterService.state());
+        ResourcePriority lane = null;
+        for (DataNodeRequest.Shard shard : shards) {
+            IndexMetadata indexMetadata = project.index(shard.shardId().getIndex());
+            ResourcePriority shardLane = indexMetadata == null ? ResourcePriority.NORMAL : searchService.laneForIndex(indexMetadata);
+            if (lane == null || shardLane.ordinal() > lane.ordinal()) {
+                lane = shardLane;
+            }
+        }
+        return lane == null ? ResourcePriority.NORMAL : lane;
     }
 
     void startComputeOnDataNodes(
@@ -615,19 +631,27 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
             } else {
                 // Reserve a node-local admission slot per shard in this batch so ES|QL data-node execution shares the same
                 // budget as classic _search shard execution. The slot is released when the batch settles, before the next
-                // batch is scheduled. When admission control is disabled this is an inline no-op and behaviour is unchanged.
-                searchService.admitSearchWork(shards.size(), ResourcePriority.NORMAL, searchExecutor, ActionListener.wrap(admission -> {
-                    final ActionListener<DriverCompletionInfo> admitted = ActionListener.runBefore(
-                        batchListener,
-                        admission.releasable()::close
-                    );
-                    // When the memory dimension is active, bound this batch's drivers by their reserved memory budget via a
-                    // per-query block factory; otherwise use the node's shared block factory (null).
-                    final BlockFactory blockFactory = admission.memoryBreaker() == null
-                        ? null
-                        : computeService.queryBlockFactory(admission.memoryBreaker());
-                    executeBatch(clusterAlias, shards, configuration, pagesProduced, blockFactory, admitted);
-                }, batchListener::onFailure));
+                // batch is scheduled. The lane follows the indices' boost tier, and the data-node task is passed so a
+                // higher-priority lane can preempt this batch (cancel it to free its slots). When admission control is
+                // disabled this is an inline no-op and behaviour is unchanged.
+                searchService.admitSearchWork(
+                    shards.size(),
+                    laneFor(shards),
+                    searchService.preemptionHook(parentTask),
+                    searchExecutor,
+                    ActionListener.wrap(admission -> {
+                        final ActionListener<DriverCompletionInfo> admitted = ActionListener.runBefore(
+                            batchListener,
+                            admission.releasable()::close
+                        );
+                        // When the memory dimension is active, bound this batch's drivers by their reserved memory budget via a
+                        // per-query block factory; otherwise use the node's shared block factory (null).
+                        final BlockFactory blockFactory = admission.memoryBreaker() == null
+                            ? null
+                            : computeService.queryBlockFactory(admission.memoryBreaker());
+                        executeBatch(clusterAlias, shards, configuration, pagesProduced, blockFactory, admitted);
+                    }, batchListener::onFailure)
+                );
             }
         }
 

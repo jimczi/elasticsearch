@@ -29,6 +29,7 @@ import org.elasticsearch.action.search.SearchShardTask;
 import org.elasticsearch.action.search.SearchType;
 import org.elasticsearch.action.support.TransportActions;
 import org.elasticsearch.cluster.ProjectState;
+import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver.ResolvedExpression;
 import org.elasticsearch.cluster.metadata.IndexReshardingMetadata;
 import org.elasticsearch.cluster.routing.RecoverySource;
@@ -176,9 +177,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
-import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Predicate;
@@ -2723,7 +2724,28 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
      * running on the search thread pool; the no-op (disabled) grant is delivered inline to avoid an extra hop on the
      * default path.
      */
-    public void admitSearchWork(int slots, ResourcePriority priority, Executor resumeExecutor, ActionListener<SearchAdmission> listener) {
+    /** The admission lane for searches against {@code indexMetadata}, per the configured lane strategy. */
+    public ResourcePriority laneForIndex(IndexMetadata indexMetadata) {
+        return laneResolver.resolve(
+            new SearchLaneResolver.Work(
+                indexMetadata.isSystem(),
+                IndexSettings.INDEX_SEARCH_BOOST_TIER_SETTING.get(indexMetadata.getSettings())
+            )
+        );
+    }
+
+    /** A reclaim hook that cancels {@code task} (to stop its running search and free its slot) for a higher-priority lane. */
+    public Runnable preemptionHook(CancellableTask task) {
+        return () -> taskCanceller.accept(task, "search admission: preempted to free slots for a higher-priority lane");
+    }
+
+    public void admitSearchWork(
+        int slots,
+        ResourcePriority priority,
+        @Nullable Runnable onReclaim,
+        Executor resumeExecutor,
+        ActionListener<SearchAdmission> listener
+    ) {
         final ResourcePool pool = searchAdmissionPool;
         if (pool == null || slots <= 0) {
             listener.onResponse(new SearchAdmission(null, () -> {}));
@@ -2731,7 +2753,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         }
         // Each shard of work reserves a slot plus its share of the memory entitlement budget.
         final long memoryBytes = (long) slots * searchAdmissionQueryMemoryBytes;
-        pool.acquireAsync(slots, memoryBytes, priority, searchAdmissionTimeout, new ActionListener<>() {
+        pool.acquireAsync(slots, memoryBytes, priority, searchAdmissionTimeout, onReclaim, new ActionListener<>() {
             @Override
             public void onResponse(Reservation reservation) {
                 resumeExecutor.execute(new AbstractRunnable() {

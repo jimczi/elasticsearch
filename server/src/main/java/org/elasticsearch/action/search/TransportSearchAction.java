@@ -2233,7 +2233,8 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
             }
             // The lease id is the search task id so a data node recognises shard work covered by this lease.
             final String leaseId = new TaskId(clusterService.localNode().getId(), task.getId()).toString();
-            coordinatorSearchAdmission.admit(leaseId, demand, ResourcePriority.NORMAL, ActionListener.wrap(releasable -> {
+            final ResourcePriority lane = computeAdmissionLane(shardIterators, projectResolver.getProjectMetadata(clusterState));
+            coordinatorSearchAdmission.admit(leaseId, demand, lane, ActionListener.wrap(releasable -> {
                 final ActionListener<SearchResponse> releasing = ActionListener.runAfter(listener, releasable::close);
                 try {
                     runSearchPhases(
@@ -2372,6 +2373,22 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
                 }
             }
             return demand;
+        }
+
+        /** The admission lane to reserve this search in: the highest-priority lane among its local indices' tiers. */
+        private ResourcePriority computeAdmissionLane(List<SearchShardIterator> shardIterators, ProjectMetadata project) {
+            ResourcePriority lane = null;
+            for (SearchShardIterator it : shardIterators) {
+                if (it.getClusterAlias() != null && RemoteClusterAware.LOCAL_CLUSTER_GROUP_KEY.equals(it.getClusterAlias()) == false) {
+                    continue; // remote (CCS) shards are admitted by their own cluster
+                }
+                IndexMetadata indexMetadata = project.index(it.shardId().getIndex());
+                ResourcePriority shardLane = indexMetadata == null ? ResourcePriority.NORMAL : searchService.laneForIndex(indexMetadata);
+                if (lane == null || shardLane.ordinal() > lane.ordinal()) {
+                    lane = shardLane;
+                }
+            }
+            return lane == null ? ResourcePriority.NORMAL : lane;
         }
     }
 

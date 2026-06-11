@@ -133,7 +133,13 @@ public class SearchAdmissionService implements NodeAdmissionClient {
      * disconnect cleanup; may be {@code null}). Completes the listener once the lease is held, or fails it on rejection.
      */
     public void reserveLocally(int slots, ResourcePriority priority, String ownerNodeId, String leaseId, ActionListener<Void> listener) {
-        searchService.admitSearchWork(slots, priority, searchExecutor, listener.delegateFailureAndWrap((l, admission) -> {
+        // Preemptive reclaim for distributed admission: if a higher-priority lane needs this node's floor, cancel the
+        // query's shards covered by this lease (so they stop using resources) and release the lease (freeing its slots).
+        final Runnable onReclaim = () -> {
+            cancelCoveredShards(leaseId);
+            releaseLocally(leaseId);
+        };
+        searchService.admitSearchWork(slots, priority, onReclaim, searchExecutor, listener.delegateFailureAndWrap((l, admission) -> {
             Lease previous = leases.putIfAbsent(leaseId, new Lease(leaseId, ownerNodeId, admission));
             if (previous != null) {
                 // A lease with this id already exists; drop the duplicate reservation rather than overwrite/leak it.
@@ -143,6 +149,16 @@ public class SearchAdmissionService implements NodeAdmissionClient {
             }
             l.onResponse(null);
         }));
+    }
+
+    /** Cancels the local shard tasks covered by {@code leaseId} (parent task == lease id) so they stop on preemption. */
+    private void cancelCoveredShards(String leaseId) {
+        for (var task : transportService.getTaskManager().getCancellableTasks().values()) {
+            if (task.getParentTaskId().isSet() && leaseId.equals(task.getParentTaskId().toString())) {
+                transportService.getTaskManager()
+                    .cancel(task, "search admission: preempted to free slots for a higher-priority lane", () -> {});
+            }
+        }
     }
 
     /** Releases the lease with {@code leaseId}. Idempotent: returns false if there was no such lease. */
