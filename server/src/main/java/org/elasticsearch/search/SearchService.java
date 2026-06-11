@@ -1230,6 +1230,32 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         );
     }
 
+    // The reason a task is cancelled for preemptive admission reclaim — see preemptedRetryable.
+    static final String PREEMPTION_REASON_MARKER = "preempted";
+
+    /**
+     * Wraps {@code listener} so that, if {@code task} was cancelled to free its slot for a higher-priority lane (its
+     * cancel reason carries the {@link #PREEMPTION_REASON_MARKER}), the terminal {@link TaskCancelledException} is
+     * translated into a retryable {@link ResourceRejectedException} — the same rejection a queue-full admission produces.
+     * The coordinator then re-runs the work and the query still finishes, just throttled to the lane's floor, instead of
+     * failing outright. This is what lets preempted work (lease-covered {@code _search} and the local path) be re-run.
+     */
+    private static <T> ActionListener<T> preemptedRetryable(ActionListener<T> listener, CancellableTask task) {
+        if (task == null) {
+            return listener;
+        }
+        return listener.delegateResponse((l, e) -> {
+            String reason = task.getReasonCancelled();
+            if (reason != null
+                && reason.contains(PREEMPTION_REASON_MARKER)
+                && ExceptionsHelper.unwrap(e, TaskCancelledException.class) != null) {
+                l.onFailure(new ResourceRejectedException("search work preempted to free slots for a higher-priority lane"));
+            } else {
+                l.onFailure(e);
+            }
+        });
+    }
+
     private <T extends RefCounted> void runAsync(
         Executor executor,
         CheckedSupplier<T, Exception> executable,
@@ -1239,10 +1265,15 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     ) {
         final ResourcePool admissionPool = searchAdmissionPool;
         final TaskId parentTaskId = task == null ? null : task.getParentTaskId();
-        // Skip the node-local acquire when the coordinator already reserved this node's capacity for the whole query
-        // (distributed admission): the slot is accounted by the coordinator lease, so re-acquiring would double count.
-        if (admissionPool == null || (parentTaskId != null && parentTaskId.isSet() && admissionLeaseCoverage.test(parentTaskId))) {
+        if (admissionPool == null) {
             executor.execute(ActionRunnable.supplyAndDecRef(listener, executable));
+            return;
+        }
+        if (parentTaskId != null && parentTaskId.isSet() && admissionLeaseCoverage.test(parentTaskId)) {
+            // Covered by a coordinator lease: no local acquire (the slot is accounted by the lease, so re-acquiring would
+            // double count). A lease reclaim can still preempt this shard — surface that as a retryable rejection so the
+            // coordinator re-runs it, just like the local-admission path below.
+            executor.execute(ActionRunnable.supplyAndDecRef(preemptedRetryable(listener, task), executable));
             return;
         }
         // Preemptive reclaim: if a higher-priority lane is below its floor and cannot be served otherwise, the pool asks
@@ -1250,11 +1281,9 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         // (per-shard) task so the running search stops at its next cancellation check — never the whole query. Reclaim
         // only ever touches capacity a lane borrowed *above* its floor, so a lower-priority (e.g. unboosted) lane keeps
         // its floor and still makes progress, just throttled.
-        final AtomicBoolean reclaimed = new AtomicBoolean();
-        final Runnable onReclaim = task == null ? null : () -> {
-            reclaimed.set(true);
-            taskCanceller.accept(task, "search admission: preempted to free a slot for a higher-priority lane");
-        };
+        final Runnable onReclaim = task == null
+            ? null
+            : () -> taskCanceller.accept(task, "search admission: preempted to free a slot for a higher-priority lane");
         // Admission control enabled: reserve a slot before the shard task runs and release it when the task settles.
         // The reservation may be granted inline, after a short wait in the bounded queue, or rejected (queue full or
         // timed out) — in which case the listener is failed with a ResourceRejectedException, surfaced to the
@@ -1266,18 +1295,9 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
             searchAdmissionTimeout,
             onReclaim,
             listener.delegateFailureAndWrap((delegate, reservation) -> {
-                // If this shard was preempted, surface a *retryable* rejection (like a queue-full admission) rather than a
-                // terminal cancellation, so the coordinator re-runs the shard and the query still finishes — just later,
-                // within the lane's floor — instead of failing outright.
-                final ActionListener<T> preemptionAware = delegate.delegateResponse((l, e) -> {
-                    if (reclaimed.get() && ExceptionsHelper.unwrap(e, TaskCancelledException.class) != null) {
-                        l.onFailure(new ResourceRejectedException("search shard preempted to free a slot for a higher-priority lane"));
-                    } else {
-                        l.onFailure(e);
-                    }
-                });
-                // Release the slot exactly once when the shard task completes, fails, or is rejected by the executor.
-                final ActionListener<T> releasingListener = ActionListener.runAfter(preemptionAware, reservation::close);
+                // Release the slot exactly once when the shard task completes, fails, or is rejected by the executor; if
+                // preempted, surface it as a retryable rejection so the coordinator re-runs the shard.
+                final ActionListener<T> releasingListener = ActionListener.runAfter(preemptedRetryable(delegate, task), reservation::close);
                 try {
                     executor.execute(ActionRunnable.supplyAndDecRef(releasingListener, executable));
                 } catch (Exception e) {

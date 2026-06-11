@@ -888,7 +888,20 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
 
     @Override
     public void messageReceived(DataNodeRequest request, TransportChannel channel, Task task) {
-        ActionListener<DataNodeComputeResponse> listener = new ChannelActionListener<>(channel);
+        final CancellableTask dataNodeTask = (CancellableTask) task;
+        // If this compute was cancelled by the resource manager to free its slots for a higher-priority lane, send the
+        // failure back with the "preempted" reason in its message so the coordinator recognises it as retryable (it
+        // re-runs the work on an available copy) rather than a terminal cancellation. See DataNodeRequestSender.
+        ActionListener<DataNodeComputeResponse> listener = new ChannelActionListener<DataNodeComputeResponse>(channel).delegateResponse(
+            (l, e) -> {
+                String reason = dataNodeTask.getReasonCancelled();
+                if (dataNodeTask.isCancelled() && reason != null && reason.contains("preempted")) {
+                    l.onFailure(new TaskCancelledException(reason));
+                } else {
+                    l.onFailure(e);
+                }
+            }
+        );
         Configuration configuration = request.configuration();
         PlanTimeProfile planTimeProfile = null;
         if (configuration.profile()) {

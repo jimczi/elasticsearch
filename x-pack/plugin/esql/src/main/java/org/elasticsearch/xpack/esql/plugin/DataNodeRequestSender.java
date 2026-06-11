@@ -382,9 +382,22 @@ abstract class DataNodeRequestSender {
         }
     }
 
+    /**
+     * Whether {@code e} is a shard cancelled by the search resource manager to free its slot for a higher-priority lane
+     * (the cancel reason — carried in the {@link TaskCancelledException} message across the wire — marks it "preempted").
+     * Such a cancellation is <em>retryable</em>: the work was not run to completion, so re-running it on an available copy
+     * lets a preempted (e.g. unboosted) query still finish, throttled, rather than fail outright.
+     */
+    private static boolean isPreemptionFailure(Exception e) {
+        var tce = (TaskCancelledException) ExceptionsHelper.unwrap(e, TaskCancelledException.class);
+        return tce != null && tce.getMessage() != null && tce.getMessage().contains("preempted");
+    }
+
     private void trackShardLevelFailure(ShardId shardId, boolean fatal, Exception originalEx) {
         final Exception e = unwrapFailure(shardId, originalEx);
-        final boolean isTaskCanceledException = ExceptionsHelper.unwrap(e, TaskCancelledException.class) != null;
+        // A preemption cancellation is retryable, not terminal — don't let it mark the shard fatal (unless data was sent).
+        final boolean isTaskCanceledException = ExceptionsHelper.unwrap(e, TaskCancelledException.class) != null
+            && isPreemptionFailure(e) == false;
         final boolean isCircuitBreakerException = ExceptionsHelper.unwrap(e, CircuitBreakingException.class) != null;
         shardFailures.compute(shardId, (k, current) -> {
             boolean mergedFatal = fatal || isTaskCanceledException || isCircuitBreakerException;
@@ -429,7 +442,9 @@ abstract class DataNodeRequestSender {
     private record ShardFailure(boolean fatal, Exception failure) {}
 
     private static boolean isRetryableFailure(ShardFailure failure) {
-        return failure != null && failure.fatal == false && failure.failure instanceof NoShardAvailableActionException;
+        return failure != null
+            && failure.fatal == false
+            && (failure.failure instanceof NoShardAvailableActionException || isPreemptionFailure(failure.failure));
     }
 
     /**
