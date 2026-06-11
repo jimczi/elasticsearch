@@ -160,6 +160,7 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
                 IndexSettings.INDEX_TRANSLOG_RETENTION_AGE_SETTING,
                 IndexSettings.INDEX_TRANSLOG_RETENTION_SIZE_SETTING,
                 IndexSettings.INDEX_SEARCH_IDLE_AFTER,
+                IndexSettings.INDEX_SEARCH_BOOST_TIER_SETTING,
                 IndexSettings.DENSE_VECTOR_EXPERIMENTAL_FEATURES_SETTING,
                 IndexSettings.DYNAMIC_STRINGS_AUTO_TEXT,
                 DenseVectorFieldMapper.HNSW_FILTER_HEURISTIC,

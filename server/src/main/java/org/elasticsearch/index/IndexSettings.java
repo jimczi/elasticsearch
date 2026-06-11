@@ -73,6 +73,22 @@ import static org.elasticsearch.index.mapper.MapperService.INDEX_MAPPING_TOTAL_F
  * be called for each settings update.
  */
 public final class IndexSettings {
+    /**
+     * Search admission "tier" for this index — its lane in the search resource manager. {@code boosted} routes the
+     * index's searches to the high-priority lane, {@code unboosted} to the low-priority lane; empty leaves them in the
+     * default (normal) lane. Only consulted when {@code search.admission_control.lane_strategy: tier} is configured.
+     */
+    public static final Setting<String> INDEX_SEARCH_BOOST_TIER_SETTING = Setting.simpleString(
+        "index.search.boost_tier",
+        "",
+        value -> {
+            if (value.isEmpty() == false && value.equals("boosted") == false && value.equals("unboosted") == false) {
+                throw new IllegalArgumentException("[index.search.boost_tier] must be one of [boosted, unboosted] or empty, but was [" + value + "]");
+            }
+        },
+        Property.Dynamic,
+        Property.IndexScope
+    );
     public static final Setting<List<String>> DEFAULT_FIELD_SETTING = Setting.stringListSetting(
         "index.query.default_field",
         Collections.singletonList("*"),

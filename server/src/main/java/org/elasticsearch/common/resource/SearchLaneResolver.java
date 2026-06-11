@@ -21,8 +21,11 @@ package org.elasticsearch.common.resource;
  */
 public interface SearchLaneResolver {
 
-    /** A self-describing unit of admitted search work. Extend with new fields as strategies need them. */
-    record Work(boolean systemIndex) {}
+    /**
+     * A self-describing unit of admitted search work. {@code tier} is the index's search "power" tier
+     * ({@code "boosted"} / {@code "unboosted"} / empty). Extend with new fields as strategies need them.
+     */
+    record Work(boolean systemIndex, String tier) {}
 
     /** The lane this work should be admitted into. */
     ResourcePriority resolve(Work work);
@@ -32,4 +35,20 @@ public interface SearchLaneResolver {
 
     /** Isolates system-index searches into the dedicated {@link ResourcePriority#SYSTEM} lane; everything else NORMAL. */
     SearchLaneResolver SYSTEM_AWARE = work -> work.systemIndex() ? ResourcePriority.SYSTEM : ResourcePriority.NORMAL;
+
+    /**
+     * Tiered policy: system indices to {@link ResourcePriority#SYSTEM}, {@code boosted} indices to the high-priority
+     * {@link ResourcePriority#HIGH} lane, {@code unboosted} indices to {@link ResourcePriority#LOW}, everything else to
+     * {@link ResourcePriority#NORMAL}. This is what makes per-lane floors, borrowing, and reclaim observable.
+     */
+    SearchLaneResolver TIER = work -> {
+        if (work.systemIndex()) {
+            return ResourcePriority.SYSTEM;
+        }
+        return switch (work.tier()) {
+            case "boosted" -> ResourcePriority.HIGH;
+            case "unboosted" -> ResourcePriority.LOW;
+            default -> ResourcePriority.NORMAL;
+        };
+    };
 }

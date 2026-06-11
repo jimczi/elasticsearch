@@ -87,6 +87,8 @@ public class SearchAdmissionService implements NodeAdmissionClient {
         // run under the lease's per-query memory budget.
         searchService.setAdmissionLeaseCoverage(this::isCovered);
         searchService.setAdmissionLeaseBreaker(this::breakerFor);
+        // Give the pool a way to preempt a borrowing shard (cancel its task to free a slot for a higher-priority lane).
+        searchService.setTaskCanceller((task, reason) -> transportService.getTaskManager().cancel(task, reason, () -> {}));
     }
 
     /**

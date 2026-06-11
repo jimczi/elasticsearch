@@ -178,6 +178,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Predicate;
@@ -475,9 +476,9 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         "search.admission_control.lane_strategy",
         "none",
         value -> {
-            if (value.equals("none") == false && value.equals("system") == false) {
+            if (value.equals("none") == false && value.equals("system") == false && value.equals("tier") == false) {
                 throw new IllegalArgumentException(
-                    "[search.admission_control.lane_strategy] must be one of [none, system] but was [" + value + "]"
+                    "[search.admission_control.lane_strategy] must be one of [none, system, tier] but was [" + value + "]"
                 );
             }
         },
@@ -552,6 +553,9 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     // Returns the per-query memory breaker of the distributed admission lease covering a shard's parent task, or null.
     // When present, the shard runs its work under the budget the coordinator reserved on this node for the whole query.
     private volatile Function<TaskId, CircuitBreaker> admissionLeaseBreaker = parentTaskId -> null;
+    // Cancels a running shard task to free its admission slot for a higher-priority lane (preemptive reclaim). Wired by
+    // SearchAdmissionService (which holds the TaskManager); a no-op until then, so reclaim simply never fires.
+    private volatile BiConsumer<CancellableTask, String> taskCanceller = (task, reason) -> {};
     private volatile Executor searchExecutor;
     private volatile boolean enableQueryPhaseParallelCollection;
     private volatile boolean enableFetchPhaseChunked;
@@ -702,6 +706,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         this.laneResolver = switch (SEARCH_ADMISSION_CONTROL_LANE_STRATEGY.get(settings)) {
             case "none" -> SearchLaneResolver.NORMAL_ONLY;
             case "system" -> SearchLaneResolver.SYSTEM_AWARE;
+            case "tier" -> SearchLaneResolver.TIER;
             default -> throw new IllegalArgumentException("unexpected value for [" + SEARCH_ADMISSION_CONTROL_LANE_STRATEGY.getKey() + "]");
         };
 
@@ -964,7 +969,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         final IndexShard shard = getShard(request);
         rewriteAndFetchShardRequest(shard, request, task, listener.delegateFailure((l, rewritten) -> {
             // fork the execution in the search thread pool
-            ensureAfterSeqNoRefreshed(shard, request, () -> executeDfsPhase(request, task), l, task.getParentTaskId());
+            ensureAfterSeqNoRefreshed(shard, request, () -> executeDfsPhase(request, task), l, task);
         }));
     }
 
@@ -1073,7 +1078,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
             return executeQueryPhase(request, task, readerContext);
         },
             ActionListener.wrap(result -> completionListenerRef.get().onResponse(result), e -> completionListenerRef.get().onFailure(e)),
-            task.getParentTaskId()
+            task
         );
     }
 
@@ -1082,13 +1087,13 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         ShardSearchRequest request,
         CheckedSupplier<T, Exception> executable,
         ActionListener<T> listener,
-        TaskId parentTaskId
+        CancellableTask task
     ) {
         final long waitForCheckpoint = request.waitForCheckpoint();
         final Executor executor = getExecutor(shard);
         try {
             if (waitForCheckpoint <= UNASSIGNED_SEQ_NO) {
-                runAsync(executor, executable, listener, parentTaskId, laneFor(shard));
+                runAsync(executor, executable, listener, task, laneFor(shard));
                 // we successfully submitted the async task to the search pool so let's prewarm the shard
                 if (isExecutorQueuedBeyondPrewarmingFactor(executor, prewarmingMaxPoolFactorThreshold) == false) {
                     onlinePrewarmingService.prewarm(shard);
@@ -1168,7 +1173,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                         if (timeoutTask != null) {
                             timeoutTask.cancel();
                         }
-                        runAsync(executor, executable, listener, parentTaskId, laneFor(shard));
+                        runAsync(executor, executable, listener, task, laneFor(shard));
                         // we successfully submitted the async task to the search pool so let's prewarm the shard
                         if (isExecutorQueuedBeyondPrewarmingFactor(executor, prewarmingMaxPoolFactorThreshold) == false) {
                             onlinePrewarmingService.prewarm(shard);
@@ -1216,23 +1221,39 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
 
     /** The admission lane this shard's search runs in, per the configured {@link SearchLaneResolver} policy. */
     private ResourcePriority laneFor(IndexShard shard) {
-        return laneResolver.resolve(new SearchLaneResolver.Work(shard.indexSettings().getIndexMetadata().isSystem()));
+        return laneResolver.resolve(
+            new SearchLaneResolver.Work(
+                shard.indexSettings().getIndexMetadata().isSystem(),
+                shard.indexSettings().getValue(IndexSettings.INDEX_SEARCH_BOOST_TIER_SETTING)
+            )
+        );
     }
 
     private <T extends RefCounted> void runAsync(
         Executor executor,
         CheckedSupplier<T, Exception> executable,
         ActionListener<T> listener,
-        TaskId parentTaskId,
+        CancellableTask task,
         ResourcePriority lane
     ) {
         final ResourcePool admissionPool = searchAdmissionPool;
+        final TaskId parentTaskId = task == null ? null : task.getParentTaskId();
         // Skip the node-local acquire when the coordinator already reserved this node's capacity for the whole query
         // (distributed admission): the slot is accounted by the coordinator lease, so re-acquiring would double count.
         if (admissionPool == null || (parentTaskId != null && parentTaskId.isSet() && admissionLeaseCoverage.test(parentTaskId))) {
             executor.execute(ActionRunnable.supplyAndDecRef(listener, executable));
             return;
         }
+        // Preemptive reclaim: if a higher-priority lane is below its floor and cannot be served otherwise, the pool asks
+        // this reservation to give its slot back. We interrupt only THIS shard's in-flight execution — by cancelling its
+        // (per-shard) task so the running search stops at its next cancellation check — never the whole query. Reclaim
+        // only ever touches capacity a lane borrowed *above* its floor, so a lower-priority (e.g. unboosted) lane keeps
+        // its floor and still makes progress, just throttled.
+        final AtomicBoolean reclaimed = new AtomicBoolean();
+        final Runnable onReclaim = task == null ? null : () -> {
+            reclaimed.set(true);
+            taskCanceller.accept(task, "search admission: preempted to free a slot for a higher-priority lane");
+        };
         // Admission control enabled: reserve a slot before the shard task runs and release it when the task settles.
         // The reservation may be granted inline, after a short wait in the bounded queue, or rejected (queue full or
         // timed out) — in which case the listener is failed with a ResourceRejectedException, surfaced to the
@@ -1242,9 +1263,20 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
             searchAdmissionQueryMemoryBytes,
             lane,
             searchAdmissionTimeout,
+            onReclaim,
             listener.delegateFailureAndWrap((delegate, reservation) -> {
+                // If this shard was preempted, surface a *retryable* rejection (like a queue-full admission) rather than a
+                // terminal cancellation, so the coordinator re-runs the shard and the query still finishes — just later,
+                // within the lane's floor — instead of failing outright.
+                final ActionListener<T> preemptionAware = delegate.delegateResponse((l, e) -> {
+                    if (reclaimed.get() && ExceptionsHelper.unwrap(e, TaskCancelledException.class) != null) {
+                        l.onFailure(new ResourceRejectedException("search shard preempted to free a slot for a higher-priority lane"));
+                    } else {
+                        l.onFailure(e);
+                    }
+                });
                 // Release the slot exactly once when the shard task completes, fails, or is rejected by the executor.
-                final ActionListener<T> releasingListener = ActionListener.runAfter(delegate, reservation::close);
+                final ActionListener<T> releasingListener = ActionListener.runAfter(preemptionAware, reservation::close);
                 try {
                     executor.execute(ActionRunnable.supplyAndDecRef(releasingListener, executable));
                 } catch (Exception e) {
@@ -1355,7 +1387,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                 // we handle the failure in the failure listener below
                 throw e;
             }
-        }, wrapFailureListener(listener, readerContext, markAsUsed), task.getParentTaskId(), laneFor(readerContext.indexShard()));
+        }, wrapFailureListener(listener, readerContext, markAsUsed), task, laneFor(readerContext.indexShard()));
     }
 
     private QueryFetchSearchResult executeFetchPhase(ReaderContext reader, SearchContext context, long afterQueryTime) {
@@ -1570,7 +1602,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                 // we handle the failure in the failure listener below
                 throw e;
             }
-        }, wrapFailureListener(listener, readerContext, markAsUsed), task.getParentTaskId(), laneFor(readerContext.indexShard()));
+        }, wrapFailureListener(listener, readerContext, markAsUsed), task, laneFor(readerContext.indexShard()));
         // we successfully submitted the async task to the search pool so let's prewarm the shard
         if (isExecutorQueuedBeyondPrewarmingFactor(executor, prewarmingMaxPoolFactorThreshold) == false) {
             onlinePrewarmingService.prewarm(readerContext.indexShard());
@@ -1640,7 +1672,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                     // we handle the failure in the failure listener below
                     throw e;
                 }
-            }, wrapFailureListener(l, readerContext, markAsUsed), task.getParentTaskId(), laneFor(readerContext.indexShard()));
+            }, wrapFailureListener(l, readerContext, markAsUsed), task, laneFor(readerContext.indexShard()));
             // we successfully submitted the async task to the search pool so let's prewarm the shard
             if (isExecutorQueuedBeyondPrewarmingFactor(executor, prewarmingMaxPoolFactorThreshold) == false) {
                 onlinePrewarmingService.prewarm(readerContext.indexShard());
@@ -1709,7 +1741,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                 readerContext,
                 markAsUsed
             ),
-            task.getParentTaskId(),
+            task,
             laneFor(readerContext.indexShard())
         );
     }
@@ -2628,6 +2660,14 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
      */
     public void setAdmissionLeaseBreaker(Function<TaskId, CircuitBreaker> admissionLeaseBreaker) {
         this.admissionLeaseBreaker = admissionLeaseBreaker;
+    }
+
+    /**
+     * Installs the hook used to preempt a borrowing shard — cancel its task so it releases its admission slot to a
+     * higher-priority lane. Wired by {@code SearchAdmissionService} (which holds the {@code TaskManager}).
+     */
+    public void setTaskCanceller(BiConsumer<CancellableTask, String> taskCanceller) {
+        this.taskCanceller = taskCanceller;
     }
 
     /** Whether {@code parentTaskId} is covered by a distributed admission lease on this node (so work may skip the local acquire). */
