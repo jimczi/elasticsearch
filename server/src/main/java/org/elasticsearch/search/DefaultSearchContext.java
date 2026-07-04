@@ -36,6 +36,7 @@ import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.SliceIndexing;
 import org.elasticsearch.index.cache.bitset.BitsetFilterCache;
 import org.elasticsearch.index.engine.Engine;
+import org.elasticsearch.index.engine.SlicePruningQuery;
 import org.elasticsearch.index.fielddata.FieldDataContext;
 import org.elasticsearch.index.fielddata.IndexFieldData;
 import org.elasticsearch.index.fielddata.IndexNumericFieldData;
@@ -93,6 +94,7 @@ import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -533,6 +535,13 @@ final class DefaultSearchContext extends SearchContext {
             .toList();
         if (sliceTerms.isEmpty()) {
             return new MatchNoDocsQuery("empty [_slice] routing");
+        }
+        // On a slice-partitioned index every segment holds exactly one tenant (stamped at write time), so
+        // "restrict to a slice" is segment selection: prune non-matching segments rather than post-filtering
+        // documents on _routing over every segment. This never traverses (or, in stateless, fetches) other
+        // tenants' segments. Falls back to the _routing filter for non-slice-partitioned indices.
+        if (SliceIndexing.SLICE_FEATURE_FLAG.isEnabled() && indexService.getIndexSettings().isSliceEnabled()) {
+            return new SlicePruningQuery(new HashSet<>(sliceTerms));
         }
         final QueryBuilder sliceFilterQuery = sliceTerms.size() == 1
             ? new TermQueryBuilder(RoutingFieldMapper.NAME, sliceTerms.get(0))
