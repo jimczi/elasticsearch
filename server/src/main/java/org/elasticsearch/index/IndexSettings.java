@@ -740,6 +740,33 @@ public final class IndexSettings {
     }, Property.IndexScope, Property.Final, Property.ServerlessPublic);
 
     /**
+     * Bounds the number of slices (tenants) that may buffer documents at once. When exceeded, Lucene flushes
+     * the least-recently-used slice's buffer to a segment, keeping the in-memory working set bounded even with
+     * very many tenants. 0 (the default) leaves buffering bounded only by the shard indexing buffer. Only
+     * meaningful for slice-enabled indices.
+     */
+    public static final Setting<Integer> MAX_ACTIVE_SLICES = Setting.intSetting(
+        "index.slice.max_active_slices",
+        0,
+        0,
+        Property.IndexScope,
+        Property.ServerlessPublic
+    );
+
+    /**
+     * How long a slice may be write-idle before its buffer is flushed to a segment, so an inactive tenant stops
+     * consuming indexing memory (and, in stateless, lands in object storage). 0 disables time-based idle
+     * flushing. Only meaningful for slice-enabled indices.
+     */
+    public static final Setting<TimeValue> SLICE_IDLE_FLUSH_INTERVAL = Setting.timeSetting(
+        "index.slice.idle_flush_interval",
+        TimeValue.timeValueSeconds(30),
+        TimeValue.ZERO,
+        Property.IndexScope,
+        Property.ServerlessPublic
+    );
+
+    /**
     * The {@link IndexMode "mode"} of the index.
     */
     public static final Setting<IndexMode> MODE = Setting.enumSetting(
@@ -1301,6 +1328,8 @@ public final class IndexSettings {
     private final boolean logsdbSortOnHostName;
     private final boolean logsdbAddHostNameField;
     private final boolean sliceEnabled;
+    private final int maxActiveSlices;
+    private final TimeValue sliceIdleFlushInterval;
     private volatile long retentionLeaseMillis;
 
     /**
@@ -1446,6 +1475,16 @@ public final class IndexSettings {
         return sliceEnabled;
     }
 
+    /** Max number of slices (tenants) that may buffer documents at once before LRU flush-eviction; 0 = unbounded. */
+    public int getMaxActiveSlices() {
+        return maxActiveSlices;
+    }
+
+    /** How long a slice may be write-idle before its buffer is flushed to a segment; {@link TimeValue#ZERO} disables. */
+    public TimeValue getSliceIdleFlushInterval() {
+        return sliceIdleFlushInterval;
+    }
+
     /**
      * Returns <code>true</code> if the index is in logsdb mode and needs a [host.name] keyword field. The default is <code>false</code>
      */
@@ -1540,6 +1579,8 @@ public final class IndexSettings {
         maxRegexLength = scopedSettings.get(MAX_REGEX_LENGTH_SETTING);
         this.mergePolicyConfig = new MergePolicyConfig(logger, this);
         sliceEnabled = scopedSettings.get(SLICE_ENABLED);
+        maxActiveSlices = scopedSettings.get(MAX_ACTIVE_SLICES);
+        sliceIdleFlushInterval = scopedSettings.get(SLICE_IDLE_FLUSH_INTERVAL);
         this.indexSortConfig = new IndexSortConfig(this);
         searchIdleAfter = scopedSettings.get(INDEX_SEARCH_IDLE_AFTER);
         defaultPipeline = scopedSettings.get(DEFAULT_PIPELINE);

@@ -17,12 +17,14 @@ import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.LiveIndexWriterConfig;
 import org.apache.lucene.index.MergePolicy;
 import org.apache.lucene.index.MergeScheduler;
 import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.index.SlicePartitionedMergePolicy;
 import org.apache.lucene.index.SoftDeletesRetentionMergePolicy;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause;
@@ -81,6 +83,7 @@ import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.IndexVersions;
+import org.elasticsearch.index.SliceIndexing;
 import org.elasticsearch.index.VersionType;
 import org.elasticsearch.index.cache.query.TrivialQueryCachingPolicy;
 import org.elasticsearch.index.codec.TrackingPostingsInMemoryBytesCodec;
@@ -91,6 +94,7 @@ import org.elasticsearch.index.mapper.IdLoader;
 import org.elasticsearch.index.mapper.LuceneDocument;
 import org.elasticsearch.index.mapper.MappingLookup;
 import org.elasticsearch.index.mapper.ParsedDocument;
+import org.elasticsearch.index.mapper.RoutingFieldMapper;
 import org.elasticsearch.index.mapper.SeqNoFieldMapper;
 import org.elasticsearch.index.mapper.SourceFieldMapper;
 import org.elasticsearch.index.mapper.Uid;
@@ -237,6 +241,10 @@ public class InternalEngine extends Engine {
     private volatile String forceMergeUUID;
 
     private final LongSupplier relativeTimeInNanosSupplier;
+    // Time-based flushing of idle slices' buffers (null unless slice-enabled with a positive idle interval).
+    private final SliceBufferManager sliceBufferManager;
+    private final long sliceIdleFlushIntervalNanos;
+    private volatile long lastSliceSweepNanos;
 
     private volatile long lastFlushTimestamp;
 
@@ -264,6 +272,17 @@ public class InternalEngine extends Engine {
         }
         this.relativeTimeInNanosSupplier = config().getRelativeTimeInNanosSupplier();
         this.lastFlushTimestamp = relativeTimeInNanosSupplier.getAsLong(); // default to creation timestamp
+        final var sliceIndexSettings = config().getIndexSettings();
+        if (SliceIndexing.SLICE_FEATURE_FLAG.isEnabled()
+            && sliceIndexSettings.isSliceEnabled()
+            && sliceIndexSettings.getSliceIdleFlushInterval().nanos() > 0) {
+            this.sliceIdleFlushIntervalNanos = sliceIndexSettings.getSliceIdleFlushInterval().nanos();
+            this.sliceBufferManager = new SliceBufferManager(sliceIdleFlushIntervalNanos);
+        } else {
+            this.sliceIdleFlushIntervalNanos = 0L;
+            this.sliceBufferManager = null;
+        }
+        this.lastSliceSweepNanos = relativeTimeInNanosSupplier.getAsLong();
         this.liveVersionMapArchive = createLiveVersionMapArchive();
         this.versionMap = new LiveVersionMap(liveVersionMapArchive);
         final TranslogDeletionPolicy translogDeletionPolicy = new TranslogDeletionPolicy();
@@ -1922,6 +1941,7 @@ public class InternalEngine extends Engine {
                 assert assertDocDoesNotExist(index, canOptimizeAddDocument(index) == false);
                 addDocs(index.docs(), indexWriter);
             }
+            recordSliceActivityAndMaybeFlushIdle(index.routing());
             return new IndexResult(plan.versionForIndexing, index.primaryTerm(), index.seqNo(), plan.currentNotFoundOrDeleted, index.id());
         } catch (Exception ex) {
             if (ex instanceof AlreadyClosedException == false
@@ -3353,6 +3373,10 @@ public class InternalEngine extends Engine {
             // to enable it.
             mergePolicy = new ShuffleForcedMergePolicy(mergePolicy);
         }
+        if (SliceIndexing.SLICE_FEATURE_FLAG.isEnabled() && engineConfig.getIndexSettings().isSliceEnabled()) {
+            // Keep merges within a single slice (tenant) so per-slice segments stay physically isolated.
+            mergePolicy = new SlicePartitionedMergePolicy(mergePolicy);
+        }
         iwc.setMergePolicy(mergePolicy);
         // TODO: Introduce an index setting for setMaxFullFlushMergeWaitMillis
         iwc.setMaxFullFlushMergeWaitMillis(-1);
@@ -3385,7 +3409,53 @@ public class InternalEngine extends Engine {
         if (engineConfig.getLeafSorter() != null) {
             iwc.setLeafSorter(engineConfig.getLeafSorter());
         }
+        if (SliceIndexing.SLICE_FEATURE_FLAG.isEnabled() && engineConfig.getIndexSettings().isSliceEnabled()) {
+            // Route each document to a slice-sticky indexing buffer so each flush yields one segment per slice.
+            iwc.setDocumentPartitioner(InternalEngine::slicePartitionKey);
+            // Bound the in-memory working set: once too many slices buffer, Lucene flushes the LRU slice.
+            iwc.setMaxActivePartitions(engineConfig.getIndexSettings().getMaxActiveSlices());
+        }
         return iwc;
+    }
+
+    /**
+     * Records that {@code slice} just received a write and, throttled to at most once per idle interval,
+     * flushes the buffers of slices that have gone write-idle — so an inactive tenant stops holding indexing
+     * memory (and, in stateless, is pushed out to object storage). No-op unless slice idle-flushing is on.
+     */
+    private void recordSliceActivityAndMaybeFlushIdle(String slice) throws IOException {
+        if (sliceBufferManager == null) {
+            return;
+        }
+        final long now = relativeTimeInNanosSupplier.getAsLong();
+        sliceBufferManager.onWrite(slice, now);
+        if (now - lastSliceSweepNanos >= sliceIdleFlushIntervalNanos) {
+            lastSliceSweepNanos = now;
+            for (Object idleSlice : sliceBufferManager.drainIdle(now)) {
+                indexWriter.flushSlice(idleSlice);
+            }
+        }
+    }
+
+    /**
+     * Extracts the slice (tenant) key from a document for {@code IndexWriterConfig#setDocumentPartitioner}:
+     * the {@code _routing} value (which {@code _slice} maps to), read from its stored string or its
+     * sorted-doc-values bytes. Returns {@code null} when absent (routed to the default buffer).
+     */
+    private static Object slicePartitionKey(Iterable<? extends IndexableField> doc) {
+        for (IndexableField field : doc) {
+            if (RoutingFieldMapper.NAME.equals(field.name())) {
+                final String stringValue = field.stringValue();
+                if (stringValue != null) {
+                    return stringValue;
+                }
+                final BytesRef binaryValue = field.binaryValue();
+                if (binaryValue != null) {
+                    return binaryValue.utf8ToString();
+                }
+            }
+        }
+        return null;
     }
 
     /** A listener that warms the segments if needed when acquiring a new reader */
