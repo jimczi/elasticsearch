@@ -9,7 +9,7 @@
 
 package org.elasticsearch.index.engine;
 
-import org.apache.lucene.index.CompositeReader;
+import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.DocumentPartitioner;
 import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.PartitionReaders;
@@ -34,7 +34,7 @@ public final class SliceScopedReader {
     private SliceScopedReader() {}
 
     /** Opens a reader over only {@code slice}'s segments in {@code commit}. */
-    public static CompositeReader open(Directory directory, IndexCommit commit, String slice) throws IOException {
+    public static DirectoryReader open(Directory directory, IndexCommit commit, String slice) throws IOException {
         return PartitionReaders.open(
             directory,
             commit,
@@ -48,7 +48,7 @@ public final class SliceScopedReader {
      * loaded or visible. This is O(#segments) (a segment is fully in or out by its slice attribute) and needs
      * no per-document DLS bitset, so it scales to very many tenants.
      */
-    public static CompositeReader openAllowed(Directory directory, IndexCommit commit, Set<String> allowedSlices) throws IOException {
+    public static DirectoryReader openAllowed(Directory directory, IndexCommit commit, Set<String> allowedSlices) throws IOException {
         return PartitionReaders.open(
             directory,
             commit,

@@ -9,7 +9,7 @@
 
 package org.elasticsearch.index.engine;
 
-import org.apache.lucene.index.CompositeReader;
+import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.store.Directory;
 import org.elasticsearch.core.IOUtils;
@@ -97,7 +97,7 @@ public final class SliceReaderPool implements Closeable {
         if (open.size() >= maxActive) {
             evictLruIdle();
         }
-        final CompositeReader reader = SliceScopedReader.open(directory, commit, slice);
+        final DirectoryReader reader = SliceScopedReader.open(directory, commit, slice);
         h = new Holder(slice, reader, commit);
         h.touch(++accessClock, nowNanos);
         h.refCount = 1;
@@ -125,7 +125,7 @@ public final class SliceReaderPool implements Closeable {
 
     @Override
     public synchronized void close() throws IOException {
-        final List<CompositeReader> readers = new ArrayList<>(open.size() + retiring.size());
+        final List<DirectoryReader> readers = new ArrayList<>(open.size() + retiring.size());
         for (Holder h : open.values()) {
             readers.add(h.reader);
         }
@@ -176,7 +176,7 @@ public final class SliceReaderPool implements Closeable {
             this.holder = holder;
         }
 
-        public CompositeReader reader() {
+        public DirectoryReader reader() {
             return holder.reader;
         }
 
@@ -193,13 +193,13 @@ public final class SliceReaderPool implements Closeable {
 
     private static final class Holder {
         private final String slice;
-        private final CompositeReader reader;
+        private final DirectoryReader reader;
         private final IndexCommit commit;
         private int refCount;
         private long lastAccessClock;
         private long lastAccessNanos;
 
-        Holder(String slice, CompositeReader reader, IndexCommit commit) {
+        Holder(String slice, DirectoryReader reader, IndexCommit commit) {
             this.slice = slice;
             this.reader = reader;
             this.commit = commit;

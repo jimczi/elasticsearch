@@ -33,6 +33,8 @@ import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.elasticsearch.common.lucene.Lucene;
+import org.elasticsearch.common.lucene.index.ElasticsearchDirectoryReader;
+import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.test.ESTestCase;
 
 import java.io.IOException;
@@ -199,6 +201,57 @@ public class SliceScopedReaderTests extends ESTestCase {
                 assertTrue("unauthorized tenant data was loaded: " + opened, opened.endsWith(".si"));
             }
         }
+    }
+
+    public void testSliceReaderIsWrappableByElasticsearchDirectoryReader() throws Exception {
+        try (Directory dir = new ByteBuffersDirectory()) {
+            final IndexWriterConfig iwc = new IndexWriterConfig(new StandardAnalyzer());
+            iwc.setDocumentPartitioner(doc -> {
+                for (IndexableField f : doc) {
+                    if (f.name().equals("slice")) {
+                        return f.stringValue();
+                    }
+                }
+                return null;
+            });
+            iwc.setMergePolicy(new SlicePartitionedMergePolicy(new TieredMergePolicy()));
+            try (IndexWriter w = new IndexWriter(dir, iwc)) {
+                for (int i = 0; i < 4; i++) {
+                    w.addDocument(sliceDoc("tenantA", "a" + i));
+                }
+                for (int i = 0; i < 6; i++) {
+                    w.addDocument(sliceDoc("tenantB", "b" + i));
+                }
+                w.commit();
+            }
+            final List<IndexCommit> commits = DirectoryReader.listCommits(dir);
+            final IndexCommit commit = commits.get(commits.size() - 1);
+
+            // The point of making it a DirectoryReader: ES can wrap a per-tenant reader for a per-shard searcher.
+            final DirectoryReader sliceReader = SliceScopedReader.open(dir, commit, "tenantB");
+            final ShardId shardId = new ShardId("idx", "uuid", 0);
+            final ElasticsearchDirectoryReader wrapped = ElasticsearchDirectoryReader.wrap(sliceReader, shardId);
+            try {
+                assertNotNull(
+                    "must be recognized as an ElasticsearchDirectoryReader",
+                    ElasticsearchDirectoryReader.getElasticsearchDirectoryReader(wrapped)
+                );
+                assertEquals(shardId, ElasticsearchDirectoryReader.getElasticsearchDirectoryReader(wrapped).shardId());
+                assertEquals("wrapped reader sees only tenantB", 6, wrapped.numDocs());
+                assertNotNull("DirectoryReader contract: core cache key", sliceReader.getReaderCacheHelper());
+                assertNotNull("DirectoryReader contract: index commit", sliceReader.getIndexCommit());
+                assertTrue("DirectoryReader contract: a version", sliceReader.getVersion() > 0);
+            } finally {
+                wrapped.close(); // closes the wrapped slice reader
+            }
+        }
+    }
+
+    private static Document sliceDoc(String slice, String id) {
+        final Document d = new Document();
+        d.add(new StringField("slice", slice, Field.Store.NO));
+        d.add(new StringField("id", id, Field.Store.NO));
+        return d;
     }
 
     /** Records every {@link #openInput} so we can assert an inactive slice's files are never loaded. */
