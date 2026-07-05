@@ -11,8 +11,13 @@ package org.elasticsearch.index.engine;
 
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexCommit;
+import org.apache.lucene.search.QueryCache;
+import org.apache.lucene.search.QueryCachingPolicy;
+import org.apache.lucene.search.similarities.Similarity;
 import org.apache.lucene.store.Directory;
+import org.elasticsearch.common.lucene.index.ElasticsearchDirectoryReader;
 import org.elasticsearch.core.IOUtils;
+import org.elasticsearch.index.shard.ShardId;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -103,6 +108,45 @@ public final class SliceReaderPool implements Closeable {
         h.refCount = 1;
         open.put(slice, h);
         return new Ref(h);
+    }
+
+    /**
+     * Acquires a bounded per-tenant reader (as {@link #acquire}) and returns it as an {@link Engine.Searcher} over an
+     * {@link ElasticsearchDirectoryReader}, ready for the shard search path. The returned searcher holds the pool ref
+     * and an extra reader ref for its own lifetime; closing it releases both, leaving the pool to own the reader.
+     */
+    public synchronized Engine.Searcher acquireSearcher(
+        String source,
+        String slice,
+        long nowNanos,
+        ShardId shardId,
+        Similarity similarity,
+        QueryCache queryCache,
+        QueryCachingPolicy queryCachingPolicy
+    ) throws IOException {
+        final Ref ref = acquire(slice, nowNanos);
+        boolean success = false;
+        try {
+            // Extra ref balances the ElasticsearchDirectoryReader's close() below, so closing the searcher does not
+            // close the pool-owned reader — the pool closes it on eviction.
+            ref.reader().incRef();
+            final ElasticsearchDirectoryReader esReader = ElasticsearchDirectoryReader.wrap(ref.reader(), shardId);
+            final Engine.Searcher searcher = new Engine.Searcher(
+                source,
+                esReader,
+                similarity,
+                queryCache,
+                queryCachingPolicy,
+                () -> IOUtils.close(esReader, ref) // esReader.close() decRefs the reader (undo incRef); ref releases the pool acquisition
+            );
+            success = true;
+            return searcher;
+        } finally {
+            if (success == false) {
+                ref.reader().decRef();
+                ref.close();
+            }
+        }
     }
 
     /** Closes idle (ref-count 0) readers not accessed within {@code idleNanos}. */
