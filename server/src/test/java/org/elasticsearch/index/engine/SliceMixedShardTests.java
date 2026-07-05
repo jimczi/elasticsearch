@@ -13,6 +13,8 @@ import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.index.shard.IndexShard;
+import org.elasticsearch.indices.IndicesService;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.test.ESSingleNodeTestCase;
 
@@ -43,6 +45,36 @@ public class SliceMixedShardTests extends ESSingleNodeTestCase {
 
     private static SearchRequest matchAll(String index) {
         return new SearchRequest(index).source(new SearchSourceBuilder().query(QueryBuilders.matchAllQuery()));
+    }
+
+    /**
+     * Diagnostic: does the bounded pool's {@code acquireSliceSearcher} (which opens from the last COMMIT) see data
+     * made visible by an NRT {@code refresh} but not yet flushed? On stateful this is expected to LAG (refresh != commit),
+     * which is why the general search path must not naively use the commit-based pool.
+     */
+    public void testAcquireSliceSearcherVsNrtRefresh() throws Exception {
+        createIndex(
+            "slicediag",
+            Settings.builder().put("index.number_of_shards", 1).put("index.number_of_replicas", 0).put("index.slice.enabled", true).build()
+        );
+        for (int i = 0; i < 3; i++) {
+            indexSlice("slicediag", "tenantA", "a" + i);
+        }
+        client().admin().indices().prepareRefresh("slicediag").get(); // NRT refresh, no flush
+
+        final IndexShard shard = getInstanceFromNode(IndicesService.class).indexServiceSafe(resolveIndex("slicediag")).getShard(0);
+        final int commitBased;
+        try (var searcher = shard.acquireSliceSearcher("diag", "tenantA")) {
+            commitBased = searcher.getIndexReader().numDocs();
+        }
+        // A normal (NRT) search sees all 3.
+        assertCount(matchAll("slicediag").searchSlice("tenantA"), 3);
+        // Record what the commit-based pool sees; a flush should reconcile it.
+        logger.info("SLICE POOL NRT-DIAG: commit-based pool saw {} of 3 refreshed docs before flush", commitBased);
+        client().admin().indices().prepareFlush("slicediag").get();
+        try (var searcher = shard.acquireSliceSearcher("diag", "tenantA")) {
+            assertEquals("after flush the commit-based pool must see all docs", 3, searcher.getIndexReader().numDocs());
+        }
     }
 
     public void testSlicedAndNonSlicedIndicesCoexistOnOneNode() throws Exception {
