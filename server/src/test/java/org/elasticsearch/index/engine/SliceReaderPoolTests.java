@@ -270,6 +270,36 @@ public class SliceReaderPoolTests extends ESTestCase {
         }
     }
 
+    public void testCommitPinsReleasedWhenLastReaderDrains() throws Exception {
+        try (Directory dir = new ByteBuffersDirectory()) {
+            try (IndexWriter w = new IndexWriter(dir, config())) {
+                w.addDocument(doc("tenantA", "a0"));
+                w.commit();
+            }
+            final IndexCommit c1 = commitOf(dir);
+            final java.util.concurrent.atomic.AtomicBoolean pin1 = new java.util.concurrent.atomic.AtomicBoolean();
+            final java.util.concurrent.atomic.AtomicBoolean pin2 = new java.util.concurrent.atomic.AtomicBoolean();
+
+            try (SliceReaderPool pool = new SliceReaderPool(dir, c1, () -> pin1.set(true), 4)) {
+                final var r1 = pool.acquire("tenantA", 1); // reader on c1
+
+                try (IndexWriter w2 = new IndexWriter(dir, config())) {
+                    w2.addDocument(doc("tenantA", "a1"));
+                    w2.commit();
+                }
+                pool.refresh(commitOf(dir), () -> pin2.set(true));
+
+                // c1's reader is retired but still in use -> c1's pin must stay held (files must not be deletable).
+                assertFalse("c1 pinned while its reader is in use", pin1.get());
+                r1.close();
+                assertTrue("c1 pin released when its last reader drains", pin1.get());
+                assertFalse("c2 (current) still pinned", pin2.get());
+            }
+            // Closing the pool releases the current commit's pin.
+            assertTrue("c2 pin released on pool close", pin2.get());
+        }
+    }
+
     private static void assertOnlySlice(CompositeReader reader, String slice) throws Exception {
         for (var leaf : reader.leaves()) {
             final String segSlice = Lucene.segmentReader(leaf.reader()).getSegmentInfo().info.getAttribute("lucene.partition.key");

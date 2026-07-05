@@ -17,6 +17,7 @@ import org.apache.lucene.search.similarities.Similarity;
 import org.apache.lucene.store.Directory;
 import org.elasticsearch.common.lucene.index.ElasticsearchDirectoryReader;
 import org.elasticsearch.core.IOUtils;
+import org.elasticsearch.core.Releasable;
 import org.elasticsearch.index.shard.ShardId;
 
 import java.io.Closeable;
@@ -24,6 +25,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -59,18 +61,44 @@ public final class SliceReaderPool implements Closeable {
     private final Map<String, Holder> open = new HashMap<>();
     /** Old-commit readers marked for retirement but still in use; closed when their last handle is released. */
     private final List<Holder> retiring = new ArrayList<>();
+    /**
+     * A deletion-policy pin per commit the pool has open readers on, so the engine cannot delete a commit's files
+     * while a (possibly retiring) reader still uses them. Released when a commit's last reader drains. Identity-keyed
+     * because {@link IndexCommit} equality is by generation. Values may be null when no pinning is wired (tests).
+     */
+    private final Map<IndexCommit, Releasable> commitPins = new IdentityHashMap<>();
 
     public SliceReaderPool(Directory directory, IndexCommit commit, int maxActive) {
+        this(directory, commit, null, maxActive);
+    }
+
+    public SliceReaderPool(Directory directory, IndexCommit commit, Releasable commitPin, int maxActive) {
         if (maxActive < 1) {
             throw new IllegalArgumentException("maxActive must be >= 1, got " + maxActive);
         }
         this.directory = directory;
         this.commit = commit;
         this.maxActive = maxActive;
+        commitPins.put(commit, commitPin);
     }
 
-    /** Advances the commit served by the pool. Readers on the old commit are closed if idle, else retired. */
+    /** Advances the commit served by the pool (no new pin). */
     public synchronized void refresh(IndexCommit newCommit) throws IOException {
+        refresh(newCommit, null);
+    }
+
+    /**
+     * Advances the commit served by the pool, pinning {@code newCommit} with {@code newCommitPin} (released when the
+     * pool no longer reads it). Readers on the old commit are closed if idle, else retired; a commit's pin is released
+     * once its last reader drains.
+     */
+    public synchronized void refresh(IndexCommit newCommit, Releasable newCommitPin) throws IOException {
+        if (newCommit != commit) {
+            commitPins.putIfAbsent(newCommit, newCommitPin);
+        } else if (newCommitPin != null) {
+            // Same commit already pinned; drop the redundant new pin.
+            newCommitPin.close();
+        }
         this.commit = newCommit;
         final List<Holder> stale = new ArrayList<>();
         for (Holder h : open.values()) {
@@ -82,9 +110,31 @@ public final class SliceReaderPool implements Closeable {
             open.remove(h.slice);
             if (h.refCount == 0) {
                 h.reader.close();
+                maybeReleasePin(h.commit);
             } else {
                 retiring.add(h); // still in use — close on last release
             }
+        }
+    }
+
+    /** Releases the pin for {@code commit} if it is no longer the current commit and has no remaining open readers. */
+    private void maybeReleasePin(IndexCommit forCommit) {
+        if (forCommit == commit) {
+            return;
+        }
+        for (Holder h : open.values()) {
+            if (h.commit == forCommit) {
+                return;
+            }
+        }
+        for (Holder h : retiring) {
+            if (h.commit == forCommit) {
+                return;
+            }
+        }
+        final Releasable pin = commitPins.remove(forCommit);
+        if (pin != null) {
+            pin.close();
         }
     }
 
@@ -176,9 +226,20 @@ public final class SliceReaderPool implements Closeable {
         for (Holder h : retiring) {
             readers.add(h.reader);
         }
+        final List<Releasable> pins = new ArrayList<>(commitPins.size());
+        for (Releasable pin : commitPins.values()) {
+            if (pin != null) {
+                pins.add(pin);
+            }
+        }
         open.clear();
         retiring.clear();
-        IOUtils.close(readers);
+        commitPins.clear();
+        try {
+            IOUtils.close(readers);
+        } finally {
+            IOUtils.close(pins);
+        }
     }
 
     private void evictLruIdle() throws IOException {
@@ -197,6 +258,7 @@ public final class SliceReaderPool implements Closeable {
     private void closeAndRemove(Holder h) throws IOException {
         open.remove(h.slice);
         h.reader.close();
+        maybeReleasePin(h.commit);
     }
 
     private void release(Holder h) {
@@ -205,6 +267,7 @@ public final class SliceReaderPool implements Closeable {
         if (h.refCount == 0 && retiring.remove(h)) {
             try {
                 h.reader.close();
+                maybeReleasePin(h.commit);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
