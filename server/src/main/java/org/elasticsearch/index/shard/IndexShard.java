@@ -1832,6 +1832,26 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         return engine.acquireSearcher(source, Engine.SearcherScope.EXTERNAL, this::wrapSearcher);
     }
 
+    /**
+     * Acquires a searcher scoped to a single slice (tenant), backed by the engine's bounded per-slice reader pool so
+     * that a shard holding very many tenants never opens all their segments. Only valid on slice-partitioned indices.
+     */
+    public Engine.Searcher acquireSliceSearcher(String source, String slice) throws IOException {
+        readAllowed();
+        markSearcherAccessed();
+        final Engine.Searcher engineSearcher = getEngine().acquireSliceSearcher(source, slice);
+        boolean success = false;
+        try {
+            final Engine.Searcher wrapped = wrapSearcher(engineSearcher);
+            success = true;
+            return wrapped;
+        } finally {
+            if (success == false) {
+                engineSearcher.close();
+            }
+        }
+    }
+
     private void markSearcherAccessed() {
         lastSearcherAccess.lazySet(threadPool.relativeTimeInMillis());
     }

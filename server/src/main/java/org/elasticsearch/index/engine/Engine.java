@@ -1161,6 +1161,15 @@ public abstract class Engine implements Closeable {
         }
     }
 
+    /**
+     * Acquires a searcher scoped to a single slice (tenant): it opens only that slice's segments, bounded by an
+     * active-set pool so a shard holding very many tenants never opens them all. Only valid on slice-partitioned
+     * indices; unsupported by default.
+     */
+    public Searcher acquireSliceSearcher(String source, String slice) throws EngineException, IOException {
+        throw new UnsupportedOperationException("slice searchers are not supported by " + getClass().getSimpleName());
+    }
+
     protected abstract ReferenceManager<ElasticsearchDirectoryReader> getReferenceManager(SearcherScope scope);
 
     /**

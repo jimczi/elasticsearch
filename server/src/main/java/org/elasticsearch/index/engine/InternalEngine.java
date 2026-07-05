@@ -243,6 +243,9 @@ public class InternalEngine extends Engine {
     private final LongSupplier relativeTimeInNanosSupplier;
     // Time-based flushing of idle slices' buffers (null unless slice-enabled with a positive idle interval).
     private final SliceBufferManager sliceBufferManager;
+    // Read-side active-set bound for slice search; created lazily on first slice search (needs a commit).
+    private final Object sliceReaderPoolLock = new Object();
+    private volatile SliceReaderPool sliceReaderPool;
     private final long sliceIdleFlushIntervalNanos;
     private volatile long lastSliceSweepNanos;
 
@@ -3115,6 +3118,52 @@ public class InternalEngine extends Engine {
     }
 
     @Override
+    public Searcher acquireSliceSearcher(String source, String slice) throws EngineException, IOException {
+        final SliceReaderPool pool = sliceReaderPoolForCurrentCommit();
+        return pool.acquireSearcher(
+            source,
+            slice,
+            relativeTimeInNanosSupplier.getAsLong(),
+            config().getShardId(),
+            config().getSimilarity(),
+            config().getQueryCache(),
+            config().getQueryCachingPolicy()
+        );
+    }
+
+    /**
+     * Returns the slice reader pool advanced to the latest commit. Acquires a deletion-policy pin for that commit and
+     * hands it to the pool, which holds it until its last reader on that commit drains (so files are never deleted
+     * under an open reader). A redundant pin (commit unchanged) is dropped by {@link SliceReaderPool#refresh}.
+     */
+    private SliceReaderPool sliceReaderPoolForCurrentCommit() throws IOException {
+        ensureOpen();
+        final IndexCommitRef commitRef = acquireLastIndexCommit(false); // commit + deletion-policy pin, no flush
+        final Releasable pin = () -> IOUtils.closeWhileHandlingException(commitRef);
+        boolean handedOff = false;
+        try {
+            synchronized (sliceReaderPoolLock) {
+                if (sliceReaderPool == null) {
+                    sliceReaderPool = new SliceReaderPool(store.directory(), commitRef.getIndexCommit(), pin, sliceReaderPoolBound());
+                } else {
+                    sliceReaderPool.refresh(commitRef.getIndexCommit(), pin);
+                }
+                handedOff = true;
+                return sliceReaderPool;
+            }
+        } finally {
+            if (handedOff == false) {
+                pin.close();
+            }
+        }
+    }
+
+    private int sliceReaderPoolBound() {
+        final int configured = engineConfig.getIndexSettings().getMaxActiveSlices();
+        return configured > 0 ? configured : 1024;
+    }
+
+    @Override
     public IndexCommitRef acquireLastIndexCommit(final boolean flushFirst) throws EngineException {
         // we have to flush outside of the readlock otherwise we might have a problem upgrading
         // the to a write lock when we fail the engine in this operation
@@ -3270,6 +3319,9 @@ public class InternalEngine extends Engine {
                 : "Either all operations must have been drained or the engine must be currently be failing itself";
             try {
                 this.versionMap.clear();
+                // Release per-slice readers and their commit pins before rolling back the writer (which triggers
+                // deletion), so no files are deleted under an open reader.
+                IOUtils.closeWhileHandlingException(sliceReaderPool);
                 if (internalReaderManager != null) {
                     internalReaderManager.removeListener(versionMap);
                 }
