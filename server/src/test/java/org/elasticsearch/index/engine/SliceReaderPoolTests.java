@@ -300,6 +300,55 @@ public class SliceReaderPoolTests extends ESTestCase {
         }
     }
 
+    public void testSearcherSupplierHoldsStableReaderAcrossAcquires() throws Exception {
+        try (Directory dir = new ByteBuffersDirectory()) {
+            try (IndexWriter w = new IndexWriter(dir, config())) {
+                for (int i = 0; i < 4; i++) {
+                    w.addDocument(doc("tenantA", "a" + i));
+                }
+                for (int i = 0; i < 6; i++) {
+                    w.addDocument(doc("tenantB", "b" + i));
+                }
+                w.commit();
+            }
+            final IndexCommit commit = commitOf(dir);
+            final java.util.concurrent.atomic.AtomicBoolean onClose = new java.util.concurrent.atomic.AtomicBoolean();
+
+            try (SliceReaderPool pool = new SliceReaderPool(dir, commit, 2)) {
+                final Engine.SearcherSupplier supplier = pool.acquireSearcherSupplier(
+                    s -> s,
+                    "tenantB",
+                    1,
+                    new ShardId("idx", "uuid", 0),
+                    new BM25Similarity(),
+                    org.apache.lucene.search.IndexSearcher.getDefaultQueryCache(),
+                    org.apache.lucene.search.IndexSearcher.getDefaultQueryCachingPolicy(),
+                    () -> onClose.set(true)
+                );
+                assertEquals(1, pool.openReaderCount());
+
+                // Two acquisitions (query phase + fetch phase) share ONE underlying reader (openReaderCount stays 1),
+                // both seeing exactly tenantB's docs — the point-in-time stability the search path needs.
+                final Engine.Searcher query = supplier.acquireSearcher("query");
+                final Engine.Searcher fetch = supplier.acquireSearcher("fetch");
+                assertEquals(1, pool.openReaderCount());
+                assertEquals(6, query.getIndexReader().numDocs());
+                assertEquals(6, fetch.count(new org.apache.lucene.search.MatchAllDocsQuery()));
+                query.close();
+                fetch.close();
+
+                // The supplier still holds the reader after its searchers close.
+                assertEquals(1, pool.openReaderCount());
+                assertFalse(onClose.get());
+
+                supplier.close();
+                assertTrue("onClose released together with the supplier", onClose.get());
+                pool.drainIdle(1000, 0);
+                assertEquals(0, pool.openReaderCount());
+            }
+        }
+    }
+
     private static void assertOnlySlice(CompositeReader reader, String slice) throws Exception {
         for (var leaf : reader.leaves()) {
             final String segSlice = Lucene.segmentReader(leaf.reader()).getSegmentInfo().info.getAttribute("lucene.partition.key");

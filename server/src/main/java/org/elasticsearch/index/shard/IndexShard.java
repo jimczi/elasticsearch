@@ -1852,6 +1852,17 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         }
     }
 
+    /**
+     * Acquires a point-in-time {@link Engine.SearcherSupplier} scoped to a single slice (tenant), backed by the
+     * engine's bounded per-slice reader pool. Used by the search layer to build a slice-scoped search context that
+     * only ever opens that tenant's segments. Only valid on slice-partitioned indices.
+     */
+    public Engine.SearcherSupplier acquireSliceSearcherSupplier(String slice) throws IOException {
+        readAllowed();
+        markSearcherAccessed();
+        return getEngine().acquireSliceSearcherSupplier(this::wrapSearcher, slice);
+    }
+
     private void markSearcherAccessed() {
         lastSearcherAccess.lazySet(threadPool.relativeTimeInMillis());
     }

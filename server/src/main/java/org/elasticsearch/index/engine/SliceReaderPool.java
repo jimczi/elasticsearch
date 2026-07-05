@@ -199,6 +199,52 @@ public final class SliceReaderPool implements Closeable {
         }
     }
 
+    /**
+     * Acquires a {@link Engine.SearcherSupplier} that holds one tenant reader <b>stable</b> for its whole lifetime, so
+     * every {@link Engine.SearcherSupplier#acquireSearcher acquireSearcher} (query phase, fetch phase, ...) sees the
+     * same reader — the point-in-time contract the search path requires. The held pool ref keeps the reader alive
+     * (unevictable) until the supplier is closed, at which point the ref and {@code onClose} are released. The
+     * {@code wrapper} (the shard's field-usage / reader wrapper) is applied by the base class on each acquire.
+     */
+    public synchronized Engine.SearcherSupplier acquireSearcherSupplier(
+        java.util.function.Function<Engine.Searcher, Engine.Searcher> wrapper,
+        String slice,
+        long nowNanos,
+        ShardId shardId,
+        Similarity similarity,
+        QueryCache queryCache,
+        QueryCachingPolicy queryCachingPolicy,
+        Releasable onClose
+    ) throws IOException {
+        final Ref ref = acquire(slice, nowNanos); // held for the supplier's lifetime -> reader is stable & unevictable
+        boolean success = false;
+        try {
+            final Engine.SearcherSupplier supplier = new Engine.SearcherSupplier(wrapper) {
+                @Override
+                protected Engine.Searcher acquireSearcherInternal(String source) {
+                    try {
+                        ref.reader().incRef(); // balance the ES wrapper's close(); the pool ref keeps the reader alive
+                        final var esReader = ElasticsearchDirectoryReader.wrap(ref.reader(), shardId);
+                        return new Engine.Searcher(source, esReader, similarity, queryCache, queryCachingPolicy, esReader::close);
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(e);
+                    }
+                }
+
+                @Override
+                protected void doClose() {
+                    IOUtils.closeWhileHandlingException(ref, onClose);
+                }
+            };
+            success = true;
+            return supplier;
+        } finally {
+            if (success == false) {
+                IOUtils.closeWhileHandlingException(ref, onClose);
+            }
+        }
+    }
+
     /** Closes idle (ref-count 0) readers not accessed within {@code idleNanos}. */
     public synchronized void drainIdle(long nowNanos, long idleNanos) throws IOException {
         final List<Holder> toClose = new ArrayList<>();

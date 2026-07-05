@@ -3131,6 +3131,27 @@ public class InternalEngine extends Engine {
         );
     }
 
+    @Override
+    public SearcherSupplier acquireSliceSearcherSupplier(java.util.function.Function<Searcher, Searcher> wrapper, String slice)
+        throws IOException {
+        final SliceReaderPool pool = sliceReaderPoolForCurrentCommit();
+        if (store.tryIncRef() == false) {
+            throw new AlreadyClosedException(shardId + " store is closed", failedEngine.get());
+        }
+        // The pool's supplier releases store::decRef on close (or on its own construction failure), so no store
+        // decRef is needed here on the happy path.
+        return pool.acquireSearcherSupplier(
+            wrapper,
+            slice,
+            relativeTimeInNanosSupplier.getAsLong(),
+            config().getShardId(),
+            config().getSimilarity(),
+            config().getQueryCache(),
+            config().getQueryCachingPolicy(),
+            store::decRef
+        );
+    }
+
     /**
      * Returns the slice reader pool advanced to the latest commit. Acquires a deletion-policy pin for that commit and
      * hands it to the pool, which holds it until its last reader on that commit drains (so files are never deleted

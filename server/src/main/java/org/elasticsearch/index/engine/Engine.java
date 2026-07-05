@@ -1170,6 +1170,15 @@ public abstract class Engine implements Closeable {
         throw new UnsupportedOperationException("slice searchers are not supported by " + getClass().getSimpleName());
     }
 
+    /**
+     * Acquires a {@link SearcherSupplier} scoped to a single slice (tenant), holding one bounded per-slice reader
+     * stable for the supplier's lifetime (so query and fetch phases see the same reader). Only valid on
+     * slice-partitioned indices; unsupported by default.
+     */
+    public SearcherSupplier acquireSliceSearcherSupplier(Function<Searcher, Searcher> wrapper, String slice) throws IOException {
+        throw new UnsupportedOperationException("slice searchers are not supported by " + getClass().getSimpleName());
+    }
+
     protected abstract ReferenceManager<ElasticsearchDirectoryReader> getReferenceManager(SearcherScope scope);
 
     /**
