@@ -349,6 +349,40 @@ public class SliceReaderPoolTests extends ESTestCase {
         }
     }
 
+    public void testHeapChargeAppliedOnOpenAndReleasedOnClose() throws Exception {
+        try (Directory dir = new ByteBuffersDirectory()) {
+            try (IndexWriter w = new IndexWriter(dir, config())) {
+                for (int s = 0; s < 3; s++) {
+                    w.addDocument(doc("tenant" + s, "d" + s));
+                }
+                w.commit();
+            }
+            final IndexCommit commit = commitOf(dir);
+            final java.util.concurrent.atomic.AtomicInteger charged = new java.util.concurrent.atomic.AtomicInteger();
+            // A stand-in for the SearchEngine's budget: each opened reader charges 1 unit, released on close.
+            final java.util.function.Function<org.apache.lucene.index.DirectoryReader, org.elasticsearch.core.Releasable> charger =
+                reader -> {
+                    charged.incrementAndGet();
+                    return charged::decrementAndGet;
+                };
+            try (SliceReaderPool pool = new SliceReaderPool(dir, commit, null, charger, 2)) {
+                final var a = pool.acquire("tenant0", 1);
+                final var b = pool.acquire("tenant1", 2);
+                assertEquals("charged once per open reader", 2, charged.get());
+
+                // Evicting the LRU idle reader releases its charge; opening the new one charges again.
+                a.close();
+                final var c = pool.acquire("tenant2", 3);
+                assertEquals("evicted reader's charge released, new one charged", 2, charged.get());
+
+                b.close();
+                c.close();
+                pool.drainIdle(1000, 0);
+                assertEquals("all charges released when the pool drains", 0, charged.get());
+            }
+        }
+    }
+
     private static void assertOnlySlice(CompositeReader reader, String slice) throws Exception {
         for (var leaf : reader.leaves()) {
             final String segSlice = Lucene.segmentReader(leaf.reader()).getSegmentInfo().info.getAttribute("lucene.partition.key");

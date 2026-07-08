@@ -68,17 +68,35 @@ public final class SliceReaderPool implements Closeable {
      */
     private final Map<IndexCommit, Releasable> commitPins = new IdentityHashMap<>();
 
+    /**
+     * Charges a newly opened tenant reader against a heap budget (e.g. the stateless SearchEngine's reader-heap
+     * ledger + breaker) and returns a {@link Releasable} that refunds it. Called when the pool opens a reader and
+     * released when the pool closes it, so the budget accounts for the pool's readers. Null when no budget is wired.
+     */
+    private final java.util.function.Function<DirectoryReader, Releasable> heapCharger;
+
     public SliceReaderPool(Directory directory, IndexCommit commit, int maxActive) {
-        this(directory, commit, null, maxActive);
+        this(directory, commit, null, null, maxActive);
     }
 
     public SliceReaderPool(Directory directory, IndexCommit commit, Releasable commitPin, int maxActive) {
+        this(directory, commit, commitPin, null, maxActive);
+    }
+
+    public SliceReaderPool(
+        Directory directory,
+        IndexCommit commit,
+        Releasable commitPin,
+        java.util.function.Function<DirectoryReader, Releasable> heapCharger,
+        int maxActive
+    ) {
         if (maxActive < 1) {
             throw new IllegalArgumentException("maxActive must be >= 1, got " + maxActive);
         }
         this.directory = directory;
         this.commit = commit;
         this.maxActive = maxActive;
+        this.heapCharger = heapCharger;
         commitPins.put(commit, commitPin);
     }
 
@@ -109,7 +127,7 @@ public final class SliceReaderPool implements Closeable {
         for (Holder h : stale) {
             open.remove(h.slice);
             if (h.refCount == 0) {
-                h.reader.close();
+                IOUtils.close(h.reader, h.heapCharge);
                 maybeReleasePin(h.commit);
             } else {
                 retiring.add(h); // still in use — close on last release
@@ -154,10 +172,21 @@ public final class SliceReaderPool implements Closeable {
         }
         final DirectoryReader reader = SliceScopedReader.open(directory, commit, slice);
         h = new Holder(slice, reader, commit);
-        h.touch(++accessClock, nowNanos);
-        h.refCount = 1;
-        open.put(slice, h);
-        return new Ref(h);
+        boolean charged = false;
+        try {
+            // Charge the reader's segments against the heap budget before it is handed out, so the budget accounts
+            // for every reader the pool holds. Released in closeAndRemove/release/refresh/close.
+            h.heapCharge = heapCharger != null ? heapCharger.apply(reader) : null;
+            h.touch(++accessClock, nowNanos);
+            h.refCount = 1;
+            open.put(slice, h);
+            charged = true;
+            return new Ref(h);
+        } finally {
+            if (charged == false) {
+                IOUtils.closeWhileHandlingException(reader, h.heapCharge);
+            }
+        }
     }
 
     /**
@@ -265,27 +294,22 @@ public final class SliceReaderPool implements Closeable {
 
     @Override
     public synchronized void close() throws IOException {
-        final List<DirectoryReader> readers = new ArrayList<>(open.size() + retiring.size());
+        final List<Closeable> resources = new ArrayList<>();
         for (Holder h : open.values()) {
-            readers.add(h.reader);
+            resources.add(h.reader);
+            resources.add(h.heapCharge);
         }
         for (Holder h : retiring) {
-            readers.add(h.reader);
+            resources.add(h.reader);
+            resources.add(h.heapCharge);
         }
-        final List<Releasable> pins = new ArrayList<>(commitPins.size());
         for (Releasable pin : commitPins.values()) {
-            if (pin != null) {
-                pins.add(pin);
-            }
+            resources.add(pin);
         }
         open.clear();
         retiring.clear();
         commitPins.clear();
-        try {
-            IOUtils.close(readers);
-        } finally {
-            IOUtils.close(pins);
-        }
+        IOUtils.close(resources);
     }
 
     private void evictLruIdle() throws IOException {
@@ -303,7 +327,7 @@ public final class SliceReaderPool implements Closeable {
 
     private void closeAndRemove(Holder h) throws IOException {
         open.remove(h.slice);
-        h.reader.close();
+        IOUtils.close(h.reader, h.heapCharge);
         maybeReleasePin(h.commit);
     }
 
@@ -312,7 +336,7 @@ public final class SliceReaderPool implements Closeable {
         assert h.refCount >= 0 : "over-released slice reader " + h.slice;
         if (h.refCount == 0 && retiring.remove(h)) {
             try {
-                h.reader.close();
+                IOUtils.close(h.reader, h.heapCharge);
                 maybeReleasePin(h.commit);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
@@ -348,6 +372,7 @@ public final class SliceReaderPool implements Closeable {
         private final String slice;
         private final DirectoryReader reader;
         private final IndexCommit commit;
+        private Releasable heapCharge; // budget refund for this reader's segments, or null when no budget is wired
         private int refCount;
         private long lastAccessClock;
         private long lastAccessNanos;
