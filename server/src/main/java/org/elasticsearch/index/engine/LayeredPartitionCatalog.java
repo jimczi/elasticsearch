@@ -20,21 +20,11 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * The LSM read view of the slice/columnar catalog: an <b>immutable off-heap FST base</b> (the last compacted
- * snapshot) with a small <b>in-memory delta</b> of the commits since. This is what answers "when a new commit
- * adds segments, do we resend/rebuild the whole list?" — no:
- * <ul>
- *   <li>A commit calls {@link #apply(Collection, Collection)} with only its added/removed units; that mutates the
- *       in-memory delta in O(#changed). The immutable base FST is untouched, and nothing re-serializes the full
- *       segment list.</li>
- *   <li>A query ({@link #units(String)}) reads the partition's units from the base FST (prefix scan) and merges
- *       the delta on top — base units hidden if the delta removed them, delta units added, delta weights winning.
- *       O(#partition units), never O(#total).</li>
- *   <li>Only {@link #compact()} folds delta into a fresh base FST (O(#total)), run periodically — the LSM's
- *       amortized rebuild, not a per-commit cost.</li>
- * </ul>
- * So the searcher <b>incrementally adds</b> from the current state; it neither receives the full list per commit
- * nor rebuilds it per commit.
+ * The LSM read view of the catalog: an immutable off-heap FST base (the last compacted snapshot) plus a small
+ * in-memory delta of the commits since. {@link #apply(Collection, Collection)} folds a commit's changed units into
+ * the delta in O(#changed) without touching the base; {@link #units(String)} reads the base's partition slice and
+ * merges the delta on top (delta wins on name collision), O(#partition units); {@link #compact()} periodically folds
+ * base + delta into a fresh base FST (O(#total)). So a new commit never resends or rebuilds the full unit list.
  */
 public final class LayeredPartitionCatalog implements Closeable {
 
@@ -88,10 +78,9 @@ public final class LayeredPartitionCatalog implements Closeable {
     }
 
     /**
-     * Folds base (minus removed) + delta into a fresh immutable base FST and returns it. O(#total); run
-     * periodically. This is a pure function of current state — the caller swaps to a {@code new
-     * LayeredPartitionCatalog(returned)} (with an empty delta) and discards this view, mirroring an immutable-SST
-     * swap. Would typically be {@link FstPartitionCatalog#save}d as the new snapshot.
+     * Folds base (minus removed) + delta into a fresh immutable base FST (O(#total); run periodically). The caller
+     * swaps to a {@code new LayeredPartitionCatalog(returned)} with an empty delta and typically
+     * {@link FstPartitionCatalog#save}s it as the new snapshot.
      */
     public synchronized FstPartitionCatalog compact() throws IOException {
         final List<Unit> merged = new ArrayList<>();

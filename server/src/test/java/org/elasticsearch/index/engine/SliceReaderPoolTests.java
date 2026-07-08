@@ -21,13 +21,21 @@ import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.SlicePartitionedMergePolicy;
 import org.apache.lucene.index.TieredMergePolicy;
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.similarities.BM25Similarity;
 import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.store.Directory;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.common.lucene.index.ElasticsearchDirectoryReader;
+import org.elasticsearch.core.Releasable;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.test.ESTestCase;
+
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 /**
  * Verifies the read-side active-set bound: only N tenant readers open at once, LRU/idle eviction, ref-count safety
@@ -162,14 +170,14 @@ public class SliceReaderPoolTests extends ESTestCase {
                     1000,
                     shardId,
                     new BM25Similarity(),
-                    org.apache.lucene.search.IndexSearcher.getDefaultQueryCache(),
-                    org.apache.lucene.search.IndexSearcher.getDefaultQueryCachingPolicy()
+                    IndexSearcher.getDefaultQueryCache(),
+                    IndexSearcher.getDefaultQueryCachingPolicy()
                 );
                 assertEquals(1, pool.openReaderCount());
                 // It is a valid ES searcher over only tenantB's docs.
                 assertNotNull(ElasticsearchDirectoryReader.getElasticsearchDirectoryReader(searcher.getDirectoryReader()));
                 assertEquals(6, searcher.getIndexReader().numDocs());
-                assertEquals(6, searcher.count(new org.apache.lucene.search.MatchAllDocsQuery()));
+                assertEquals(6, searcher.count(new MatchAllDocsQuery()));
 
                 // Closing the searcher releases the pool ref but must NOT close the pool-owned reader: it stays usable.
                 searcher.close();
@@ -199,8 +207,8 @@ public class SliceReaderPoolTests extends ESTestCase {
                     1,
                     new ShardId("idx", "uuid", 0),
                     new BM25Similarity(),
-                    org.apache.lucene.search.IndexSearcher.getDefaultQueryCache(),
-                    org.apache.lucene.search.IndexSearcher.getDefaultQueryCachingPolicy()
+                    IndexSearcher.getDefaultQueryCache(),
+                    IndexSearcher.getDefaultQueryCachingPolicy()
                 );
                 // A new commit + refresh retires the old reader, but the open searcher keeps working on it.
                 try (IndexWriter w2 = new IndexWriter(dir, config())) {
@@ -230,7 +238,7 @@ public class SliceReaderPoolTests extends ESTestCase {
             try (SliceReaderPool pool = new SliceReaderPool(dir, commit, maxActive)) {
                 final int threads = 8;
                 final Thread[] workers = new Thread[threads];
-                final java.util.concurrent.atomic.AtomicReference<Exception> failure = new java.util.concurrent.atomic.AtomicReference<>();
+                final AtomicReference<Exception> failure = new AtomicReference<>();
                 for (int t = 0; t < threads; t++) {
                     final int tid = t;
                     workers[t] = new Thread(() -> {
@@ -244,11 +252,11 @@ public class SliceReaderPoolTests extends ESTestCase {
                                         i,
                                         shardId,
                                         new BM25Similarity(),
-                                        org.apache.lucene.search.IndexSearcher.getDefaultQueryCache(),
-                                        org.apache.lucene.search.IndexSearcher.getDefaultQueryCachingPolicy()
+                                        IndexSearcher.getDefaultQueryCache(),
+                                        IndexSearcher.getDefaultQueryCachingPolicy()
                                     )
                                 ) {
-                                    assertEquals(1, searcher.count(new org.apache.lucene.search.MatchAllDocsQuery()));
+                                    assertEquals(1, searcher.count(new MatchAllDocsQuery()));
                                 }
                             }
                         } catch (Exception e) {
@@ -277,8 +285,8 @@ public class SliceReaderPoolTests extends ESTestCase {
                 w.commit();
             }
             final IndexCommit c1 = commitOf(dir);
-            final java.util.concurrent.atomic.AtomicBoolean pin1 = new java.util.concurrent.atomic.AtomicBoolean();
-            final java.util.concurrent.atomic.AtomicBoolean pin2 = new java.util.concurrent.atomic.AtomicBoolean();
+            final AtomicBoolean pin1 = new AtomicBoolean();
+            final AtomicBoolean pin2 = new AtomicBoolean();
 
             try (SliceReaderPool pool = new SliceReaderPool(dir, c1, () -> pin1.set(true), 4)) {
                 final var r1 = pool.acquire("tenantA", 1); // reader on c1
@@ -312,7 +320,7 @@ public class SliceReaderPoolTests extends ESTestCase {
                 w.commit();
             }
             final IndexCommit commit = commitOf(dir);
-            final java.util.concurrent.atomic.AtomicBoolean onClose = new java.util.concurrent.atomic.AtomicBoolean();
+            final AtomicBoolean onClose = new AtomicBoolean();
 
             try (SliceReaderPool pool = new SliceReaderPool(dir, commit, 2)) {
                 final Engine.SearcherSupplier supplier = pool.acquireSearcherSupplier(
@@ -321,8 +329,8 @@ public class SliceReaderPoolTests extends ESTestCase {
                     1,
                     new ShardId("idx", "uuid", 0),
                     new BM25Similarity(),
-                    org.apache.lucene.search.IndexSearcher.getDefaultQueryCache(),
-                    org.apache.lucene.search.IndexSearcher.getDefaultQueryCachingPolicy(),
+                    IndexSearcher.getDefaultQueryCache(),
+                    IndexSearcher.getDefaultQueryCachingPolicy(),
                     () -> onClose.set(true)
                 );
                 assertEquals(1, pool.openReaderCount());
@@ -333,7 +341,7 @@ public class SliceReaderPoolTests extends ESTestCase {
                 final Engine.Searcher fetch = supplier.acquireSearcher("fetch");
                 assertEquals(1, pool.openReaderCount());
                 assertEquals(6, query.getIndexReader().numDocs());
-                assertEquals(6, fetch.count(new org.apache.lucene.search.MatchAllDocsQuery()));
+                assertEquals(6, fetch.count(new MatchAllDocsQuery()));
                 query.close();
                 fetch.close();
 
@@ -358,13 +366,12 @@ public class SliceReaderPoolTests extends ESTestCase {
                 w.commit();
             }
             final IndexCommit commit = commitOf(dir);
-            final java.util.concurrent.atomic.AtomicInteger charged = new java.util.concurrent.atomic.AtomicInteger();
+            final AtomicInteger charged = new AtomicInteger();
             // A stand-in for the SearchEngine's budget: each opened reader charges 1 unit, released on close.
-            final java.util.function.Function<org.apache.lucene.index.DirectoryReader, org.elasticsearch.core.Releasable> charger =
-                reader -> {
-                    charged.incrementAndGet();
-                    return charged::decrementAndGet;
-                };
+            final Function<DirectoryReader, Releasable> charger = reader -> {
+                charged.incrementAndGet();
+                return charged::decrementAndGet;
+            };
             try (SliceReaderPool pool = new SliceReaderPool(dir, commit, null, charger, 2)) {
                 final var a = pool.acquire("tenant0", 1);
                 final var b = pool.acquire("tenant1", 2);

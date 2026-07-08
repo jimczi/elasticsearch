@@ -23,15 +23,11 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Groups the files of a Lucene commit by the slice (tenant) that owns them, so that a slice-aware storage
- * layer (e.g. the stateless object-store commit path) can place each tenant's files in its own blob —
- * making a tenant independently fetchable, evictable, and encryptable.
- * <p>
- * Because a slice-sticky indexing buffer produces one segment per slice, every per-segment file inherits
- * that segment's slice, recorded in the {@link DocumentPartitioner#PARTITION_ATTRIBUTE} {@code SegmentInfo}
- * attribute (stamped by the patched Lucene write/merge path). Files that belong to no slice-tagged segment
- * — commit-level metadata such as {@code segments_N}, or segments written without a partitioner — are
- * returned under the {@code null} key (shared/global files).
+ * Groups a Lucene commit's files by the slice (tenant) that owns them, so a slice-aware storage layer (e.g. the
+ * stateless object-store commit path) can place each tenant's files in its own blob — independently fetchable,
+ * evictable, and encryptable. A slice-sticky buffer produces one segment per slice, recorded in the
+ * {@link DocumentPartitioner#PARTITION_ATTRIBUTE} {@code SegmentInfo} attribute. Files not tied to any slice-tagged
+ * segment (e.g. {@code segments_N}, or untagged segments) group under the {@code null} key.
  */
 public final class SliceCommitFiles {
 

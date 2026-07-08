@@ -28,27 +28,18 @@ import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 /**
- * The read-side active-set bound: a shard may hold millions of tenants ("slices"), but only a bounded number of
- * their readers are kept open at once. Each open reader covers exactly one tenant's segments (via
- * {@link SliceScopedReader}), so an inactive tenant's segments are never materialized — the read-side mirror of the
- * write-side {@code maxActivePartitions} / {@link SliceBufferManager}. Without this, the shard's single reader would
- * open every tenant's segments (millions of {@code SegmentReader}s → heap wall); segment-pruning at query time
- * ({@link SlicePruningQuery}) isolates a query but does not stop those segments from being opened — this does.
+ * Bounds the read-side active set: a shard may hold millions of tenants ("slices") but keeps only {@code maxActive}
+ * of their readers open at once. Each reader covers exactly one tenant's segments (via {@link SliceScopedReader}),
+ * so inactive tenants are never materialized — the read-side mirror of the write-side {@link SliceBufferManager}.
+ * Query-time {@link SlicePruningQuery} isolates a query but does not stop segments being opened; this does.
  * <p>
- * Lifecycle:
- * <ul>
- *   <li>{@link #acquire} returns a ref-counted handle over the tenant's reader, opening it on first access.</li>
- *   <li>When the open count would exceed {@code maxActive}, the least-recently-used <b>idle</b> (ref-count 0) reader
- *       is closed. If all open readers are in use the bound is exceeded transiently rather than blocking a query.</li>
- *   <li>{@link #drainIdle} closes idle readers untouched for longer than an idle interval.</li>
- *   <li>A reader marked for eviction while still in use is closed when its last handle is released.</li>
- *   <li>{@link #refresh} advances the commit the pool serves; readers opened against an older commit are retired
- *       (closed once idle), and the next {@link #acquire} reopens against the new commit.</li>
- * </ul>
- * Callers pass {@code nowNanos} (production: {@code System.nanoTime()}) so tests can drive time deterministically,
- * matching {@link SliceBufferManager}. Not thread-safe externally beyond its own synchronization.
+ * {@link #acquire} returns a ref-counted handle, opening the reader on demand and evicting the LRU <b>idle</b>
+ * reader when the bound would be exceeded (if all are in use the bound is exceeded transiently rather than blocking).
+ * {@link #drainIdle} closes long-idle readers; {@link #refresh} advances the served commit, retiring old-commit
+ * readers once idle. Callers pass {@code nowNanos} so time is deterministic in tests. Thread-safe via its own lock.
  */
 public final class SliceReaderPool implements Closeable {
 
@@ -69,11 +60,10 @@ public final class SliceReaderPool implements Closeable {
     private final Map<IndexCommit, Releasable> commitPins = new IdentityHashMap<>();
 
     /**
-     * Charges a newly opened tenant reader against a heap budget (e.g. the stateless SearchEngine's reader-heap
-     * ledger + breaker) and returns a {@link Releasable} that refunds it. Called when the pool opens a reader and
-     * released when the pool closes it, so the budget accounts for the pool's readers. Null when no budget is wired.
+     * Charges a newly opened reader against a heap budget (the stateless SearchEngine's reader-heap ledger + breaker)
+     * and returns a {@link Releasable} that refunds it when the pool closes the reader. Null when no budget is wired.
      */
-    private final java.util.function.Function<DirectoryReader, Releasable> heapCharger;
+    private final Function<DirectoryReader, Releasable> heapCharger;
 
     public SliceReaderPool(Directory directory, IndexCommit commit, int maxActive) {
         this(directory, commit, null, null, maxActive);
@@ -87,7 +77,7 @@ public final class SliceReaderPool implements Closeable {
         Directory directory,
         IndexCommit commit,
         Releasable commitPin,
-        java.util.function.Function<DirectoryReader, Releasable> heapCharger,
+        Function<DirectoryReader, Releasable> heapCharger,
         int maxActive
     ) {
         if (maxActive < 1) {
@@ -190,9 +180,9 @@ public final class SliceReaderPool implements Closeable {
     }
 
     /**
-     * Acquires a bounded per-tenant reader (as {@link #acquire}) and returns it as an {@link Engine.Searcher} over an
-     * {@link ElasticsearchDirectoryReader}, ready for the shard search path. The returned searcher holds the pool ref
-     * and an extra reader ref for its own lifetime; closing it releases both, leaving the pool to own the reader.
+     * Acquires a bounded per-tenant reader (as {@link #acquire}) as an {@link Engine.Searcher} over an
+     * {@link ElasticsearchDirectoryReader}. Closing the searcher releases the pool ref but leaves the pool owning
+     * the reader.
      */
     public synchronized Engine.Searcher acquireSearcher(
         String source,
@@ -229,14 +219,13 @@ public final class SliceReaderPool implements Closeable {
     }
 
     /**
-     * Acquires a {@link Engine.SearcherSupplier} that holds one tenant reader <b>stable</b> for its whole lifetime, so
-     * every {@link Engine.SearcherSupplier#acquireSearcher acquireSearcher} (query phase, fetch phase, ...) sees the
-     * same reader — the point-in-time contract the search path requires. The held pool ref keeps the reader alive
-     * (unevictable) until the supplier is closed, at which point the ref and {@code onClose} are released. The
-     * {@code wrapper} (the shard's field-usage / reader wrapper) is applied by the base class on each acquire.
+     * Returns an {@link Engine.SearcherSupplier} holding one tenant reader <b>stable</b> for its whole lifetime, so
+     * every {@code acquireSearcher} (query phase, fetch phase, ...) sees the same reader — the point-in-time contract
+     * the search path requires. The held pool ref keeps the reader unevictable until the supplier is closed, at which
+     * point the ref and {@code onClose} are released. The {@code wrapper} is applied by the base class on each acquire.
      */
     public synchronized Engine.SearcherSupplier acquireSearcherSupplier(
-        java.util.function.Function<Engine.Searcher, Engine.Searcher> wrapper,
+        Function<Engine.Searcher, Engine.Searcher> wrapper,
         String slice,
         long nowNanos,
         ShardId shardId,

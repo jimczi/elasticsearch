@@ -15,16 +15,11 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Tracks which slices (tenants) have recently-written, still-buffered documents so that the buffers of
- * <em>idle</em> slices can be flushed to segments, letting inactive tenants stop consuming indexing
- * memory. In stateless this is what pushes an idle tenant's data out to object storage so it no longer
- * costs local resources.
- * <p>
- * This complements Lucene's <b>count</b>-based bound ({@code IndexWriterConfig#setMaxActivePartitions},
- * which synchronously evicts the least-recently-used slice once too many are buffered) with a
- * <b>time</b>-based one: a slice with no writes for {@code idleIntervalNanos} is surfaced by
- * {@link #drainIdle} so the caller can flush it via {@code IndexWriter#flushSlice}. Time is passed in
- * (from the engine's relative-nanos clock) to keep this deterministically testable.
+ * Tracks which slices (tenants) have recently-buffered documents so that <em>idle</em> slices can be flushed to
+ * segments, letting inactive tenants stop consuming indexing memory (in stateless, pushing their data to object
+ * storage). This complements Lucene's <b>count</b>-based bound ({@code IndexWriterConfig#setMaxActivePartitions})
+ * with a <b>time</b>-based one: {@link #drainIdle} surfaces slices write-idle for {@code idleIntervalNanos} to flush.
+ * Time is passed in (the engine's relative-nanos clock) to keep this deterministically testable.
  */
 public final class SliceBufferManager {
 

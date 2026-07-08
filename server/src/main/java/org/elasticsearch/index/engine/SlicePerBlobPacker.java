@@ -23,18 +23,12 @@ import java.util.Set;
 
 /**
  * Packs a commit's files into <b>one blob per slice</b> (tenant), so each tenant's data is an independently
- * fetchable / evictable / encryptable object — the storage-layer counterpart to one-segment-per-slice. This
- * is the mechanism a slice-aware object-store commit path would use instead of batching every segment's files
- * into a single shared blob.
+ * fetchable / evictable / encryptable object — the storage-layer counterpart to one-segment-per-slice. Files are
+ * grouped by owning slice via {@link SliceCommitFiles}; shared/commit-level files (e.g. {@code segments_N}) go to a
+ * single {@code shared} blob. Each blob is self-describing (file bytes, then a file&rarr;offset,length footer and a
+ * trailing footer pointer), so a file can be read back from just its tenant's blob.
  * <p>
- * Files are grouped by owning slice via {@link SliceCommitFiles}; shared/commit-level files (e.g.
- * {@code segments_N}) go to a single {@code shared} blob. Each blob is self-describing: file bytes are
- * concatenated, followed by a footer (file &rarr; offset,length) and a trailing pointer to the footer, so a
- * single file can be read back from just its tenant's blob without touching any other tenant's blob.
- * <p>
- * This is a POC of the layout + isolated read; wiring it into {@code StatelessCommitService} /
- * {@code VirtualBatchedCompoundCommit} (which is single-blob-per-generation by design) is a separate, larger
- * integration.
+ * POC of the layout + isolated read; wiring it into {@code StatelessCommitService} is separate.
  */
 public final class SlicePerBlobPacker {
 

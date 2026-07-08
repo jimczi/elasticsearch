@@ -28,30 +28,15 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * A generic, partition-indexed, append-delta catalog of physical units — the LSM {@code MANIFEST} for a shard
- * that holds very many small units without paying O(#units) per commit. It solves two structurally identical
- * scaling problems with one mechanism:
- * <ul>
- *   <li><b>Slices</b> (many tenants): {@code partition = slice}, {@code unit = segment}, {@code weight = docCount}
- *       — millions of tenants, one/few segment(s) each, without a monolithic {@code segments_N}.</li>
- *   <li><b>Columnar</b> (many fields): {@code partition = field} (or a composite {@code slice/field}),
- *       {@code unit = file}, {@code weight = bytes} — one file per column/field without an O(#files) commit.</li>
- * </ul>
- * Both cases want the same three things this provides:
- * <ol>
- *   <li><b>Append-only commits</b>: {@link #commit} records only added/removed units → O(#changed), never O(#total);
- *       persisted as one {@code edit_<gen>} blob per commit ({@link #writeEdit}).</li>
- *   <li><b>Partition-scoped discovery</b>: {@link #units(String)} returns one partition's units → open/read only
- *       that tenant (or that column), never the whole shard.</li>
- *   <li><b>Partition-scoped consolidation</b>: {@link #dirtyPartitions(int)} returns partitions whose own unit count
- *       exceeds a threshold — merge/compact a partition's <em>own</em> units, never crossing partitions.</li>
- * </ol>
- * Periodic {@link #writeSnapshot} compacts the log; {@link #recover} loads the latest snapshot + later edits, and
- * ignores a crash-truncated trailing edit. This is a per-shard structure over the <em>unit</em> dimension only —
- * index-level metadata (mapping, settings, routing) stays single and shared.
+ * A partition-indexed, append-delta catalog of physical units — the LSM {@code MANIFEST} for a shard holding very
+ * many small units without paying O(#units) per commit. Used for slices ({@code partition = slice}, {@code unit =
+ * segment}, {@code weight = docCount}) and columnar ({@code partition = field}, {@code unit = file}, {@code weight =
+ * bytes}). {@link #commit} records only changed units (O(#changed)), {@link #units(String)} lists one partition's
+ * units, and {@link #dirtyPartitions(int)} finds partitions to compact — never crossing partitions.
  * <p>
- * In-memory state is a plain map here (correct and simple); a shard at millions of units backs the compacted
- * snapshot with an off-heap FST (unit→partition), for which {@code writeSnapshot}'s sorted output is the build input.
+ * Persistence is one {@code edit_<gen>} blob per commit plus periodic {@link #writeSnapshot} compaction;
+ * {@link #recover} loads the latest snapshot then later edits, ignoring a crash-truncated trailing edit. In-memory
+ * state is a plain map; the compacted snapshot's sorted output is the build input for an off-heap FST at scale.
  */
 public final class PartitionedManifest {
 

@@ -13,22 +13,15 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 /**
- * The object-store key layout that gives every index and every slice its own key <b>prefix</b> — the property
- * Turbopuffer gets from a namespace-per-prefix bucket layout, here for slices within one index:
+ * Object-store key layout giving every index and slice its own key <b>prefix</b>:
  * <pre>
- *   &lt;index-uuid&gt;/                         index prefix   (index-level metadata / index-level SSE-KMS)
+ *   &lt;index-uuid&gt;/                         index prefix   (index-level metadata / SSE-KMS)
  *   &lt;index-uuid&gt;/&lt;shard&gt;/s/&lt;slice&gt;/       slice prefix   (one tenant's blobs, isolated)
  *   &lt;index-uuid&gt;/&lt;shard&gt;/s/&lt;slice&gt;/&lt;blob&gt;  a unit blob
  * </pre>
- * Why a per-slice prefix matters (all fall out of the layout, no per-blob bookkeeping):
- * <ul>
- *   <li><b>Per-slice encryption</b> — a bucket/prefix SSE-KMS key per slice (or per index) encrypts exactly that
- *       tenant's objects; this is the per-tenant-blob model that a shared batched blob (Model B) cannot provide.</li>
- *   <li><b>O(1) tenant delete/clone</b> — drop or copy a prefix, no segment rewrite.</li>
- *   <li><b>Cheap listing / GC</b> — a tenant's objects are one {@code list-objects} under its prefix.</li>
- * </ul>
- * Slice names are URL-safe-base64 encoded in the key so arbitrary routing values can't break the path or collide
- * across the {@code /} separators; {@link #sliceOf} reverses it.
+ * A per-slice prefix gives per-tenant SSE-KMS encryption, O(1) tenant delete/clone (drop/copy a prefix), and cheap
+ * per-tenant listing/GC — all from the layout, no per-blob bookkeeping. Slice names are URL-safe-base64 encoded so
+ * arbitrary routing values can't break the path or collide across {@code /} separators; {@link #sliceOf} reverses it.
  */
 public final class SliceBlobLayout {
 

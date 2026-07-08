@@ -19,15 +19,10 @@ import java.io.IOException;
 import java.util.Set;
 
 /**
- * Opens a reader scoped to a single slice (tenant): a view over <b>only</b> that slice's segments in a
- * commit, opening no other slice's segments. Because a slice-sticky indexing buffer produces one segment
- * per slice (stamped with {@link DocumentPartitioner#PARTITION_ATTRIBUTE}), this reader:
- * <ul>
- *   <li>loads only the requested tenant's data — inactive tenants are never opened (the search-side of
- *       "only active tenants consume resources", which pays off most in stateless/object-store);</li>
- *   <li>has its own doc-id space {@code [0, sliceDocs)} independent of other slices, so a tenant is not
- *       constrained by (or counted against) other tenants' sizes.</li>
- * </ul>
+ * Opens a reader scoped to a single slice (tenant): a view over <b>only</b> that slice's segments in a commit,
+ * opening no others. Because a slice-sticky buffer produces one segment per slice (stamped with
+ * {@link DocumentPartitioner#PARTITION_ATTRIBUTE}), an inactive tenant is never opened and each tenant has its own
+ * doc-id space {@code [0, sliceDocs)}, independent of other tenants' sizes.
  */
 public final class SliceScopedReader {
 
@@ -43,10 +38,8 @@ public final class SliceScopedReader {
     }
 
     /**
-     * Opens a reader over only the segments of the {@code allowedSlices} — the basis of leaf-level security:
-     * a principal authorized for a set of tenants sees exactly those tenants' segments, and no others are
-     * loaded or visible. This is O(#segments) (a segment is fully in or out by its slice attribute) and needs
-     * no per-document DLS bitset, so it scales to very many tenants.
+     * Opens a reader over only the {@code allowedSlices}' segments — the basis of leaf-level security: a principal
+     * authorized for a set of tenants sees exactly those, no others loaded. O(#segments), no per-document DLS bitset.
      */
     public static DirectoryReader openAllowed(Directory directory, IndexCommit commit, Set<String> allowedSlices) throws IOException {
         return PartitionReaders.open(

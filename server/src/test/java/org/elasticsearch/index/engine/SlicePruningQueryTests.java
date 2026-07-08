@@ -26,9 +26,11 @@ import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.tests.search.QueryUtils;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.test.ESTestCase;
 
@@ -109,7 +111,7 @@ public class SlicePruningQueryTests extends ESTestCase {
                 // is a tenantB segment (others are skipped, i.e. never traversed).
                 final var weight = searcher.createWeight(
                     searcher.rewrite(new SlicePruningQuery(Set.of("tenantB"))),
-                    org.apache.lucene.search.ScoreMode.COMPLETE_NO_SCORES,
+                    ScoreMode.COMPLETE_NO_SCORES,
                     1f
                 );
                 for (LeafReaderContext ctx : reader.leaves()) {
@@ -122,5 +124,14 @@ public class SlicePruningQueryTests extends ESTestCase {
                 }
             }
         }
+    }
+
+    public void testEqualsAndHashCode() {
+        // A Query must honor the equals/hashCode contract so it can be cached; equality is by slice set.
+        QueryUtils.checkEqual(new SlicePruningQuery(Set.of("a")), new SlicePruningQuery(Set.of("a")));
+        QueryUtils.checkEqual(new SlicePruningQuery(Set.of("a", "b")), new SlicePruningQuery(Set.of("b", "a")));
+        QueryUtils.checkUnequal(new SlicePruningQuery(Set.of("a")), new SlicePruningQuery(Set.of("a", "b")));
+        QueryUtils.checkUnequal(new SlicePruningQuery(Set.of("a")), new SlicePruningQuery(Set.of("b")));
+        QueryUtils.checkHashEquals(new SlicePruningQuery(Set.of("a")));
     }
 }

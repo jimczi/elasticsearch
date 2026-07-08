@@ -10,6 +10,7 @@
 package org.elasticsearch.index.engine;
 
 import org.apache.lucene.codecs.CodecUtil;
+import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
@@ -20,6 +21,7 @@ import org.elasticsearch.test.ESTestCase;
 import java.io.IOException;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.empty;
@@ -159,7 +161,7 @@ public class PartitionedManifestTests extends ESTestCase {
                 out.writeVInt(0);
                 out.writeVInt(1); // claims a unit but writes nothing -> truncated
             }
-            expectThrows(org.apache.lucene.index.CorruptIndexException.class, () -> PartitionedManifest.recover(dir));
+            expectThrows(CorruptIndexException.class, () -> PartitionedManifest.recover(dir));
         }
     }
 
@@ -214,6 +216,6 @@ public class PartitionedManifestTests extends ESTestCase {
     }
 
     private static Set<String> names(List<Unit> units) {
-        return units.stream().map(Unit::name).collect(java.util.stream.Collectors.toSet());
+        return units.stream().map(Unit::name).collect(Collectors.toSet());
     }
 }

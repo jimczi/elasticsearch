@@ -28,17 +28,14 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * A filter that restricts a search to a single slice (tenant) by <b>pruning whole segments</b>: for any leaf whose
- * segment does not belong to {@code slice} (per its {@link DocumentPartitioner#PARTITION_ATTRIBUTE} stamp) it
- * returns no scorer, so that leaf is never traversed. Combined as a {@code FILTER} clause, the query therefore
- * only ever touches the tenant's own segments — other tenants' segments are not scored, and in stateless their
- * blocks are never fetched from the object store. A matching leaf contributes all its docs (a constant-score
- * match-all), so as a filter it removes nothing within the tenant.
+ * Restricts a search to a set of slices (tenants) by <b>pruning whole segments</b>: a leaf whose segment does not
+ * belong to {@code slices} (per its {@link DocumentPartitioner#PARTITION_ATTRIBUTE} stamp) gets no scorer and is
+ * never traversed — nor, in stateless, fetched from the object store. Matching leaves contribute all their docs
+ * (constant-score match-all), so as a {@code FILTER} clause it removes nothing within a tenant.
  * <p>
- * This is the search-path counterpart to slice-per-segment writes: because a slice-sticky buffer produces one
- * segment per tenant, "restrict to a slice" degenerates to segment selection — no per-document work and no per-doc
- * bitset (the same mechanism leaf-level security uses). It supersedes the coarse {@code _routing} term filter for
- * slice-partitioned indices, which post-filters documents over every segment rather than skipping segments.
+ * Because a slice-sticky buffer produces one segment per tenant, "restrict to a slice" is pure segment selection —
+ * no per-document work or bitset. It supersedes the coarse {@code _routing} term filter, which post-filters docs
+ * across every segment rather than skipping segments.
  */
 public final class SlicePruningQuery extends Query {
 

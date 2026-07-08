@@ -34,22 +34,15 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * The compacted form of {@link PartitionedManifest}: an FST keyed by {@code partition + 0x00 + unitName} with the
- * unit weight as output. Holds millions of units in a few tens of MB instead of the ~GB the naive on-heap maps
- * need, while answering partition-scoped queries in O(#partition units) via an FST prefix scan.
+ * The compacted form of {@link PartitionedManifest}: an FST keyed by {@code partition + SEP + unitName} with the
+ * unit weight as output, answering partition-scoped queries in O(#partition units) via a prefix scan and holding
+ * millions of units in tens of MB rather than the ~GB the on-heap maps need. {@link #build} makes an on-heap FST
+ * to {@link #save}; {@link #openOffHeap} mmaps the {@code .fst} data via {@link OffHeapFSTStore} so the bytes live
+ * in the OS page cache (or, in stateless, the shared blob cache), <b>not the Java heap</b> — only the FST metadata
+ * is retained on-heap.
  * <p>
- * Two forms:
- * <ul>
- *   <li>{@link #build} — on-heap FST, used to construct + {@link #save}.</li>
- *   <li>{@link #openOffHeap} — the FST is read straight from an mmap'd file via {@link OffHeapFSTStore}, so the
- *       bytes live in the OS page cache (or, in stateless, the shared blob cache), <b>not the Java heap</b>: heap
- *       cost drops to the FST metadata (bytes). This is how Lucene keeps its term dictionaries off-heap, and it
- *       works identically on stateful ({@code MMapDirectory}) and stateless (blob-cache directory).</li>
- * </ul>
  * The separator byte sorts before any name byte, so a partition's units group contiguously and a longer partition
- * name never falls inside a shorter one's prefix range (e.g. {@code "a<sep>*"} excludes {@code "ab<sep>*"}); unit
- * and partition names must not contain it. (A production layout would use {@code 0x00}; the tests cover the
- * boundary either way.)
+ * name never falls inside a shorter one's prefix range; unit and partition names must not contain it.
  */
 public final class FstPartitionCatalog implements Closeable {
 
