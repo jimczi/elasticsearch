@@ -140,7 +140,7 @@ final class ColumNARDocValuesConsumer extends DocValuesConsumer {
             case STRING -> writeStringColumn(
                 field,
                 type,
-                () -> ColumnarStringBinaryDocValues.singleValues(valuesProducer.getBinary(field))
+                () -> ColumnarStringBinaryDocValues.decodeValues(valuesProducer.getBinary(field), () -> 1)
             );
         }
     }
@@ -459,7 +459,7 @@ final class ColumNARDocValuesConsumer extends DocValuesConsumer {
             // Read decoded values directly for our own columns; fall back to the payload for anything else.
             StringColumnValues values = binary instanceof ColumnarStringBinaryDocValues columnar
                 ? columnar.directValues(ordinalMap(binary, vocabulary))
-                : ColumnarStringBinaryDocValues.singleValues(binary);
+                : ColumnarStringBinaryDocValues.decodeValues(binary, () -> 1);
             cost += values.cost();
             subs.add(new ColumnMergeSub<>(mergeState.docMaps[i], values));
         }
@@ -555,10 +555,7 @@ final class ColumNARDocValuesConsumer extends DocValuesConsumer {
         StringColumnValues counter = cursors.get();
         for (int doc = counter.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = counter.nextDoc()) {
             numDocsWithField++;
-            // One value per document: that is what this surface carries, and what lets the reader take a
-            // document's rank as its value's address rather than keeping one for every document.
-            assert counter.valueCount() == 1 : "document [" + doc + "] of field [" + field.name + "] has " + counter.valueCount();
-            numValues++;
+            numValues += counter.valueCount();
         }
 
         StringColumnMetadata metadata = StringColumnWriter.write(

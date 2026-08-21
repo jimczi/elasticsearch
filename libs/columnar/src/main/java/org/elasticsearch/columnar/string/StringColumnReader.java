@@ -46,6 +46,10 @@ public final class StringColumnReader {
     private final ValueStream.Reader exceptions;
     private final LongValues escapeRanks;
 
+    /** Set on a multi-valued column: how many values each document holds, and where each block starts. */
+    private final NumericColumnReader valueCounts;
+    private final LongValues docBlockBases;
+
     private final BytesRef value = new BytesRef();
 
     /** Held so a summary can be read on demand; a merge reads it, an ordinary search never does. */
@@ -53,7 +57,6 @@ public final class StringColumnReader {
 
     public StringColumnReader(StringColumnMetadata meta, IndexInput data) throws IOException {
         this.data = data;
-        assert meta.multiValued() == false : "this surface carries one value per document";
         this.meta = meta;
         this.iteratorReader = new ColumnIteratorReader(meta.iterator(), data);
         if (meta.layout() == StringColumnLayout.DICTIONARY) {
@@ -80,6 +83,19 @@ public final class StringColumnReader {
             this.exceptions = null;
             this.escapeRanks = null;
         }
+        if (meta.multiValued()) {
+            this.valueCounts = new NumericColumnReader(meta.addressing().valueCounts(), data);
+            this.docBlockBases = MonotonicReader.open(
+                data,
+                meta.addressing().docBlockBases().meta(),
+                (meta.numDocsWithField() + meta.addressing().docBlockSize() - 1) / meta.addressing().docBlockSize() + 1L,
+                meta.addressing().docBlockBases().dataOffset(),
+                meta.addressing().docBlockBases().dataLength()
+            );
+        } else {
+            this.valueCounts = null;
+            this.docBlockBases = null;
+        }
     }
 
     /** A fresh iterator over the documents that have a value; positioned by {@link ColumnIterator#rank()}. */
@@ -88,16 +104,29 @@ public final class StringColumnReader {
     }
 
     /**
-     * The value address of a document's first value, given its rank. This surface carries one value per
-     * document, so the rank is the address.
+     * The value address of a document's first value, given its rank. A single-valued column holds one value
+     * per document in rank order, so the rank is the address and nothing is stored to resolve it.
      */
-    public long firstValueAddress(int rank) {
-        return rank;
+    public long firstValueAddress(int rank) throws IOException {
+        if (meta.multiValued() == false) {
+            return rank;
+        }
+        // The base of the block this document falls in, plus what the documents before it inside that block
+        // hold. Counting from a base every DOC_BLOCK documents is what lets the column keep a count per
+        // document rather than an address per document.
+        final int blockSize = meta.addressing().docBlockSize();
+        final int block = rank / blockSize;
+        long index = docBlockBases.get(block);
+        for (int r = block * blockSize; r < rank; r++) {
+            // The counts column is single-valued, so a rank in it is its own value address.
+            index += valueCounts.valueAt(r);
+        }
+        return index;
     }
 
-    /** The number of values a document has, given its rank. This surface carries one per document. */
-    public long valueCount(int rank) {
-        return 1;
+    /** The number of values a document has, given its rank. A single-valued column keeps no counts and answers one. */
+    public long valueCount(int rank) throws IOException {
+        return meta.multiValued() ? valueCounts.valueAt(rank) : 1;
     }
 
     /**

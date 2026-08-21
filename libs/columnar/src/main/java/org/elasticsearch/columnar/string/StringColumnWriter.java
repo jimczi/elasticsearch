@@ -60,6 +60,9 @@ public final class StringColumnWriter {
      */
     static final int ESCAPE_RANK_BLOCK = 128;
 
+    /** Documents behind one base in the address table; a document's own count covers the rest. */
+    public static final int DOC_BLOCK = 128;
+
     private StringColumnWriter() {}
 
     /**
@@ -103,14 +106,24 @@ public final class StringColumnWriter {
             surveyed = known != null ? known : Vocabulary.survey(cursors.get(), policy, numValues);
             // Coverage is a lower bound, so a column admitted here covers at least as much as it claims.
             if (surveyed != null && policy.worthKeeping(surveyed.coverage(), surveyed.dictionaryBytes(), surveyed.columnBytes())) {
-                return withSummary(
-                    writeDictionary(
-                        iterator,
-                        numDocsWithField,
-                        numValues,
-                        cursors,
+                return withAddresses(
+                    withSummary(
+                        writeDictionary(
+                            iterator,
+                            numDocsWithField,
+                            numValues,
+                            cursors,
+                            surveyed,
+                            surveyed.columnBytes(),
+                            valuesPerBlock,
+                            chunkCodec,
+                            targetChunkBytes,
+                            directory,
+                            context,
+                            data
+                        ),
                         surveyed,
-                        surveyed.columnBytes(),
+                        numValues,
                         valuesPerBlock,
                         chunkCodec,
                         targetChunkBytes,
@@ -118,11 +131,9 @@ public final class StringColumnWriter {
                         context,
                         data
                     ),
-                    surveyed,
+                    cursors,
+                    numDocsWithField,
                     numValues,
-                    valuesPerBlock,
-                    chunkCodec,
-                    targetChunkBytes,
                     directory,
                     context,
                     data
@@ -151,17 +162,115 @@ public final class StringColumnWriter {
             }
             written = stream.finish();
         }
-        return withSummary(
-            StringColumnMetadata.plain(iterator, numDocsWithField, numValues, written),
-            surveyed,
+        return withAddresses(
+            withSummary(
+                StringColumnMetadata.plain(iterator, numDocsWithField, numValues, written),
+                surveyed,
+                numValues,
+                valuesPerBlock,
+                chunkCodec,
+                targetChunkBytes,
+                directory,
+                context,
+                data
+            ),
+            cursors,
+            numDocsWithField,
             numValues,
-            valuesPerBlock,
-            chunkCodec,
-            targetChunkBytes,
             directory,
             context,
             data
         );
+    }
+
+    /**
+     * Writes what a column of documents holding several values needs to find them: one base per
+     * {@link #DOC_BLOCK} documents and a count per document. A single-valued column writes neither — its
+     * document rank is its value's index — which matters because a table with an entry per document would
+     * otherwise be the largest structure it has.
+     */
+    private static StringColumnMetadata withAddresses(
+        StringColumnMetadata metadata,
+        IOSupplier<StringColumnValues> cursors,
+        int numDocsWithField,
+        long numValues,
+        Directory directory,
+        IOContext context,
+        IndexOutput data
+    ) throws IOException {
+        if (metadata.multiValued() == false) {
+            return metadata;
+        }
+        final NumericColumnMetadata counts = NumericColumnWriter.write(
+            numDocsWithField,
+            numDocsWithField,
+            numDocsWithField,
+            () -> countCursor(cursors.get()),
+            NumericPipeline.defaultPipeline(128),
+            BlockBytesCodec.forId(BlockBytesCodec.IDENTITY_ID),
+            null,
+            directory,
+            context,
+            data
+        );
+        final MonotonicWriter.Table bases;
+        try (
+            MonotonicWriter writer = new MonotonicWriter(
+                directory,
+                context,
+                data.getName(),
+                (numDocsWithField + DOC_BLOCK - 1) / DOC_BLOCK + 1L
+            )
+        ) {
+            final StringColumnValues values = cursors.get();
+            long first = 0;
+            int rank = 0;
+            for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
+                if (rank % DOC_BLOCK == 0) {
+                    writer.add(first);
+                }
+                first += values.valueCount();
+                rank++;
+            }
+            writer.add(first);
+            bases = writer.finish(data);
+        }
+        return metadata.withAddressing(new StringColumnMetadata.Addressing(counts, DOC_BLOCK, bases));
+    }
+
+    /** A document's value count, as a numeric cursor, so the counts can be written as a numeric column. */
+    private static NumericColumnValues countCursor(StringColumnValues values) {
+        return new NumericColumnValues() {
+            @Override
+            public int valueCount() {
+                return 1;
+            }
+
+            @Override
+            public long nextValue() {
+                return values.valueCount();
+            }
+
+            @Override
+            public int docID() {
+                return values.docID();
+            }
+
+            @Override
+            public int nextDoc() throws IOException {
+                return values.nextDoc();
+            }
+
+            @Override
+            public int advance(int target) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public long cost() {
+                return values.cost();
+            }
+        };
     }
 
     /**

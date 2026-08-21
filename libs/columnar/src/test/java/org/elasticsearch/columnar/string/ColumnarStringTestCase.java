@@ -24,6 +24,7 @@ import org.elasticsearch.columnar.substrate.ColumnarCodecUtil;
 import org.elasticsearch.test.ESTestCase;
 
 import java.io.IOException;
+import java.util.List;
 
 import static org.elasticsearch.columnar.ColumnarTestUtils.randomValidBlockSize;
 
@@ -110,6 +111,106 @@ public abstract class ColumnarStringTestCase extends ESTestCase {
      */
     protected static int randomTargetChunkBytes() {
         return randomFrom(64, 512, 4096, 64 * 1024);
+    }
+
+    /**
+     * Writes {@code perDoc} — a list of values per document, empty for a document with none — and runs
+     * {@code check} over a reader on it. The block size, codec and chunk size are random, as for a
+     * single-valued column.
+     */
+    protected void withMultiValuedColumn(final List<List<BytesRef>> perDoc, final ColumnCheck check) throws IOException {
+        withMultiValuedColumn(perDoc, DictionaryPolicy.NONE, check);
+    }
+
+    /** As above, under a dictionary policy, so a multi-valued column can also carry a dictionary. */
+    protected void withMultiValuedColumn(final List<List<BytesRef>> perDoc, final DictionaryPolicy policy, final ColumnCheck check)
+        throws IOException {
+        final byte[] segmentId = new byte[16];
+        random().nextBytes(segmentId);
+        int numDocsWithField = 0;
+        long numValues = 0;
+        for (List<BytesRef> values : perDoc) {
+            if (values.isEmpty() == false) {
+                numDocsWithField++;
+                numValues += values.size();
+            }
+        }
+        final int blockSize = randomValidBlockSize();
+        final ChunkCodec codec = randomChunkCodec();
+        final int chunkBytes = randomTargetChunkBytes();
+        try (Directory dir = newDirectory()) {
+            final StringColumnMetadata written;
+            try (IndexOutput out = dir.createOutput(DATA_FILE, IOContext.DEFAULT)) {
+                ColumnarCodecUtil.writeHeader(out, DATA_CODEC, FormatVersion.CURRENT, segmentId, "");
+                written = StringColumnWriter.write(
+                    perDoc.size(),
+                    numDocsWithField,
+                    numValues,
+                    () -> multiValuedCursor(perDoc),
+                    blockSize,
+                    codec,
+                    chunkBytes,
+                    policy,
+                    null,
+                    dir,
+                    IOContext.DEFAULT,
+                    out
+                );
+                ColumnarCodecUtil.writeFooter(out);
+            }
+            try (IndexOutput meta = dir.createOutput(META_FILE, IOContext.DEFAULT)) {
+                ColumnarCodecUtil.writeHeader(meta, META_CODEC, FormatVersion.CURRENT, segmentId, "");
+                written.writeTo(meta);
+                ColumnarCodecUtil.writeFooter(meta);
+            }
+            try (IndexInput data = openData(dir, segmentId)) {
+                check.check(written, new StringColumnReader(written, data));
+            }
+        }
+    }
+
+    /** A cursor over documents that may hold any number of values, skipping those that hold none. */
+    private static StringColumnValues multiValuedCursor(final List<List<BytesRef>> perDoc) {
+        return new StringColumnValues() {
+            private int doc = -1;
+            private int upto;
+
+            @Override
+            public int valueCount() {
+                return perDoc.get(doc).size();
+            }
+
+            @Override
+            public BytesRef nextValue() {
+                return perDoc.get(doc).get(upto++);
+            }
+
+            @Override
+            public int docID() {
+                return doc >= perDoc.size() ? NO_MORE_DOCS : doc;
+            }
+
+            @Override
+            public int nextDoc() {
+                upto = 0;
+                for (doc++; doc < perDoc.size(); doc++) {
+                    if (perDoc.get(doc).isEmpty() == false) {
+                        return doc;
+                    }
+                }
+                return NO_MORE_DOCS;
+            }
+
+            @Override
+            public int advance(int target) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public long cost() {
+                return perDoc.size();
+            }
+        };
     }
 
     /** The number of documents in {@code docValues} that have a value. */

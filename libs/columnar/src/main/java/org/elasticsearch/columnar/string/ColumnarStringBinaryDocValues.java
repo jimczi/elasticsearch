@@ -11,11 +11,14 @@ package org.elasticsearch.columnar.string;
 
 import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.BytesRefBuilder;
 import org.apache.lucene.util.FixedBitSet;
 import org.elasticsearch.columnar.substrate.ColumnIterator;
 
 import java.io.IOException;
+import java.util.function.IntSupplier;
 
 /**
  * A string column at the {@code BINARY} surface: {@link #binaryValue} hands back a document's value as the
@@ -28,27 +31,48 @@ public final class ColumnarStringBinaryDocValues extends BinaryDocValues {
     private final StringColumnReader reader;
     private final ColumnIterator iterator;
 
+    // Holds the several values of one document in the shape the mapper writes them; a lone value needs none.
+    private final BytesRefBuilder payload = new BytesRefBuilder();
+
     public ColumnarStringBinaryDocValues(StringColumnReader reader, ColumnIterator iterator) {
         this.reader = reader;
         this.iterator = iterator;
     }
 
     /**
-     * The document's value, as the bytes the mapper handed over. A keyword field writes a lone value as its
-     * raw bytes — no count, no length prefix — under both of the encodings the mapper uses, so a
-     * single-valued column needs no encoding of its own here and hands the value straight back.
+     * The document's values, in the shape the mapper writes them: a lone value as its raw bytes, and several
+     * as {@code [length + 1][bytes]} each.
      *
-     * <p>A column holding several values for one document has no representation at this surface. The writer
-     * refuses to build one, so this cannot be reached; the assert says so for whoever lifts that.
+     * <p>A slot the mapper left empty was kept on the way in as a value of no bytes, so it comes back out as
+     * one: this column holds values and does not distinguish the two. What survives the round trip is the
+     * document's value count, which is what the count recorded beside the field has to agree with.
      */
     @Override
     public BytesRef binaryValue() throws IOException {
         final int rank = iterator.rank();
-        assert reader.valueCount(rank) == 1
-            : "multi-valued string column reached binaryValue with "
-                + reader.valueCount(rank)
-                + " values; this surface carries one value per document";
-        return reader.valueAt(reader.firstValueAddress(rank));
+        final long first = reader.firstValueAddress(rank);
+        final long count = reader.valueCount(rank);
+        if (count == 1) {
+            return reader.valueAt(first);
+        }
+        payload.clear();
+        for (long i = 0; i < count; i++) {
+            // Copied rather than pointed at: the reader hands back one buffer it reuses, so the values have
+            // to be taken out of it as they are read.
+            final BytesRef value = reader.valueAt(first + i);
+            writeVInt(payload, value.length + 1);
+            payload.append(value);
+        }
+        return payload.get();
+    }
+
+    /** A vint into the builder, matching what the mapper's multi-valued encoding uses for a length. */
+    private static void writeVInt(BytesRefBuilder out, int value) {
+        while ((value & ~0x7F) != 0) {
+            out.append((byte) ((value & 0x7F) | 0x80));
+            value >>>= 7;
+        }
+        out.append((byte) value);
     }
 
     /** The column behind this surface, so a merge can read what it recorded rather than its values. */
@@ -149,7 +173,7 @@ public final class ColumnarStringBinaryDocValues extends BinaryDocValues {
                 return iterator.cost();
             }
 
-            private int position(int doc) {
+            private int position(int doc) throws IOException {
                 if (doc != DocIdSetIterator.NO_MORE_DOCS) {
                     int rank = iterator.rank();
                     first = reader.firstValueAddress(rank);
@@ -162,21 +186,39 @@ public final class ColumnarStringBinaryDocValues extends BinaryDocValues {
     }
 
     /**
-     * Wraps a foreign {@link BinaryDocValues} as a write-path cursor, one value per document, the value
-     * being the bytes themselves. This is the ingest path — a keyword field writes a lone value as its raw
-     * bytes — and the merge fallback for a segment written by some other implementation of this surface.
+     * Wraps a foreign {@link BinaryDocValues} as a write-path cursor, reading the shape the mapper writes:
+     * a lone value as its raw bytes, several as {@code [length + 1][bytes]} each, where a length of zero is
+     * a slot the mapper left empty. This is the ingest path and the merge fallback for a segment written by
+     * some other implementation of this surface.
+     *
+     * <p>A slot the mapper left empty is kept, as a value of no bytes. The column does not know what an
+     * empty slot meant and does not need to: keeping it is what makes the count this column reports agree
+     * with the count the mapper recorded beside it, which is what every other reader of this field trusts.
      */
-    public static StringColumnValues singleValues(BinaryDocValues binary) {
+    public static StringColumnValues decodeValues(BinaryDocValues binary, IntSupplier valueCount) {
         return new StringColumnValues() {
+            private final BytesRef value = new BytesRef();
+            private final ByteArrayDataInput in = new ByteArrayDataInput();
+            private BytesRef blob;
+            private int count;
 
             @Override
             public int valueCount() {
-                return 1;
+                return count;
             }
 
             @Override
             public BytesRef nextValue() throws IOException {
-                return binary.binaryValue();
+                if (count == 1) {
+                    // A lone value is stored as itself, with nothing to say how long it is.
+                    return binary.binaryValue();
+                }
+                final int length = in.readVInt() - 1;
+                value.bytes = blob.bytes;
+                value.offset = in.getPosition();
+                value.length = Math.max(length, 0);
+                in.skipBytes(value.length);
+                return value;
             }
 
             @Override
@@ -186,12 +228,12 @@ public final class ColumnarStringBinaryDocValues extends BinaryDocValues {
 
             @Override
             public int nextDoc() throws IOException {
-                return binary.nextDoc();
+                return position(binary.nextDoc());
             }
 
             @Override
             public int advance(int target) throws IOException {
-                return binary.advance(target);
+                return position(binary.advance(target));
             }
 
             @Override
@@ -199,6 +241,21 @@ public final class ColumnarStringBinaryDocValues extends BinaryDocValues {
                 return binary.cost();
             }
 
+            /**
+             * How many values this document holds comes from beside the blob, not from within it: a lone
+             * value is stored as its own bytes with no length, which is indistinguishable from the first
+             * value of several.
+             */
+            private int position(int doc) throws IOException {
+                if (doc != DocIdSetIterator.NO_MORE_DOCS) {
+                    count = valueCount.getAsInt();
+                    if (count > 1) {
+                        blob = binary.binaryValue();
+                        in.reset(blob.bytes, blob.offset, blob.length);
+                    }
+                }
+                return doc;
+            }
         };
     }
 }

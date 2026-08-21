@@ -17,6 +17,8 @@ import org.elasticsearch.columnar.substrate.ChunkCodec;
 import org.elasticsearch.columnar.substrate.ColumnIterator;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.elasticsearch.columnar.ColumnarTestUtils.randomValidBlockSize;
 
@@ -226,6 +228,134 @@ public class StringColumnTests extends ColumnarStringTestCase {
             mixed[d] = new BytesRef(randomAlphaOfLengthBetween(200, 400));
         }
         assertColumn(mixed);
+    }
+
+    /** Documents holding several values, found through the counts and the block bases rather than by rank. */
+    public void testMultiValuedDocuments() throws IOException {
+        final List<List<BytesRef>> perDoc = new ArrayList<>();
+        for (int d = 0, docs = between(200, 2000); d < docs; d++) {
+            final List<BytesRef> values = new ArrayList<>();
+            for (int i = 0, count = between(1, 6); i < count; i++) {
+                values.add(new BytesRef("tag-" + d + "-" + i));
+            }
+            perDoc.add(values);
+        }
+        assertMultiValued(perDoc);
+    }
+
+    /** Most documents holding one value and a few holding many — where the counts column packs to almost nothing. */
+    public void testMostlySingleValued() throws IOException {
+        final List<List<BytesRef>> perDoc = new ArrayList<>();
+        for (int d = 0, docs = between(500, 3000); d < docs; d++) {
+            final List<BytesRef> values = new ArrayList<>();
+            final int count = rarely() ? between(2, 12) : 1;
+            for (int i = 0; i < count; i++) {
+                values.add(new BytesRef(randomAlphaOfLengthBetween(1, 40)));
+            }
+            perDoc.add(values);
+        }
+        assertMultiValued(perDoc);
+    }
+
+    /** Several values and gaps at once: a document's values are found from a base a whole block behind it. */
+    public void testMultiValuedAndSparse() throws IOException {
+        final List<List<BytesRef>> perDoc = new ArrayList<>();
+        for (int d = 0, docs = between(400, 2500); d < docs; d++) {
+            final List<BytesRef> values = new ArrayList<>();
+            if (randomBoolean()) {
+                for (int i = 0, count = between(1, 5); i < count; i++) {
+                    values.add(new BytesRef("v-" + d + "-" + i));
+                }
+            }
+            perDoc.add(values);
+        }
+        assertMultiValued(perDoc);
+    }
+
+    /** A value of no bytes, which is what a slot the mapper left empty becomes; it is a value like any other. */
+    public void testEmptyValuesAmongOthers() throws IOException {
+        final List<List<BytesRef>> perDoc = new ArrayList<>();
+        for (int d = 0, docs = between(200, 1500); d < docs; d++) {
+            final List<BytesRef> values = new ArrayList<>();
+            for (int i = 0, count = between(1, 4); i < count; i++) {
+                values.add(randomBoolean() ? new BytesRef("") : new BytesRef(randomAlphaOfLengthBetween(1, 20)));
+            }
+            perDoc.add(values);
+        }
+        assertMultiValued(perDoc);
+    }
+
+    /**
+     * Several values a document, over terms it repeats. The two layers are independent: the counts and the
+     * block bases take a document to the range of value addresses it owns, and the dictionary takes each of
+     * those addresses to its bytes.
+     */
+    public void testMultiValuedOverADictionary() throws IOException {
+        final String[] tags = { "alpha", "bravo", "charlie", "delta", "echo" };
+        final List<List<BytesRef>> perDoc = new ArrayList<>();
+        for (int d = 0, docs = between(500, 2500); d < docs; d++) {
+            final List<BytesRef> values = new ArrayList<>();
+            for (int i = 0, count = between(1, 5); i < count; i++) {
+                values.add(new BytesRef(tags[(d + i) % tags.length]));
+            }
+            perDoc.add(values);
+        }
+        assertMultiValued(perDoc, new DictionaryPolicy(512 * 1024, 0.5, 0.2), StringColumnLayout.DICTIONARY);
+    }
+
+    /** The same, where a value a document holds is one the dictionary turned away, so it escapes. */
+    public void testMultiValuedWithEscapes() throws IOException {
+        final String[] tags = { "red", "green", "blue" };
+        final List<List<BytesRef>> perDoc = new ArrayList<>();
+        for (int d = 0, docs = between(500, 2000); d < docs; d++) {
+            final List<BytesRef> values = new ArrayList<>();
+            for (int i = 0, count = between(1, 4); i < count; i++) {
+                values.add(new BytesRef(tags[(d + i) % tags.length]));
+            }
+            if (rarely()) {
+                values.add(new BytesRef("seen-once-" + d));
+            }
+            perDoc.add(values);
+        }
+        assertMultiValued(perDoc, new DictionaryPolicy(512 * 1024, 0.5, 0.2), StringColumnLayout.DICTIONARY);
+    }
+
+    private void assertMultiValued(List<List<BytesRef>> perDoc) throws IOException {
+        assertMultiValued(perDoc, DictionaryPolicy.NONE, null);
+    }
+
+    private void assertMultiValued(List<List<BytesRef>> perDoc, DictionaryPolicy policy, StringColumnLayout expectedLayout)
+        throws IOException {
+        int expectedDocs = 0;
+        long expectedValues = 0;
+        for (List<BytesRef> values : perDoc) {
+            if (values.isEmpty() == false) {
+                expectedDocs++;
+                expectedValues += values.size();
+            }
+        }
+        final int numDocsWithField = expectedDocs;
+        final long numValues = expectedValues;
+        withMultiValuedColumn(perDoc, policy, (metadata, reader) -> {
+            if (expectedLayout != null) {
+                assertEquals("layout", expectedLayout, metadata.layout());
+            }
+            assertEquals("numValues", numValues, reader.numValues());
+            assertEquals("multi-valued", numValues > numDocsWithField, metadata.multiValued());
+            int seenDocs = 0;
+            final ColumnIterator iterator = reader.iterator();
+            for (int doc = iterator.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = iterator.nextDoc()) {
+                final List<BytesRef> expected = perDoc.get(doc);
+                final int rank = iterator.rank();
+                assertEquals("value count at doc " + doc, expected.size(), (int) reader.valueCount(rank));
+                final long first = reader.firstValueAddress(rank);
+                for (int i = 0; i < expected.size(); i++) {
+                    assertEquals("doc " + doc + " value " + i, expected.get(i), reader.valueAt(first + i));
+                }
+                seenDocs++;
+            }
+            assertEquals("documents with a value", numDocsWithField, seenDocs);
+        });
     }
 
     /** Writes {@code docValues} as a string column, reads it back, and asserts every value round-trips in order. */

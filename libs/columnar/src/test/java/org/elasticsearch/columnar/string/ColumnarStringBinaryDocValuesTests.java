@@ -164,7 +164,7 @@ public class ColumnarStringBinaryDocValuesTests extends ColumnarStringTestCase {
         for (int d = 0; d < docValues.length; d++) {
             docValues[d] = randomBoolean() ? null : new BytesRef(randomAlphaOfLengthBetween(0, 40));
         }
-        final StringColumnValues cursor = ColumnarStringBinaryDocValues.singleValues(binaryOver(docValues));
+        final StringColumnValues cursor = ColumnarStringBinaryDocValues.decodeValues(binaryOver(docValues), () -> 1);
         assertEquals("cost", present(docValues), cursor.cost());
         int seen = 0;
         for (int doc = cursor.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = cursor.nextDoc()) {
@@ -182,7 +182,7 @@ public class ColumnarStringBinaryDocValuesTests extends ColumnarStringTestCase {
         for (int d = 0; d < docValues.length; d++) {
             docValues[d] = randomBoolean() ? null : new BytesRef("v" + d);
         }
-        final StringColumnValues cursor = ColumnarStringBinaryDocValues.singleValues(binaryOver(docValues));
+        final StringColumnValues cursor = ColumnarStringBinaryDocValues.decodeValues(binaryOver(docValues), () -> 1);
         int target = 0;
         while (target < docValues.length) {
             final int expected = nextPresent(docValues, target);

@@ -47,8 +47,19 @@ public record StringColumnMetadata(
     ValueStream.Metadata exceptions,
     MonotonicWriter.Table escapeRanks,
     int dictionarySize,
-    Summary summary
+    Summary summary,
+    Addressing addressing
 ) implements ColumnMetadata {
+
+    /**
+     * How a document's values are found when it may hold more than one: a count per document and one base
+     * per block of documents, rather than an address per document. The counts ride in a numeric column,
+     * where a column of mostly ones packs to almost nothing.
+     *
+     * <p>Null on a single-valued column, which writes neither: a document's rank is its value's address,
+     * and a table with an entry per document would otherwise be the largest thing such a column holds.
+     */
+    public record Addressing(NumericColumnMetadata valueCounts, int docBlockSize, MonotonicWriter.Table docBlockBases) {}
 
     /**
      * What a column records of the terms it holds most, so a merge can work out a vocabulary from its
@@ -86,6 +97,7 @@ public record StringColumnMetadata(
             null,
             MonotonicWriter.Table.NONE,
             0,
+            null,
             null
         );
     }
@@ -117,6 +129,7 @@ public record StringColumnMetadata(
             exceptions,
             escapeRanks,
             dictionarySize,
+            null,
             null
         );
     }
@@ -135,7 +148,27 @@ public record StringColumnMetadata(
             exceptions,
             escapeRanks,
             dictionarySize,
-            summary
+            summary,
+            addressing
+        );
+    }
+
+    /** The same column, with how a document reaches its values when it may hold more than one. */
+    public StringColumnMetadata withAddressing(Addressing addressing) {
+        return new StringColumnMetadata(
+            iterator,
+            numDocsWithField,
+            numValues,
+            valueBytes,
+            layout,
+            values,
+            dictionary,
+            ordinals,
+            exceptions,
+            escapeRanks,
+            dictionarySize,
+            summary,
+            addressing
         );
     }
 
@@ -178,6 +211,15 @@ public record StringColumnMetadata(
                     out.writeBytes(escapeRanks.meta(), 0, escapeRanks.meta().length);
                 }
             }
+        }
+        out.writeByte((byte) (multiValued() ? 1 : 0));
+        if (multiValued()) {
+            addressing.valueCounts().writeTo(out);
+            out.writeVInt(addressing.docBlockSize());
+            out.writeVLong(addressing.docBlockBases().dataOffset());
+            out.writeVLong(addressing.docBlockBases().dataLength());
+            out.writeVInt(addressing.docBlockBases().meta().length);
+            out.writeBytes(addressing.docBlockBases().meta(), 0, addressing.docBlockBases().meta().length);
         }
         out.writeByte((byte) (summary == null ? 0 : 1));
         if (summary != null) {
@@ -241,11 +283,23 @@ public record StringColumnMetadata(
                 );
             }
         };
+        StringColumnMetadata addressed = column;
+        if (in.readByte() != 0) {
+            final NumericColumnMetadata valueCounts = NumericColumnMetadata.readFrom(in, maxDoc, formatVersion);
+            final int docBlockSize = in.readVInt();
+            final long basesOffset = in.readVLong();
+            final long basesLength = in.readVLong();
+            final byte[] basesMeta = new byte[in.readVInt()];
+            in.readBytes(basesMeta, 0, basesMeta.length);
+            addressed = column.withAddressing(
+                new Addressing(valueCounts, docBlockSize, new MonotonicWriter.Table(basesOffset, basesLength, basesMeta))
+            );
+        }
         if (in.readByte() == 0) {
-            return column;
+            return addressed;
         }
         final ValueStream.Metadata summaryTerms = in.readByte() == 0 ? null : ValueStream.Metadata.readFrom(in);
-        return column.withSummary(new Summary(summaryTerms, in.readVLong(), in.readVLong(), in.readVLong()));
+        return addressed.withSummary(new Summary(summaryTerms, in.readVLong(), in.readVLong(), in.readVLong()));
     }
 
 }
