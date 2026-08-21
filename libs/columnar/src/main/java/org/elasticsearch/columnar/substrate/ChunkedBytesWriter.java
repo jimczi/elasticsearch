@@ -89,6 +89,11 @@ public final class ChunkedBytesWriter implements Closeable {
     }
 
     /** The number of bytes appended so far; the offset the next appended value will start at. */
+    /** The output the chunks are written to, so a caller can put its own tables alongside them. */
+    public IndexOutput data() {
+        return data;
+    }
+
     public long uncompressedLength() {
         return uncompressedLength;
     }

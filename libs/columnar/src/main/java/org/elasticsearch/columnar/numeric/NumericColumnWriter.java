@@ -35,6 +35,7 @@ import java.io.IOException;
  */
 public final class NumericColumnWriter {
 
+    /** Monotonic block shift for the offset tables. */
     private NumericColumnWriter() {}
 
     /**

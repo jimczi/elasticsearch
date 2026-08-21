@@ -50,6 +50,13 @@ public class ColumNARDocValuesFormat extends DocValuesFormat {
 
     private final NumericPipelineSelector pipelineSelector;
     private final int blockSize;
+    private final int targetChunkBytes;
+    /**
+     * The bytes a chunk of a byte stream holds before it is closed and compressed. A chunk is what the
+     * compressor sees at once, so a column whose vocabulary is larger than one repeats its terms across
+     * chunks with the compressor learning them afresh in each.
+     */
+    public static final int DEFAULT_TARGET_CHUNK_BYTES = 64 * 1024;
 
     /** SPI constructor. Uses the default pipeline for every field. */
     public ColumNARDocValuesFormat() {
@@ -61,6 +68,11 @@ public class ColumNARDocValuesFormat extends DocValuesFormat {
      * {@code blockSize} must be a power of 2 in [{@value #MIN_BLOCK_SIZE}, {@value #MAX_BLOCK_SIZE}].
      */
     public ColumNARDocValuesFormat(final NumericPipelineSelector pipelineSelector, int blockSize) {
+        this(pipelineSelector, blockSize, DEFAULT_TARGET_CHUNK_BYTES);
+    }
+
+    /** Constructs a format whose byte streams are cut into chunks of about {@code targetChunkBytes}. */
+    public ColumNARDocValuesFormat(final NumericPipelineSelector pipelineSelector, int blockSize, int targetChunkBytes) {
         super(ColumnarFormat.NAME);
         if (blockSize < MIN_BLOCK_SIZE || blockSize > MAX_BLOCK_SIZE || (blockSize & (blockSize - 1)) != 0) {
             throw new IllegalArgumentException(
@@ -69,11 +81,12 @@ public class ColumNARDocValuesFormat extends DocValuesFormat {
         }
         this.pipelineSelector = pipelineSelector;
         this.blockSize = blockSize;
+        this.targetChunkBytes = targetChunkBytes;
     }
 
     @Override
     public DocValuesConsumer fieldsConsumer(SegmentWriteState state) throws IOException {
-        return new ColumNARDocValuesConsumer(state, pipelineSelector, blockSize);
+        return new ColumNARDocValuesConsumer(state, pipelineSelector, blockSize, targetChunkBytes);
     }
 
     @Override
