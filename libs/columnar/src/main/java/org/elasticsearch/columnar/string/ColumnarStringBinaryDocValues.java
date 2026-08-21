@@ -39,6 +39,15 @@ public final class ColumnarStringBinaryDocValues extends BinaryDocValues {
         return reader.valueAt(reader.firstValue(iterator.index()), value);
     }
 
+    /**
+     * The dictionary ordinal of this document's value, without reading the value itself. A merge that
+     * already knows what each of the input's ordinals becomes needs nothing more than this, and resolving
+     * the bytes only to look them up again is the expensive part of merging a dictionary column.
+     */
+    public int ordinal() throws IOException {
+        return reader.ordinalAt(reader.firstValue(iterator.index()));
+    }
+
     @Override
     public boolean advanceExact(int target) throws IOException {
         return iterator.advanceExact(target);

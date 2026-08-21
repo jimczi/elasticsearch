@@ -54,7 +54,7 @@ public class StringColumnRandomizedTests extends ESTestCase {
         for (int doc = 0; doc < 300; doc++) {
             perDoc.add(List.of(randomAlphaOfLength(between(1, 6000))));
         }
-        assertColumn(new Shape(perDoc, allDocs(perDoc.size()), perDoc.size(), 4096, 128));
+        assertColumn(new Shape(perDoc, allDocs(perDoc.size()), perDoc.size(), 4096, 128, anyPolicy()));
     }
 
     /** A single value larger than the chunk target, which a chunk has to hold whole. */
@@ -63,7 +63,7 @@ public class StringColumnRandomizedTests extends ESTestCase {
         for (int doc = 0; doc < 40; doc++) {
             perDoc.add(List.of(randomAlphaOfLength(between(2000, 9000))));
         }
-        assertColumn(new Shape(perDoc, allDocs(perDoc.size()), perDoc.size(), 1024, 8));
+        assertColumn(new Shape(perDoc, allDocs(perDoc.size()), perDoc.size(), 1024, 8, anyPolicy()));
     }
 
     /** Short values, which take the inline length layout, mixed with long ones, which do not. */
@@ -73,11 +73,46 @@ public class StringColumnRandomizedTests extends ESTestCase {
             for (int doc = 0; doc < 2000; doc++) {
                 perDoc.add(List.of(randomAlphaOfLength(between(0, 2 * meanLength))));
             }
-            assertColumn(new Shape(perDoc, allDocs(perDoc.size()), perDoc.size(), 64 * 1024, 128));
+            assertColumn(new Shape(perDoc, allDocs(perDoc.size()), perDoc.size(), 64 * 1024, 128, anyPolicy()));
         }
     }
 
-    private record Shape(List<List<String>> perDoc, List<Integer> docs, int maxDoc, int chunkBytes, int valuesPerBlock) {}
+    /** Escapes landing on the boundaries of the blocks their count is carried in. */
+    public void testEscapesOnBlockBoundaries() throws IOException {
+        final List<List<String>> perDoc = new ArrayList<>();
+        for (int doc = 0; doc < 4000; doc++) {
+            // Every 128th document escapes, so an escape sits at the head of each rank block.
+            perDoc.add(List.of(doc % 128 == 0 ? "escaped-" + doc : "common-" + (doc % 4)));
+        }
+        assertColumn(
+            new Shape(perDoc, allDocs(perDoc.size()), perDoc.size(), 64 * 1024, 128, new DictionaryPolicy(1 << 20, 0.0, Double.MAX_VALUE))
+        );
+    }
+
+    /** Every document escaping, and none, which are the ends of the range the escape count covers. */
+    public void testAllAndNoneEscaped() throws IOException {
+        final List<List<String>> allEscape = new ArrayList<>();
+        final List<List<String>> noneEscape = new ArrayList<>();
+        for (int doc = 0; doc < 1500; doc++) {
+            allEscape.add(List.of("unique-" + doc));
+            noneEscape.add(List.of("v" + (doc % 4)));
+        }
+        assertColumn(new Shape(allEscape, allDocs(1500), 1500, 64 * 1024, 128, new DictionaryPolicy(1 << 20, 0.0, Double.MAX_VALUE)));
+        assertColumn(new Shape(noneEscape, allDocs(1500), 1500, 64 * 1024, 128, anyPolicy()));
+    }
+
+    private record Shape(
+        List<List<String>> perDoc,
+        List<Integer> docs,
+        int maxDoc,
+        int chunkBytes,
+        int valuesPerBlock,
+        DictionaryPolicy policy
+    ) {}
+
+    private static DictionaryPolicy anyPolicy() {
+        return new DictionaryPolicy(1 << 20, 0.0, Double.MAX_VALUE);
+    }
 
     private static List<Integer> allDocs(int count) {
         final List<Integer> docs = new ArrayList<>(count);
@@ -110,7 +145,14 @@ public class StringColumnRandomizedTests extends ESTestCase {
             }
             perDoc.add(values);
         }
-        return new Shape(perDoc, docs, maxDoc, randomFrom(512, 4096, 64 * 1024), randomFrom(8, 32, 128, 512));
+        return new Shape(
+            perDoc,
+            docs,
+            maxDoc,
+            randomFrom(512, 4096, 64 * 1024),
+            randomFrom(8, 32, 128, 512),
+            randomBoolean() ? anyPolicy() : DictionaryPolicy.NONE
+        );
     }
 
     private void assertColumn(Shape shape) throws IOException {
@@ -121,7 +163,9 @@ public class StringColumnRandomizedTests extends ESTestCase {
             + " chunk="
             + shape.chunkBytes
             + " perBlock="
-            + shape.valuesPerBlock;
+            + shape.valuesPerBlock
+            + " dictionary="
+            + shape.policy.enabled();
         int numValues = 0;
         for (List<String> values : shape.perDoc) {
             numValues += values.size();
@@ -144,6 +188,8 @@ public class StringColumnRandomizedTests extends ESTestCase {
                     randomFrom(ChunkCodec.IDENTITY, ChunkCodec.ZSTD),
                     shape.chunkBytes,
                     shape.valuesPerBlock,
+                    shape.policy,
+                    null,
                     dir,
                     IOContext.DEFAULT,
                     out
@@ -171,6 +217,7 @@ public class StringColumnRandomizedTests extends ESTestCase {
                 assertPresence(label, reader, shape);
                 assertValuesPerDocument(label, reader, shape);
                 assertBlocks(label, reader, shape);
+                assertLookups(label, reader, shape);
                 assertMatches(label, reader, shape);
             }
         }
@@ -239,7 +286,9 @@ public class StringColumnRandomizedTests extends ESTestCase {
                 perDoc.add(List.of(term));
             }
         }
-        assertColumn(new Shape(perDoc, allDocs(perDoc.size()), perDoc.size(), 64 * 1024, 128));
+        // Both shapes: with a dictionary the ordinals are ordered, without one the values are.
+        assertColumn(new Shape(perDoc, allDocs(perDoc.size()), perDoc.size(), 64 * 1024, 128, anyPolicy()));
+        assertColumn(new Shape(perDoc, allDocs(perDoc.size()), perDoc.size(), 64 * 1024, 128, DictionaryPolicy.NONE));
     }
 
     /** Values in term order with documents missing between them: both properties at once. */
@@ -255,7 +304,34 @@ public class StringColumnRandomizedTests extends ESTestCase {
                 perDoc.add(List.of(term));
             }
         }
-        assertColumn(new Shape(perDoc, docs, doc + 1, 64 * 1024, 128));
+        assertColumn(new Shape(perDoc, docs, doc + 1, 64 * 1024, 128, anyPolicy()));
+        assertColumn(new Shape(perDoc, docs, doc + 1, 64 * 1024, 128, DictionaryPolicy.NONE));
+    }
+
+    /** Every dictionary term is found, and every prefix resolves to the run of ordinals that carries it. */
+    private void assertLookups(String label, StringColumnReader reader, Shape shape) throws IOException {
+        if (reader.hasDictionary() == false) {
+            assertEquals(label + " a plain column knows no terms", -1, reader.lookupTerm(new BytesRef("anything")));
+            return;
+        }
+        final BytesRef scratch = new BytesRef();
+        String previous = null;
+        for (int ordinal = 0; ordinal < reader.dictionarySize(); ordinal++) {
+            // The dictionary is in term order, which is what makes a binary search and a prefix range work.
+            final String term = reader.termAt(ordinal, scratch).utf8ToString();
+            if (previous != null) {
+                assertTrue(label + " dictionary sorted at " + ordinal, previous.compareTo(term) < 0);
+            }
+            previous = term;
+            assertEquals(label + " term " + ordinal, ordinal, reader.lookupTerm(new BytesRef(term)));
+
+            final int[] range = reader.lookupPrefix(new BytesRef(term));
+            assertTrue(label + " a term is its own prefix", range[0] <= ordinal && ordinal < range[1]);
+        }
+        assertTrue(label + " absent term", reader.lookupTerm(new BytesRef("￿ absent")) < 0);
+        final int[] everything = reader.lookupPrefix(new BytesRef(""));
+        assertEquals(label + " the empty prefix covers the dictionary", 0, everything[0]);
+        assertEquals(label + " the empty prefix covers the dictionary", reader.dictionarySize(), everything[1]);
     }
 
     /**

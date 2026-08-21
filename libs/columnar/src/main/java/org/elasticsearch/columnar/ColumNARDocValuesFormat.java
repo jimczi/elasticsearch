@@ -16,6 +16,7 @@ import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentWriteState;
 import org.elasticsearch.columnar.numeric.NumericPipeline;
 import org.elasticsearch.columnar.numeric.NumericPipelineSelector;
+import org.elasticsearch.columnar.string.DictionaryPolicy;
 
 import java.io.IOException;
 
@@ -51,6 +52,25 @@ public class ColumNARDocValuesFormat extends DocValuesFormat {
     private final NumericPipelineSelector pipelineSelector;
     private final int blockSize;
     private final int targetChunkBytes;
+    private final DictionaryPolicy dictionaryPolicy;
+
+    /** SPI constructor. Uses the default pipeline for every field. */
+    public ColumNARDocValuesFormat() {
+        this((fieldName, type) -> NumericPipeline::defaultPipeline, DEFAULT_BLOCK_SIZE, DEFAULT_DICTIONARY_POLICY);
+    }
+
+    /**
+     * The dictionary bounds a string column is written under when none is given. A dictionary is kept only
+     * when it accounts for most of the column's values and stays small against the bytes it stands in for.
+     *
+     * <p>The byte bound is what decides whether a column with a few thousand distinct values can hold all of
+     * them: a column of host names needs a quarter of a megabyte for its vocabulary, and one that cannot
+     * hold it falls back to storing every value. Beyond half a megabyte the bound stops admitting whole
+     * vocabularies and starts admitting the tails of large ones, where terms seen once add almost nothing to
+     * what the dictionary covers and widen the ordinal every value pays for.
+     */
+    public static final DictionaryPolicy DEFAULT_DICTIONARY_POLICY = new DictionaryPolicy(512 * 1024, 0.5, 0.2);
+
     /**
      * The bytes a chunk of a byte stream holds before it is closed and compressed. A chunk is what the
      * compressor sees at once, so a column whose vocabulary is larger than one repeats its terms across
@@ -58,21 +78,26 @@ public class ColumNARDocValuesFormat extends DocValuesFormat {
      */
     public static final int DEFAULT_TARGET_CHUNK_BYTES = 64 * 1024;
 
-    /** SPI constructor. Uses the default pipeline for every field. */
-    public ColumNARDocValuesFormat() {
-        this((fieldName, type) -> NumericPipeline::defaultPipeline, DEFAULT_BLOCK_SIZE);
-    }
-
     /**
      * Constructs a format with a custom pipeline selector and block size.
      * {@code blockSize} must be a power of 2 in [{@value #MIN_BLOCK_SIZE}, {@value #MAX_BLOCK_SIZE}].
      */
     public ColumNARDocValuesFormat(final NumericPipelineSelector pipelineSelector, int blockSize) {
-        this(pipelineSelector, blockSize, DEFAULT_TARGET_CHUNK_BYTES);
+        this(pipelineSelector, blockSize, DEFAULT_DICTIONARY_POLICY);
+    }
+
+    /** Constructs a format whose string columns are written under {@code dictionaryPolicy}. */
+    public ColumNARDocValuesFormat(final NumericPipelineSelector pipelineSelector, int blockSize, DictionaryPolicy dictionaryPolicy) {
+        this(pipelineSelector, blockSize, DEFAULT_TARGET_CHUNK_BYTES, dictionaryPolicy);
     }
 
     /** Constructs a format whose byte streams are cut into chunks of about {@code targetChunkBytes}. */
-    public ColumNARDocValuesFormat(final NumericPipelineSelector pipelineSelector, int blockSize, int targetChunkBytes) {
+    public ColumNARDocValuesFormat(
+        final NumericPipelineSelector pipelineSelector,
+        int blockSize,
+        int targetChunkBytes,
+        DictionaryPolicy dictionaryPolicy
+    ) {
         super(ColumnarFormat.NAME);
         if (blockSize < MIN_BLOCK_SIZE || blockSize > MAX_BLOCK_SIZE || (blockSize & (blockSize - 1)) != 0) {
             throw new IllegalArgumentException(
@@ -82,11 +107,12 @@ public class ColumNARDocValuesFormat extends DocValuesFormat {
         this.pipelineSelector = pipelineSelector;
         this.blockSize = blockSize;
         this.targetChunkBytes = targetChunkBytes;
+        this.dictionaryPolicy = dictionaryPolicy;
     }
 
     @Override
     public DocValuesConsumer fieldsConsumer(SegmentWriteState state) throws IOException {
-        return new ColumNARDocValuesConsumer(state, pipelineSelector, blockSize, targetChunkBytes);
+        return new ColumNARDocValuesConsumer(state, pipelineSelector, blockSize, targetChunkBytes, dictionaryPolicy);
     }
 
     @Override

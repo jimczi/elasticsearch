@@ -22,4 +22,13 @@ public abstract class StringColumnValues extends DocIdSetIterator {
 
     /** The next value of the current document; the bytes are valid until the following call. */
     public abstract BytesRef nextValue() throws IOException;
+
+    /**
+     * Advances past the next value and returns the ordinal it takes in the vocabulary this column is being
+     * written with, or {@code -1} when this cursor cannot say — in which case {@link #nextValue()} must be
+     * called for that value instead. Neither advances the cursor; {@link #nextDoc()} does.
+     */
+    public int nextOrdinal() throws IOException {
+        return -1;
+    }
 }

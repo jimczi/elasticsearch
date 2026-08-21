@@ -16,6 +16,7 @@ import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.LogByteSizeMergePolicy;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.store.Directory;
@@ -150,6 +151,53 @@ public class ColumnarStringTermQueryTests extends ESTestCase {
     }
 
     /**
+     * Several fully-covered segments merged: the merged column must hold every term its sources did, and
+     * answer for all of them. Their union is taken instead of the values being surveyed again, so a term
+     * that only one segment held has to survive.
+     */
+    public void testMergedDictionariesKeepEveryTerm() throws IOException {
+        final List<String> values = new ArrayList<>();
+        final List<String> perSegment = List.of("alpha", "beta", "gamma", "delta", "epsilon", "zeta");
+        for (int segment = 0; segment < perSegment.size(); segment++) {
+            for (int i = 0; i < 1000; i++) {
+                // Each segment holds one term the others do not, plus one they share.
+                values.add(i % 3 == 0 ? "shared" : perSegment.get(segment));
+            }
+        }
+        try (Directory dir = newDirectory()) {
+            final FieldType type = columnarBinaryFieldType(ColumnarFieldType.STRING);
+            try (IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig().setCodec(columnarCodec()))) {
+                for (int i = 0; i < values.size(); i++) {
+                    final Document doc = new Document();
+                    doc.add(new Field(FIELD, new BytesRef(values.get(i)), type));
+                    writer.addDocument(doc);
+                    if (i % 1000 == 999) {
+                        writer.flush();
+                    }
+                }
+                writer.forceMerge(1);
+            }
+            try (DirectoryReader reader = DirectoryReader.open(dir)) {
+                assertEquals("one segment after the merge", 1, reader.leaves().size());
+                final IndexSearcher searcher = new IndexSearcher(reader);
+                searcher.setQueryCache(null);
+                for (String term : perSegment) {
+                    final int expected = (int) values.stream().filter(term::equals).count();
+                    assertEquals("term [" + term + "]", expected, searcher.count(ColumnarStringTermQuery.term(FIELD, new BytesRef(term))));
+                }
+                assertEquals(
+                    "shared",
+                    (int) values.stream().filter("shared"::equals).count(),
+                    searcher.count(ColumnarStringTermQuery.term(FIELD, new BytesRef("shared")))
+                );
+                // Seven terms standing for six thousand values: the union of the inputs' dictionaries
+                // covers the merged column entirely and costs almost nothing to keep.
+                assertTrue("a union that holds every value is worth keeping", column(reader).hasDictionary());
+            }
+        }
+    }
+
+    /**
      * Segments that stayed plain because no one of them was covered enough, merging into a column that is.
      * Their summaries combine into the merged vocabulary, so the values are not surveyed a second time, and
      * the terms the merged column holds most must be the ones it ends up with.
@@ -187,10 +235,137 @@ public class ColumnarStringTermQueryTests extends ESTestCase {
         }
     }
 
+    /**
+     * A column that stays plain through a merge keeps a summary of what it holds, and the counts in it are
+     * the ones its inputs really saw. Without them the merged column would read back as though it held
+     * every term once, and the merge after this one would never find a dictionary worth building.
+     */
+    public void testSummarySurvivesAPlainMerge() throws IOException {
+        final List<String> hot = List.of("hot-a", "hot-b", "hot-c");
+        final List<String> values = new ArrayList<>();
+        try (Directory dir = newDirectory()) {
+            final FieldType type = columnarBinaryFieldType(ColumnarFieldType.STRING);
+            try (IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig().setCodec(columnarCodec()))) {
+                // Too thinly covered for a dictionary: one value in five is one of the hot terms, and the
+                // rest are distinct and long enough that no affordable dictionary covers many of them.
+                for (int segment = 0; segment < 3; segment++) {
+                    for (int i = 0; i < 3000; i++) {
+                        final String value = i % 5 == 0 ? randomFrom(hot) : "tail-" + segment + "-" + i + "-" + "x".repeat(60);
+                        values.add(value);
+                        final Document doc = new Document();
+                        doc.add(new Field(FIELD, new BytesRef(value), type));
+                        writer.addDocument(doc);
+                    }
+                    writer.flush();
+                }
+                writer.forceMerge(1);
+
+                try (DirectoryReader merged = DirectoryReader.open(writer)) {
+                    final StringColumnReader column = column(merged);
+                    assertFalse("still too thinly covered for a dictionary", column.hasDictionary());
+                    assertTrue("a plain column keeps a summary of what it holds", column.hasSummary());
+
+                    final List<BytesRef> terms = new ArrayList<>();
+                    final List<Long> counts = new ArrayList<>();
+                    column.readSummary(terms, counts);
+                    for (String term : hot) {
+                        final int at = terms.indexOf(new BytesRef(term));
+                        assertTrue("the summary kept [" + term + "]", at >= 0);
+                        // The counts are lower bounds — a term is charged an occurrence whenever room has
+                        // to be made — so they may fall short of the truth, but not by an order of it.
+                        final long actual = values.stream().filter(term::equals).count();
+                        assertTrue(
+                            "[" + term + "] counted " + counts.get(at) + " of " + actual,
+                            counts.get(at) > actual / 2 && counts.get(at) <= actual
+                        );
+                    }
+                }
+            }
+            try (DirectoryReader reader = DirectoryReader.open(dir)) {
+                final IndexSearcher searcher = new IndexSearcher(reader);
+                searcher.setQueryCache(null);
+                for (String term : List.of("hot-a", "hot-b", "hot-c", "absent")) {
+                    final int expected = (int) values.stream().filter(term::equals).count();
+                    assertEquals("term [" + term + "]", expected, searcher.count(ColumnarStringTermQuery.term(FIELD, new BytesRef(term))));
+                }
+            }
+        }
+    }
+
     private static StringColumnReader column(DirectoryReader reader) throws IOException {
         assertEquals("one segment", 1, reader.leaves().size());
         final BinaryDocValues binary = reader.leaves().get(0).reader().getBinaryDocValues(FIELD);
         return ((ColumnarStringBinaryDocValues) binary).reader();
+    }
+
+    /**
+     * A segment the field never appeared in, merged with segments that hold a dictionary. It has nothing to
+     * contribute and must not cost the merged column its dictionary.
+     */
+    public void testSegmentWithoutTheFieldDoesNotDecideTheShape() throws IOException {
+        final List<String> values = new ArrayList<>();
+        try (Directory dir = newDirectory()) {
+            final FieldType type = columnarBinaryFieldType(ColumnarFieldType.STRING);
+            try (IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig().setCodec(columnarCodec()))) {
+                for (int segment = 0; segment < 3; segment++) {
+                    for (int i = 0; i < 1000; i++) {
+                        final String value = randomFrom("alpha", "beta", "gamma");
+                        values.add(value);
+                        final Document doc = new Document();
+                        doc.add(new Field(FIELD, new BytesRef(value), type));
+                        writer.addDocument(doc);
+                    }
+                    writer.flush();
+                }
+                // A segment of documents that carry another field entirely.
+                for (int i = 0; i < 1000; i++) {
+                    final Document doc = new Document();
+                    doc.add(new Field("other", new BytesRef("value"), type));
+                    writer.addDocument(doc);
+                }
+                writer.flush();
+                writer.forceMerge(1);
+            }
+            try (DirectoryReader reader = DirectoryReader.open(dir)) {
+                assertTrue("the empty segment did not cost the dictionary", column(reader).hasDictionary());
+                final IndexSearcher searcher = new IndexSearcher(reader);
+                searcher.setQueryCache(null);
+                for (String term : List.of("alpha", "beta", "gamma")) {
+                    final int expected = (int) values.stream().filter(term::equals).count();
+                    assertEquals("term [" + term + "]", expected, searcher.count(ColumnarStringTermQuery.term(FIELD, new BytesRef(term))));
+                }
+            }
+        }
+    }
+
+    /** The same values, merged: a decision the merge makes differently from the flush is a bug in one of them. */
+    public void testHighCardinalityStaysPlainThroughAMerge() throws IOException {
+        try (Directory dir = newDirectory()) {
+            final FieldType type = columnarBinaryFieldType(ColumnarFieldType.STRING);
+            try (IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig().setCodec(columnarCodec()))) {
+                for (int segment = 0; segment < 3; segment++) {
+                    for (int i = 0; i < 100_000; i++) {
+                        final Document doc = new Document();
+                        final String value = "checkout-7d9f8b6c4-" + Integer.toString(random().nextInt(50_000), 36) + "xk";
+                        doc.add(new Field(FIELD, new BytesRef(value), type));
+                        writer.addDocument(doc);
+                    }
+                    writer.flush();
+                    try (DirectoryReader flushed = DirectoryReader.open(writer)) {
+                        for (LeafReaderContext leaf : flushed.leaves()) {
+                            final BinaryDocValues binary = leaf.reader().getBinaryDocValues(FIELD);
+                            final StringColumnReader flushedColumn = ((ColumnarStringBinaryDocValues) binary).reader();
+                            assertFalse("a flushed segment stays plain", flushedColumn.hasDictionary());
+                            assertTrue("and keeps a summary, so the merge need not survey again", flushedColumn.hasSummary());
+                        }
+                    }
+                }
+                writer.forceMerge(1);
+                try (DirectoryReader merged = DirectoryReader.open(writer)) {
+                    assertFalse("and so does the merge of them", column(merged).hasDictionary());
+                }
+            }
+        }
     }
 
     /** Values indexed in term order stay recognisably in term order through the codec and a merge. */
