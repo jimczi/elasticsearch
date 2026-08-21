@@ -108,6 +108,8 @@ public final class ValueStream {
         // holds valuesPerBlock values, which is bounded and independent of the column.
         private final int[] pending;
         private byte[] pendingBytes = new byte[1024];
+        // Holds a block's length header, or one value's length as a vint, so neither is allocated per block.
+        private byte[] scratch = new byte[0];
         private int pendingCount = 0;
         private int pendingLength = 0;
 
@@ -174,23 +176,25 @@ public final class ValueStream {
         }
 
         private void writePacked(int width) throws IOException {
-            final byte[] header = new byte[1 + pendingCount * width];
-            header[0] = (byte) width;
+            final int length = 1 + pendingCount * width;
+            scratch = ArrayUtil.growNoCopy(scratch, length);
+            scratch[0] = (byte) width;
             int at = 1;
             for (int i = 0; i < pendingCount; i++) {
-                final int length = pending[i];
+                final int value = pending[i];
                 for (int b = 0; b < width; b++) {
-                    header[at++] = (byte) (length >>> (8 * b));
+                    scratch[at++] = (byte) (value >>> (8 * b));
                 }
             }
-            chunks.append(header, 0, header.length);
+            chunks.append(scratch, 0, length);
             chunks.append(pendingBytes, 0, pendingLength);
         }
 
         private void writeInline() throws IOException {
-            final byte[] marker = { INLINE };
-            chunks.append(marker, 0, 1);
-            final byte[] vint = new byte[5];
+            scratch = ArrayUtil.growNoCopy(scratch, 5);
+            scratch[0] = INLINE;
+            chunks.append(scratch, 0, 1);
+            final byte[] vint = scratch;
             int at = 0;
             for (int i = 0; i < pendingCount; i++) {
                 int length = pending[i];
