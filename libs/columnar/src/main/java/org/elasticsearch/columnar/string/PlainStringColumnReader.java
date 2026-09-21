@@ -219,7 +219,7 @@ public final class PlainStringColumnReader extends StringColumnReader {
     protected DocIdSetIterator containsMatches(BytesRef term) throws IOException {
         final ColumnIterator presence = iterator();
         final ContainsSearch search = new ContainsSearch(term);
-        final boolean singleValued = hasValueAddresses() == false;
+        final SlotFold fold = new SlotFold();
         final float cost = Math.max(1f, (float) valueBytes() / Math.max(1L, numValues()));
         return TwoPhaseIterator.asDocIdSetIterator(new TwoPhaseIterator(presence) {
             @Override
@@ -242,18 +242,9 @@ public final class PlainStringColumnReader extends StringColumnReader {
 
             @Override
             public void intoBitSet(int upTo, FixedBitSet bitSet, int offset) throws IOException {
-                if (singleValued == false) {
-                    super.intoBitSet(upTo, bitSet, offset);
-                    return;
-                }
-                // One slot a document, the document's rank, so a run of present documents is a run of slots,
-                // searched a value block at a time. A dense column is one run.
-                int doc = presence.docID();
-                while (doc < upTo) {
-                    final int rank = presence.rank();
-                    final int runEnd = Math.min(presence.docIDRunEnd(), upTo);
-                    search.into(rank, rank + (runEnd - doc), bitSet, offset - (doc - rank));
-                    doc = presence.advance(runEnd);
+                // A run of present documents holds a contiguous stretch of slots, searched a value block at a time.
+                if (presence.docID() < upTo) {
+                    fold.collect(presence, search::into, upTo, bitSet, offset);
                 }
             }
         });
@@ -285,7 +276,7 @@ public final class PlainStringColumnReader extends StringColumnReader {
         }
 
         /** Sets the bit {@code slot - offset} in {@code dest} of every slot in {@code [from, to)} that holds the term. */
-        void into(long from, long to, FixedBitSet dest, int offset) throws IOException {
+        void into(long from, long to, FixedBitSet dest, long offset) throws IOException {
             while (from < to) {
                 final long block = from >>> shift;
                 final long blockStart = block << shift;
