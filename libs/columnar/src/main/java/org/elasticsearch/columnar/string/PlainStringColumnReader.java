@@ -219,7 +219,7 @@ public final class PlainStringColumnReader extends StringColumnReader {
     protected DocIdSetIterator containsMatches(BytesRef term) throws IOException {
         final ColumnIterator presence = iterator();
         final ContainsSearch search = new ContainsSearch(term);
-        final boolean slotIsDoc = presence.isDense() && hasValueAddresses() == false;
+        final boolean singleValued = hasValueAddresses() == false;
         final float cost = Math.max(1f, (float) valueBytes() / Math.max(1L, numValues()));
         return TwoPhaseIterator.asDocIdSetIterator(new TwoPhaseIterator(presence) {
             @Override
@@ -242,17 +242,19 @@ public final class PlainStringColumnReader extends StringColumnReader {
 
             @Override
             public void intoBitSet(int upTo, FixedBitSet bitSet, int offset) throws IOException {
-                if (slotIsDoc == false) {
+                if (singleValued == false) {
                     super.intoBitSet(upTo, bitSet, offset);
                     return;
                 }
-                // A document is its own slot, so the window's documents are a run of slots.
-                final int from = presence.docID();
-                if (from >= upTo) {
-                    return;
+                // One slot a document, the document's rank, so a run of present documents is a run of slots,
+                // searched a value block at a time. A dense column is one run.
+                int doc = presence.docID();
+                while (doc < upTo) {
+                    final int rank = presence.rank();
+                    final int runEnd = Math.min(presence.docIDRunEnd(), upTo);
+                    search.into(rank, rank + (runEnd - doc), bitSet, offset - (doc - rank));
+                    doc = presence.advance(runEnd);
                 }
-                search.into(from, Math.min(upTo, presence.cost()), bitSet, offset);
-                presence.advance(upTo);
             }
         });
     }
