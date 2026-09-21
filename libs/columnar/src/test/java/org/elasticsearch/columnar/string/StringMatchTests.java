@@ -215,6 +215,7 @@ public class StringMatchTests extends ColumnarStringTestCase {
                     );
                     assertWindowedAgrees("term [" + probe + "]", docSlots.length, () -> reader.matchTerm(term));
                     assertWindowedAgrees("prefix [" + probe + "]", docSlots.length, () -> reader.matchPrefix(term));
+                    assertWindowedAgrees("contains [" + probe + "]", docSlots.length, () -> reader.matchContains(term));
                     final TwoPhaseIterator twoPhase = TwoPhaseIterator.unwrap(reader.matchTerm(term));
                     if (twoPhase != null) {
                         assertEquals(
@@ -617,6 +618,72 @@ public class StringMatchTests extends ColumnarStringTestCase {
                 }
             );
         }
+    }
+
+    /**
+     * A plain column's block of values is searched as one run of bytes, so an occurrence found there may begin
+     * in one value and end in the next. Two letters make such occurrences common, and every one of them has to
+     * be turned away.
+     */
+    public void testContainsNeverSpansTwoValues() throws IOException {
+        final BytesRef[] docValues = new BytesRef[between(1000, 3000)];
+        for (int d = 0; d < docValues.length; d++) {
+            docValues[d] = new BytesRef(randomTwoLetters(between(0, 12)));
+        }
+        final BytesRef[][] docSlots = new BytesRef[between(1000, 3000)][];
+        for (int d = 0; d < docSlots.length; d++) {
+            docSlots[d] = new BytesRef[between(1, 4)];
+            for (int s = 0; s < docSlots[d].length; s++) {
+                docSlots[d][s] = s > 0 && random().nextInt(5) == 0 ? null : new BytesRef(randomTwoLetters(between(0, 8)));
+            }
+        }
+        final String[] probes = { "", "a", "ab", "ba", "aab", "abba", "bbbb", "abababab", randomTwoLetters(between(1, 6)) };
+        withColumn(
+            docValues,
+            randomValidBlockSize(),
+            randomChunkCodec(),
+            randomTargetChunkBytes(),
+            DictionaryPolicy.NONE,
+            (metadata, reader) -> {
+                for (String probe : probes) {
+                    assertEquals(
+                        "contains [" + probe + "]",
+                        containing(docValues, probe),
+                        matched(reader.matchContains(new BytesRef(probe)))
+                    );
+                    assertWindowedAgrees("contains [" + probe + "]", docValues.length, () -> reader.matchContains(new BytesRef(probe)));
+                }
+            }
+        );
+        withColumn(
+            docSlots,
+            randomValidBlockSize(),
+            randomChunkCodec(),
+            randomTargetChunkBytes(),
+            DictionaryPolicy.NONE,
+            (metadata, reader) -> {
+                for (String probe : probes) {
+                    final List<Integer> expected = new ArrayList<>();
+                    for (int d = 0; d < docSlots.length; d++) {
+                        for (BytesRef slot : docSlots[d]) {
+                            if (slot != null && slot.utf8ToString().contains(probe)) {
+                                expected.add(d);
+                                break;
+                            }
+                        }
+                    }
+                    assertEquals("multi-valued contains [" + probe + "]", expected, matched(reader.matchContains(new BytesRef(probe))));
+                }
+            }
+        );
+    }
+
+    private static String randomTwoLetters(int length) {
+        final StringBuilder b = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            b.append(randomBoolean() ? 'a' : 'b');
+        }
+        return b.toString();
     }
 
     /**

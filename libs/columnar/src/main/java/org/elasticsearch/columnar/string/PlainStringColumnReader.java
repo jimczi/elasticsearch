@@ -15,6 +15,7 @@ import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
 import org.elasticsearch.columnar.substrate.ColumnInputs;
 import org.elasticsearch.columnar.substrate.ColumnIterator;
+import org.elasticsearch.simdvec.ESVectorUtil;
 
 import java.io.IOException;
 import java.util.function.Predicate;
@@ -207,6 +208,130 @@ public final class PlainStringColumnReader extends StringColumnReader {
                 }
             }
         };
+    }
+
+    /**
+     * Documents holding a value with {@code term} inside it, in two phases. A document asked about on its own
+     * has its value searched; a window of documents asked about at once has the bytes of its values searched
+     * in one vectorized pass a value block at a time, so the search covers what was asked and nothing more.
+     */
+    @Override
+    protected DocIdSetIterator containsMatches(BytesRef term) throws IOException {
+        final ColumnIterator presence = iterator();
+        final ContainsSearch search = new ContainsSearch(term);
+        final boolean slotIsDoc = presence.isDense() && hasValueAddresses() == false;
+        final float cost = Math.max(1f, (float) valueBytes() / Math.max(1L, numValues()));
+        return TwoPhaseIterator.asDocIdSetIterator(new TwoPhaseIterator(presence) {
+            @Override
+            public boolean matches() throws IOException {
+                final int rank = presence.rank();
+                final long first = firstValueAddress(rank);
+                final long count = valueCount(rank);
+                for (long i = 0; i < count; i++) {
+                    if (search.holds(first + i)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            @Override
+            public float matchCost() {
+                return cost;
+            }
+
+            @Override
+            public void intoBitSet(int upTo, FixedBitSet bitSet, int offset) throws IOException {
+                if (slotIsDoc == false) {
+                    super.intoBitSet(upTo, bitSet, offset);
+                    return;
+                }
+                // A document is its own slot, so the window's documents are a run of slots.
+                final int from = presence.docID();
+                if (from >= upTo) {
+                    return;
+                }
+                search.into(from, Math.min(upTo, presence.cost()), bitSet, offset);
+                presence.advance(upTo);
+            }
+        });
+    }
+
+    /** Which slots hold {@code term}: one at a time, or a run of them searched a value block at a time. */
+    private final class ContainsSearch {
+        private final BytesRef term;
+        private final int shift;
+        private final int mask;
+
+        ContainsSearch(BytesRef term) {
+            this.term = term;
+            final int blockSize = values.valuesPerBlock();
+            this.shift = Integer.numberOfTrailingZeros(blockSize);
+            this.mask = blockSize - 1;
+        }
+
+        boolean holds(long slot) throws IOException {
+            if (term.length == 0) {
+                // Every value holds the empty term; a null is no value.
+                return isNullSlot(slot) == false;
+            }
+            values.decode(slot >>> shift);
+            final int i = (int) (slot & mask);
+            final int length = values.valueLength(i);
+            return length >= term.length
+                && ESVectorUtil.contains(values.blockBytes(), values.valueStart(i), length, term.bytes, term.offset, term.length);
+        }
+
+        /** Sets the bit {@code slot - offset} in {@code dest} of every slot in {@code [from, to)} that holds the term. */
+        void into(long from, long to, FixedBitSet dest, int offset) throws IOException {
+            while (from < to) {
+                final long block = from >>> shift;
+                final long blockStart = block << shift;
+                final int count = values.decode(block);
+                final int lo = (int) (from - blockStart);
+                final int hi = (int) Math.min(count, to - blockStart);
+                if (term.length == 0) {
+                    for (int i = lo; i < hi; i++) {
+                        if (isNullSlot(blockStart + i) == false) {
+                            dest.set((int) (blockStart + i - offset));
+                        }
+                    }
+                } else {
+                    search(lo, hi, blockStart - offset, dest);
+                }
+                from = blockStart + hi;
+            }
+        }
+
+        /**
+         * Searches values {@code [lo, hi)} of the decoded block in one pass. Their starts never decrease, a repeat
+         * sharing the start of the value before it, so each value is answered by the first occurrence at or after
+         * its start, and a value whose bytes end before that occurrence holds none.
+         */
+        private void search(int lo, int hi, long base, FixedBitSet dest) {
+            final byte[] bytes = values.blockBytes();
+            final int end = values.valueStart(hi - 1) + values.valueLength(hi - 1);
+            final int n = term.length;
+            // The first occurrence at or after the last start searched from, and so at or after every start up to it.
+            int hit = -1;
+            for (int i = lo; i < hi; i++) {
+                final int length = values.valueLength(i);
+                if (length < n) {
+                    continue;
+                }
+                final int start = values.valueStart(i);
+                if (hit < start) {
+                    final int found = ESVectorUtil.indexOf(bytes, start, end - start, term.bytes, term.offset, n);
+                    if (found < 0) {
+                        return;
+                    }
+                    hit = start + found;
+                }
+                if (hit + n <= start + length) {
+                    dest.set((int) (base + i));
+                }
+            }
+        }
     }
 
     /**

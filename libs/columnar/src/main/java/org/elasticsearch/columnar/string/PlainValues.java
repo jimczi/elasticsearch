@@ -276,6 +276,8 @@ final class PlainValues {
         private final BytesRef block = new BytesRef();
         private long loadedBlock = -1;
         private long blockStart;
+        /** Where the loaded block of values begins in the loaded block of lengths. */
+        private int decodedFirst;
 
         private Reader(Metadata meta, ColumnInputs inputs) throws IOException {
             this.numValues = meta.numValues();
@@ -357,6 +359,37 @@ final class PlainValues {
             return start;
         }
 
+        int valuesPerBlock() {
+            return valuesPerBlock;
+        }
+
+        /**
+         * Loads block {@code valueBlock} of values, whose bytes are then {@link #blockBytes} and whose {@code i}th
+         * value is {@link #valueLength} bytes at {@link #valueStart}. Answers how many values the block holds.
+         * A repeat begins where the value before it does, and a null holds no bytes.
+         */
+        int decode(long valueBlock) throws IOException {
+            loadBlock(valueBlock);
+            return (int) Math.min(valuesPerBlock, numValues - (valueBlock << valuesShift));
+        }
+
+        byte[] blockBytes() {
+            return block.bytes;
+        }
+
+        /** Where the {@code i}th value of the decoded block begins in {@link #blockBytes}. */
+        int valueStart(int i) {
+            if (constantLength >= 0) {
+                return block.offset + i * constantLength;
+            }
+            return block.offset + (int) (slotStarts[decodedFirst + i] - blockStart);
+        }
+
+        /** The length of the {@code i}th value of the decoded block; zero for a null. */
+        int valueLength(int i) {
+            return constantLength >= 0 ? constantLength : slotLengths[decodedFirst + i];
+        }
+
         /**
          * The stored codes, a block of them at a time: {@link #NULL}, {@link #REPEAT}, or a length above
          * {@link #LENGTH_BASE}. A column of one length stores none, and is answered as a block of that length.
@@ -419,6 +452,7 @@ final class PlainValues {
                 final int last = Math.min(at + valuesPerBlock, loadedCount) - 1;
                 blockStart = slotStarts[at];
                 chunks.span(blockStart, (int) (slotStarts[last] + slotLengths[last] - blockStart), block);
+                decodedFirst = at;
                 loadedBlock = valueBlock;
             }
         }
