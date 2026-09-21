@@ -373,6 +373,60 @@ public final class DictionaryStringColumnReader extends StringColumnReader {
      * can only be among the escapes, which are read as values.
      */
     @Override
+    protected SlotTest slotHolding(BytesRef term) throws IOException {
+        final int end = dictionarySize + StringColumnMetadata.Dictionary.FIRST_TERM_ORDINAL;
+        final int ordinal = firstTermAtLeast(term, end);
+        if (endOfRun(null, term, ordinal, end) != ordinal) {
+            // A term the dictionary holds is never an escape, so its ordinal alone says which slots hold it.
+            final SlotWindow window = new SlotWindow(SlotBlocks.of(ordinals), ordinal, ordinal);
+            return window::holds;
+        }
+        if (escapeCount == 0) {
+            return slot -> false;
+        }
+        final BytesRef escaped = new BytesRef();
+        return slot -> {
+            if (ordinalAt(slot) != escapeOrdinal) {
+                return false;
+            }
+            escapes.get(escapeRankOf(slot), escaped);
+            return escaped.bytesEquals(term);
+        };
+    }
+
+    @Override
+    protected SlotWindow slotsHoldingWindow(BytesRef term) throws IOException {
+        final int end = dictionarySize + StringColumnMetadata.Dictionary.FIRST_TERM_ORDINAL;
+        final int ordinal = firstTermAtLeast(term, end);
+        if (endOfRun(null, term, ordinal, end) == ordinal) {
+            // Not a term the dictionary holds: only an escaped value can be it, and when none escaped nothing is.
+            return escapeCount > 0 ? null : new SlotWindow(SlotBlocks.of(ordinals));
+        }
+        return new SlotWindow(SlotBlocks.of(ordinals), ordinal, ordinal);
+    }
+
+    @Override
+    protected SlotWindow slotsNotHoldingWindow(BytesRef term) throws IOException {
+        final int end = dictionarySize + StringColumnMetadata.Dictionary.FIRST_TERM_ORDINAL;
+        final int ordinal = firstTermAtLeast(term, end);
+        if (endOfRun(null, term, ordinal, end) == ordinal) {
+            // Not a term the dictionary holds, so only an escaped value can be it, and that takes its bytes.
+            return escapeCount > 0
+                ? null
+                : new SlotWindow(SlotBlocks.of(ordinals), StringColumnMetadata.Dictionary.NULL_ORDINAL, escapeOrdinal);
+        }
+        // An escaped value is never a term the dictionary holds, so every ordinal but the term's settles it,
+        // the null's and the escape's included.
+        return new SlotWindow(
+            SlotBlocks.of(ordinals),
+            StringColumnMetadata.Dictionary.NULL_ORDINAL,
+            ordinal - 1L,
+            ordinal + 1L,
+            escapeOrdinal
+        );
+    }
+
+    @Override
     protected DocIdSetIterator unorderedMatches(BytesRef prefix, BytesRef exact) throws IOException {
         // Bisected in column ordinals, so the range these produce needs no shifting to test a block of them
         // against — and cannot reach the reserved null, which sorts below every term by construction.

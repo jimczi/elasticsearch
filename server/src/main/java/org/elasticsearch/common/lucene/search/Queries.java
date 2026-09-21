@@ -13,6 +13,8 @@ import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanClause.Occur;
 import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.BoostQuery;
+import org.apache.lucene.search.ConstantScoreQuery;
 import org.apache.lucene.search.FieldExistsQuery;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.MatchNoDocsQuery;
@@ -21,6 +23,7 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.QueryVisitor;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.ElasticsearchException;
+import org.elasticsearch.columnar.ColumnarStringTermQuery;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.SuppressForbidden;
 import org.elasticsearch.index.IndexVersion;
@@ -118,9 +121,30 @@ public final class Queries {
         return clauses.isEmpty() == false && clauses.stream().allMatch(BooleanClause::isProhibited);
     }
 
+    /** A clause excluded by a negative query is never scored, so a boost or a constant score around it says nothing. */
+    private static Query unwrapScoring(Query q) {
+        while (true) {
+            if (q instanceof BoostQuery boost) {
+                q = boost.getQuery();
+            } else if (q instanceof ConstantScoreQuery constant) {
+                q = constant.getQuery();
+            } else {
+                return q;
+            }
+        }
+    }
+
     public static Query fixNegativeQueryIfNeeded(Query q, QueryVisitor queryVisitor) {
         if (isNegativeQuery(q)) {
             BooleanQuery bq = (BooleanQuery) q;
+            if (bq.clauses().size() == 1 && unwrapScoring(bq.clauses().get(0).query()) instanceof ColumnarStringTermQuery term) {
+                final Query complement = term.negate();
+                if (complement != null) {
+                    // The column answers the complement itself rather than every document minus the term's matches.
+                    // Scored as the negative query is, at zero.
+                    return new BoostQuery(new ConstantScoreQuery(complement), 0f);
+                }
+            }
             BooleanQuery.Builder builder = new BooleanQuery.Builder();
             for (BooleanClause clause : bq) {
                 builder.add(clause);

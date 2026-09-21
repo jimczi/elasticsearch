@@ -374,6 +374,306 @@ public abstract sealed class StringColumnReader permits PlainStringColumnReader,
         return matching(term, term);
     }
 
+    /**
+     * Documents none of whose values is {@code term}, documents with no value included: the complement of
+     * {@link #matchTerm} over {@code [0, maxDoc)}. A column holding one value on every document answers it from
+     * what it keeps beside the values; any other shape takes the complement of the term's matches.
+     */
+    public DocIdSetIterator matchNotTerm(BytesRef term, int maxDoc) throws IOException {
+        if (meta.numDocsWithField() == 0 || term.length < meta.minLength() || term.length > meta.maxLength()) {
+            // No value in the column has the term's length, so no document holds it.
+            return DocIdSetIterator.all(maxDoc);
+        }
+        if (hasValueAddresses() == false) {
+            final SlotWindow notHolding = slotsNotHoldingWindow(term);
+            if (notHolding != null) {
+                return settled(absentOrHeld(notHolding, maxDoc));
+            }
+        } else {
+            final SlotWindow holding = slotsHoldingWindow(term);
+            if (holding != null) {
+                return settled(absentOrNoneHeld(holding, maxDoc));
+            }
+        }
+        final SlotTest holding = slotHolding(term);
+        if (holding == null) {
+            return complement(matchTerm(term), maxDoc);
+        }
+        // A document with no value matches without a look at the column; one with values matches when none of its
+        // slots holds the term.
+        final ColumnIterator presence = iterator();
+        final DocIdSetIterator all = DocIdSetIterator.all(maxDoc);
+        return TwoPhaseIterator.asDocIdSetIterator(new TwoPhaseIterator(all) {
+            @Override
+            public boolean matches() throws IOException {
+                if (presence.advanceExact(all.docID()) == false) {
+                    return true;
+                }
+                final int rank = presence.rank();
+                final long first = firstValueAddress(rank);
+                final long count = valueCount(rank);
+                for (long i = 0; i < count; i++) {
+                    if (holding.holds(first + i)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            @Override
+            public float matchCost() {
+                return 2f;
+            }
+        });
+    }
+
+    /** Whether a slot holds a value. */
+    protected interface SlotTest {
+        boolean holds(long slot) throws IOException;
+    }
+
+    /** Which slots hold {@code term}, asked one slot at a time, or null when the layout cannot say it cheaply. */
+    protected SlotTest slotHolding(BytesRef term) throws IOException {
+        return null;
+    }
+
+    /**
+     * The slots whose value is surely not {@code term}, a null slot included, as a window that settles them; null
+     * when the layout cannot tell them apart without reading values.
+     */
+    protected SlotWindow slotsNotHoldingWindow(BytesRef term) throws IOException {
+        return null;
+    }
+
+    /** The slots whose value is surely {@code term}, as a window that settles them; null when it takes the values. */
+    protected SlotWindow slotsHoldingWindow(BytesRef term) throws IOException {
+        return null;
+    }
+
+    /**
+     * Every document without a value, and every document none of whose slots a window holds, an empty array or a
+     * document of nulls included. A run of present documents holds a contiguous stretch of slots, filled at once and
+     * folded onto the documents through their slot counts.
+     */
+    private DocIdSetIterator absentOrNoneHeld(SlotWindow holding, int maxDoc) throws IOException {
+        final ColumnIterator presence = iterator();
+        final SlotFold fold = new SlotFold();
+        return new DocIdSetIterator() {
+            private int doc = -1;
+
+            private int present(int target) throws IOException {
+                return presence.docID() < target ? presence.advance(target) : presence.docID();
+            }
+
+            private boolean noneHeld(int rank) throws IOException {
+                final long first = firstValueAddress(rank);
+                final long count = valueCount(rank);
+                return count == 0 || holding.next(first, first + count) < 0;
+            }
+
+            @Override
+            public int docID() {
+                return doc;
+            }
+
+            @Override
+            public int nextDoc() throws IOException {
+                return advance(doc + 1);
+            }
+
+            @Override
+            public int advance(int target) throws IOException {
+                int at = target;
+                while (at < maxDoc) {
+                    final int next = present(at);
+                    if (next != at) {
+                        return doc = at;
+                    }
+                    final int rank = presence.rank();
+                    final int runEnd = presence.docIDRunEnd();
+                    for (int d = at; d < runEnd; d++) {
+                        if (noneHeld(rank + (d - at))) {
+                            return doc = d == at ? at : presence.advance(d);
+                        }
+                    }
+                    at = runEnd;
+                }
+                return doc = NO_MORE_DOCS;
+            }
+
+            @Override
+            public int docIDRunEnd() throws IOException {
+                final int next = present(doc);
+                if (next != doc) {
+                    return Math.min(next, maxDoc);
+                }
+                final int rank = presence.rank();
+                final int runEnd = presence.docIDRunEnd();
+                int end = doc + 1;
+                while (end < runEnd && noneHeld(rank + (end - doc))) {
+                    end++;
+                }
+                return end;
+            }
+
+            @Override
+            public void intoBitSet(int upTo, FixedBitSet bitSet, int offset) throws IOException {
+                if (doc >= upTo) {
+                    return;
+                }
+                int at = doc;
+                final int end = Math.min(upTo, maxDoc);
+                while (at < end) {
+                    final int next = present(at);
+                    if (next != at) {
+                        final int absentEnd = Math.min(next, end);
+                        bitSet.set(at - offset, absentEnd - offset);
+                        at = absentEnd;
+                        continue;
+                    }
+                    final int runEnd = Math.min(presence.docIDRunEnd(), end);
+                    fold.collectNone(presence, holding::into, runEnd, bitSet, offset);
+                    at = runEnd;
+                }
+                advance(upTo);
+            }
+
+            @Override
+            public long cost() {
+                return maxDoc;
+            }
+        };
+    }
+
+    /**
+     * The documents a window settles plus every document without a value, for a column of one slot a document.
+     * Absent documents lie between runs of present ones; within a run the slot advances with the document, so a
+     * stretch of the window maps onto a stretch of documents. A dense column has no absent documents and is one run.
+     */
+    private DocIdSetIterator absentOrHeld(SlotWindow window, int maxDoc) throws IOException {
+        final ColumnIterator presence = iterator();
+        return new DocIdSetIterator() {
+            private int doc = -1;
+
+            /** The first present document at or after {@code target}, or {@code NO_MORE_DOCS}. */
+            private int present(int target) throws IOException {
+                return presence.docID() < target ? presence.advance(target) : presence.docID();
+            }
+
+            @Override
+            public int docID() {
+                return doc;
+            }
+
+            @Override
+            public int nextDoc() throws IOException {
+                return advance(doc + 1);
+            }
+
+            @Override
+            public int advance(int target) throws IOException {
+                int at = target;
+                while (at < maxDoc) {
+                    final int next = present(at);
+                    if (next != at) {
+                        // No value at this document, so no value is the term.
+                        return doc = at;
+                    }
+                    final long rank = presence.rank();
+                    final int runEnd = presence.docIDRunEnd();
+                    final long slot = window.next(rank, rank + (runEnd - at));
+                    if (slot >= 0) {
+                        return doc = at + (int) (slot - rank);
+                    }
+                    at = runEnd;
+                }
+                return doc = NO_MORE_DOCS;
+            }
+
+            @Override
+            public int docIDRunEnd() throws IOException {
+                final int next = present(doc);
+                if (next != doc) {
+                    // A run of documents without a value, up to the next one with.
+                    return Math.min(next, maxDoc);
+                }
+                final long rank = presence.rank();
+                final int runEnd = presence.docIDRunEnd();
+                return doc + (int) (window.runEnd(rank, rank + (runEnd - doc)) - rank);
+            }
+
+            @Override
+            public void intoBitSet(int upTo, FixedBitSet bitSet, int offset) throws IOException {
+                if (doc >= upTo) {
+                    return;
+                }
+                int at = doc;
+                final int end = Math.min(upTo, maxDoc);
+                while (at < end) {
+                    final int next = present(at);
+                    if (next != at) {
+                        final int absentEnd = Math.min(next, end);
+                        bitSet.set(at - offset, absentEnd - offset);
+                        at = absentEnd;
+                        continue;
+                    }
+                    final long rank = presence.rank();
+                    final int runEnd = Math.min(presence.docIDRunEnd(), end);
+                    window.into(rank, rank + (runEnd - at), bitSet, offset - (at - (int) rank));
+                    at = runEnd;
+                }
+                advance(upTo);
+            }
+
+            @Override
+            public long cost() {
+                return maxDoc;
+            }
+        };
+    }
+
+    /** Every document in {@code [0, maxDoc)} that {@code matches} does not hold. */
+    private static DocIdSetIterator complement(DocIdSetIterator matches, int maxDoc) {
+        final DocIdSetIterator all = DocIdSetIterator.all(maxDoc);
+        return TwoPhaseIterator.asDocIdSetIterator(new TwoPhaseIterator(all) {
+            @Override
+            public boolean matches() throws IOException {
+                final int doc = all.docID();
+                return (matches.docID() < doc ? matches.advance(doc) : matches.docID()) != doc;
+            }
+
+            @Override
+            public float matchCost() {
+                return 10f;
+            }
+        });
+    }
+
+    /** The documents a window settles, as a two-phase iterator whose confirmation is free. */
+    protected static DocIdSetIterator settled(DocIdSetIterator candidates) {
+        return TwoPhaseIterator.asDocIdSetIterator(new TwoPhaseIterator(candidates) {
+            @Override
+            public boolean matches() {
+                return true;
+            }
+
+            @Override
+            public float matchCost() {
+                return 0f;
+            }
+
+            @Override
+            public int docIDRunEnd() throws IOException {
+                return candidates.docIDRunEnd();
+            }
+
+            @Override
+            public void intoBitSet(int upTo, FixedBitSet bitSet, int offset) throws IOException {
+                candidates.intoBitSet(upTo, bitSet, offset);
+            }
+        });
+    }
+
     /** Documents holding a value that starts with {@code prefix}, answered as {@link #matchTerm} is. */
     public DocIdSetIterator matchPrefix(BytesRef prefix) throws IOException {
         return matching(prefix, null);
@@ -683,6 +983,48 @@ public abstract sealed class StringColumnReader permits PlainStringColumnReader,
         /** Documents folded at a time, which bounds the scratch a stretch of slots is filled into. */
         private static final int DOCS_A_STRETCH = 1024;
         private FixedBitSet scratch = new FixedBitSet(0);
+
+        /**
+         * Sets the bit {@code doc - offset} of every document in {@code [presence.docID(), upTo)} holding no slot
+         * {@code fill} holds, a document with no slots included, and leaves {@code presence} on its first document at
+         * or after {@code upTo}.
+         */
+        void collectNone(ColumnIterator presence, SlotFill fill, int upTo, FixedBitSet bitSet, int offset) throws IOException {
+            int doc = presence.docID();
+            while (doc < upTo) {
+                int rank = presence.rank();
+                final int runEnd = Math.min(presence.docIDRunEnd(), upTo);
+                for (int at = doc; at < runEnd;) {
+                    final int stretchEnd = Math.min(runEnd, at + DOCS_A_STRETCH);
+                    final int endRank = rank + (stretchEnd - at);
+                    final long firstSlot = firstValueAddress(rank);
+                    final long endSlot = firstValueAddress(endRank - 1) + valueCount(endRank - 1);
+                    final int slots = (int) (endSlot - firstSlot);
+                    if (slots > 0) {
+                        if (scratch.length() < slots) {
+                            scratch = new FixedBitSet(slots);
+                        } else {
+                            scratch.clear(0, slots);
+                        }
+                        fill.into(firstSlot, endSlot, scratch, firstSlot);
+                    }
+                    for (int r = rank; r < endRank; r++) {
+                        final long count = valueCount(r);
+                        if (count > 0) {
+                            final int first = (int) (firstValueAddress(r) - firstSlot);
+                            final int held = scratch.nextSetBit(first);
+                            if (held != DocIdSetIterator.NO_MORE_DOCS && held < first + count) {
+                                continue;
+                            }
+                        }
+                        bitSet.set(at + (r - rank) - offset);
+                    }
+                    rank = endRank;
+                    at = stretchEnd;
+                }
+                doc = presence.advance(runEnd);
+            }
+        }
 
         /**
          * Sets the bit {@code doc - offset} of every document in {@code [presence.docID(), upTo)} holding a slot

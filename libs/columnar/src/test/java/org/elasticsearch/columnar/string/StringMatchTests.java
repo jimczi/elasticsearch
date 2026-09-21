@@ -288,6 +288,23 @@ public class StringMatchTests extends ColumnarStringTestCase {
                     assertSparse(layout + " term [" + probe + "]", docValues, v -> v.equals(probe), () -> reader.matchTerm(term));
                     assertSparse(layout + " prefix [" + probe + "]", docValues, v -> v.startsWith(probe), () -> reader.matchPrefix(term));
                     assertSparse(layout + " contains [" + probe + "]", docValues, v -> v.contains(probe), () -> reader.matchContains(term));
+                    // The complement takes every document without a value too.
+                    final FixedBitSet notTerm = new FixedBitSet(docValues.length);
+                    for (int d = 0; d < docValues.length; d++) {
+                        if (docValues[d] == null || docValues[d].utf8ToString().equals(probe) == false) {
+                            notTerm.set(d);
+                        }
+                    }
+                    final String notLabel = layout + " not [" + probe + "]";
+                    final List<Integer> notExpected = new ArrayList<>();
+                    for (int d = notTerm.nextSetBit(0); d != DocIdSetIterator.NO_MORE_DOCS; d = d + 1 < notTerm.length()
+                        ? notTerm.nextSetBit(d + 1)
+                        : DocIdSetIterator.NO_MORE_DOCS) {
+                        notExpected.add(d);
+                    }
+                    assertEquals(notLabel, notExpected, matched(reader.matchNotTerm(term, docValues.length)));
+                    assertWindowedAgrees(notLabel, docValues.length, () -> reader.matchNotTerm(term, docValues.length));
+                    assertDocIDRunEndContract(notLabel, () -> reader.matchNotTerm(term, docValues.length), notTerm, docValues.length);
                     assertSparse(
                         layout + " any of [" + probe + ", xyz]",
                         docValues,
@@ -344,6 +361,10 @@ public class StringMatchTests extends ColumnarStringTestCase {
                         anySlot(docSlots, v -> v.contains(probe)),
                         () -> reader.matchContains(term)
                     );
+                    // A document none of whose slots is the term: absent, an empty array and all nulls included.
+                    final FixedBitSet noneIs = anySlot(docSlots, v -> v.equals(probe));
+                    noneIs.flip(0, docSlots.length);
+                    assertMatchesAndRuns(layout + " not [" + probe + "]", noneIs, () -> reader.matchNotTerm(term, docSlots.length));
                     assertMatchesAndRuns(
                         layout + " any of [" + probe + ", xyz]",
                         anySlot(docSlots, v -> v.equals(probe) || v.equals("xyz")),
@@ -396,6 +417,62 @@ public class StringMatchTests extends ColumnarStringTestCase {
         assertEquals(label, expected, matched(match.get()));
         assertWindowedAgrees(label, docValues.length, match);
         assertDocIDRunEndContract(label, match::get, matching, docValues.length);
+    }
+
+    /**
+     * A negated term is every document none of whose values is the term, a document with no value included, checked
+     * against every term asked on dense, sparse and multi-valued columns of both layouts.
+     */
+    public void testNotTermIsTheComplementOfTheTerm() throws IOException {
+        // Without the empty value half the time, so an empty term is shorter than anything the column holds.
+        final String[] vocabulary = randomBoolean()
+            ? new String[] { "", "a", "ab", "abc", "abd", "xyz", "a-longer-value", "zz" }
+            : new String[] { "a", "ab", "abc", "abd", "xyz", "a-longer-value", "zz" };
+        final boolean dense = randomBoolean();
+        final BytesRef[][] docSlots = new BytesRef[between(600, 3000)][];
+        String current = randomFrom(vocabulary);
+        for (int d = 0; d < docSlots.length; d++) {
+            if (random().nextInt(8) == 0) {
+                current = random().nextInt(20) == 0 ? "rare-" + d : randomFrom(vocabulary);
+            }
+            if (dense) {
+                docSlots[d] = new BytesRef[] { new BytesRef(current) };
+            } else {
+                final int slots = random().nextInt(6) == 0 ? 0 : between(1, 3);
+                docSlots[d] = new BytesRef[slots];
+                for (int s = 0; s < slots; s++) {
+                    docSlots[d][s] = random().nextInt(5) == 0 ? null : new BytesRef(s == 0 ? current : randomFrom(vocabulary));
+                }
+            }
+        }
+        final List<String> probes = new ArrayList<>(List.of(vocabulary));
+        probes.add("");
+        probes.add("absent");
+        probes.add("a-value-longer-than-anything-the-column-holds");
+        probes.add("rare-" + between(0, docSlots.length));
+        for (DictionaryPolicy policy : List.of(DictionaryPolicy.NONE, ROOMY)) {
+            withColumn(docSlots, randomValidBlockSize(), randomChunkCodec(), randomTargetChunkBytes(), policy, (metadata, reader) -> {
+                for (String probe : probes) {
+                    final BytesRef term = new BytesRef(probe);
+                    final List<Integer> expected = new ArrayList<>();
+                    for (int d = 0; d < docSlots.length; d++) {
+                        boolean holds = false;
+                        for (BytesRef slot : docSlots[d]) {
+                            holds |= slot != null && slot.utf8ToString().equals(probe);
+                        }
+                        if (holds == false) {
+                            expected.add(d);
+                        }
+                    }
+                    final String label = "not [" + probe + "] dense=" + dense + " dictionary=" + reader.hasDictionary();
+                    assertEquals(label, expected, matched(reader.matchNotTerm(term, docSlots.length)));
+                    assertWindowedAgrees(label, docSlots.length, () -> reader.matchNotTerm(term, docSlots.length));
+                    final FixedBitSet expectedBits = new FixedBitSet(docSlots.length);
+                    expected.forEach(expectedBits::set);
+                    assertDocIDRunEndContract(label, () -> reader.matchNotTerm(term, docSlots.length), expectedBits, docSlots.length);
+                }
+            });
+        }
     }
 
     private static List<Integer> expected(BytesRef[][] docSlots, Predicate<String> test) {

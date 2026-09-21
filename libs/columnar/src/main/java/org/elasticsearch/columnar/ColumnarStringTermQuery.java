@@ -52,7 +52,9 @@ public final class ColumnarStringTermQuery extends Query {
     private enum Where {
         WHOLE,
         START,
-        ANYWHERE
+        ANYWHERE,
+        /** No value is the term, a document holding none included: the complement of {@link #WHOLE}. */
+        NOT_WHOLE
     }
 
     private final String field;
@@ -75,6 +77,15 @@ public final class ColumnarStringTermQuery extends Query {
         return new ColumnarStringTermQuery(field, term, Where.ANYWHERE, budget);
     }
 
+    /**
+     * The complement of this term query over every document, or null when this is not a whole-term query. A
+     * negated term is otherwise every document minus the term's matches, which walks each excluded document; the
+     * column answers the complement from what it keeps beside the values instead.
+     */
+    public ColumnarStringTermQuery negate() {
+        return where == Where.WHOLE ? new ColumnarStringTermQuery(field, term, Where.NOT_WHOLE, budget) : null;
+    }
+
     private ColumnarStringTermQuery(String field, BytesRef term, Where where, ScanBudget budget) {
         this.field = Objects.requireNonNull(field);
         this.term = BytesRef.deepCopyOf(Objects.requireNonNull(term));
@@ -90,8 +101,21 @@ public final class ColumnarStringTermQuery extends Query {
                 final LeafReader reader = context.reader();
                 final FieldInfo info = reader.getFieldInfos().fieldInfo(field);
                 if (info == null || info.getDocValuesType() != DocValuesType.BINARY) {
-                    // No value for the field in this segment, so nothing here matches.
-                    return null;
+                    // No value for the field in this segment, so nothing here matches, and every document is its complement.
+                    if (where != Where.NOT_WHOLE) {
+                        return null;
+                    }
+                    return new ConstantScoreScorerSupplier(score(), scoreMode, reader.maxDoc()) {
+                        @Override
+                        public long cost() {
+                            return reader.maxDoc();
+                        }
+
+                        @Override
+                        public DocIdSetIterator iterator(long leadCost) {
+                            return DocIdSetIterator.all(reader.maxDoc());
+                        }
+                    };
                 }
                 return new ConstantScoreScorerSupplier(score(), scoreMode, reader.maxDoc()) {
                     @Override
@@ -106,7 +130,7 @@ public final class ColumnarStringTermQuery extends Query {
                         budget.check(searcher);
                         final BinaryDocValues values = reader.getBinaryDocValues(field);
                         if (values == null) {
-                            return DocIdSetIterator.empty();
+                            return where == Where.NOT_WHOLE ? DocIdSetIterator.all(reader.maxDoc()) : DocIdSetIterator.empty();
                         }
                         if (values instanceof StringColumnSource columnar) {
                             final StringColumnReader column = columnar.reader();
@@ -114,6 +138,7 @@ public final class ColumnarStringTermQuery extends Query {
                                 case WHOLE -> column.matchTerm(term);
                                 case START -> column.matchPrefix(term);
                                 case ANYWHERE -> column.matchContains(term);
+                                case NOT_WHOLE -> column.matchNotTerm(term, reader.maxDoc());
                             };
                         }
 
@@ -123,6 +148,31 @@ public final class ColumnarStringTermQuery extends Query {
                         // which is what the column answers too.
                         final BytesRef value = new BytesRef();
                         final StringBinaryPayload.Decoder decoder = new StringBinaryPayload.Decoder();
+                        if (where == Where.NOT_WHOLE) {
+                            // Every document, a document with no value included, whose slots do not hold the term.
+                            final DocIdSetIterator all = DocIdSetIterator.all(reader.maxDoc());
+                            return TwoPhaseIterator.asDocIdSetIterator(new TwoPhaseIterator(all) {
+                                @Override
+                                public boolean matches() throws IOException {
+                                    if (values.advanceExact(all.docID()) == false) {
+                                        return true;
+                                    }
+                                    final int slots = decoder.reset(values.binaryValue());
+                                    for (int slot = 0; slot < slots; slot++) {
+                                        final BytesRef candidate = decoder.next();
+                                        if (candidate != null && candidate.bytesEquals(term)) {
+                                            return false;
+                                        }
+                                    }
+                                    return true;
+                                }
+
+                                @Override
+                                public float matchCost() {
+                                    return 10f;
+                                }
+                            });
+                        }
                         return TwoPhaseIterator.asDocIdSetIterator(new TwoPhaseIterator(values) {
                             @Override
                             public boolean matches() throws IOException {
@@ -144,6 +194,7 @@ public final class ColumnarStringTermQuery extends Query {
                                             value.length = term.length;
                                             yield value.bytesEquals(term);
                                         }
+                                        case NOT_WHOLE -> throw new AssertionError("answered above");
                                         case ANYWHERE -> ESVectorUtil.contains(
                                             candidate.bytes,
                                             candidate.offset,
@@ -189,6 +240,7 @@ public final class ColumnarStringTermQuery extends Query {
             case WHOLE -> field + ":" + term.utf8ToString();
             case START -> field + ":" + term.utf8ToString() + "*";
             case ANYWHERE -> field + ":*" + term.utf8ToString() + "*";
+            case NOT_WHOLE -> "-" + field + ":" + term.utf8ToString();
         };
     }
 

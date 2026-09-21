@@ -192,7 +192,12 @@ public final class PlainStringColumnReader extends StringColumnReader {
      * answer of the slot before it.
      */
     private SlotWindow lengthWindow(long min, long max) {
-        return new SlotWindow(values.codes(), PlainValues.code(min), PlainValues.code(max)) {
+        return codeWindow(PlainValues.code(min), PlainValues.code(max));
+    }
+
+    /** The slots whose stored code is in any of the inclusive {@code ranges}, a repeat taking the answer of the slot before it. */
+    private SlotWindow codeWindow(long... ranges) {
+        return new SlotWindow(values.codes(), ranges) {
             @Override
             protected void adjust(long[] block, int count, long[] bits) {
                 // A block never starts with a repeat.
@@ -208,6 +213,35 @@ public final class PlainStringColumnReader extends StringColumnReader {
                 }
             }
         };
+    }
+
+    @Override
+    protected SlotTest slotHolding(BytesRef term) throws IOException {
+        final long code = PlainValues.code(term.length);
+        final SlotWindow window = codeWindow(code, code);
+        if (term.length == 0) {
+            // The length settles an empty term.
+            return window::holds;
+        }
+        final LastSeen lastSeen = new LastSeen();
+        return slot -> window.holds(slot) && matchesSlot(slot, null, term, lastSeen);
+    }
+
+    @Override
+    protected SlotWindow slotsHoldingWindow(BytesRef term) throws IOException {
+        // The empty length settles an empty term; any other takes the values.
+        return term.length == 0 ? codeWindow(PlainValues.code(0), PlainValues.code(0)) : null;
+    }
+
+    @Override
+    protected SlotWindow slotsNotHoldingWindow(BytesRef term) throws IOException {
+        if (term.length > 0) {
+            // A value of the term's length has to be compared, so the lengths do not settle it.
+            return null;
+        }
+        // Every code but the empty length's settles it, a null's included; a repeat takes the answer before it.
+        final long code = PlainValues.code(0);
+        return codeWindow(PlainValues.NULL, code - 1, code + 1, Long.MAX_VALUE);
     }
 
     /**

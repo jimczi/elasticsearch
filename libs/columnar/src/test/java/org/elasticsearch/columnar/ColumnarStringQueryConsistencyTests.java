@@ -231,6 +231,13 @@ public class ColumnarStringQueryConsistencyTests extends ESTestCase {
             );
             cases.add(
                 new Case(
+                    "complement [" + probe + "]",
+                    ColumnarStringTermQuery.term(FIELD, term, s -> {}).negate(),
+                    v -> v != DELETED && any(v, x -> x.equals(probe)) == false
+                )
+            );
+            cases.add(
+                new Case(
                     "not [" + probe + "]",
                     new BooleanQuery.Builder().add(new MatchAllDocsQuery(), Occur.FILTER)
                         .add(ColumnarStringTermQuery.term(FIELD, term, s -> {}), Occur.MUST_NOT)

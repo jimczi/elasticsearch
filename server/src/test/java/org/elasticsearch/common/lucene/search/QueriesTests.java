@@ -12,9 +12,14 @@ package org.elasticsearch.common.lucene.search;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause.Occur;
 import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.BoostQuery;
+import org.apache.lucene.search.ConstantScoreQuery;
 import org.apache.lucene.search.FieldExistsQuery;
+import org.apache.lucene.search.Query;
 import org.apache.lucene.search.QueryVisitor;
 import org.apache.lucene.search.TermQuery;
+import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.columnar.ColumnarStringTermQuery;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.mapper.SeqNoFieldMapper;
 import org.elasticsearch.test.ESTestCase;
@@ -53,5 +58,26 @@ public class QueriesTests extends ESTestCase {
                 QueryVisitor.EMPTY_VISITOR
             )
         );
+    }
+
+    /** A lone negated columnar term becomes its complement, whether or not a boost or a constant score wraps it. */
+    public void testFixNegativeColumnarTerm() {
+        final ColumnarStringTermQuery term = ColumnarStringTermQuery.term("field", new BytesRef("value"), searcher -> {});
+        final Query excluded = switch (between(0, 2)) {
+            case 0 -> term;
+            case 1 -> new BoostQuery(term, 0f);
+            default -> new ConstantScoreQuery(new BoostQuery(term, 0f));
+        };
+        final Query fixed = Queries.fixNegativeQueryIfNeeded(
+            new BooleanQuery.Builder().add(excluded, Occur.MUST_NOT).build(),
+            QueryVisitor.EMPTY_VISITOR
+        );
+        assertEquals(new BoostQuery(new ConstantScoreQuery(term.negate()), 0f), fixed);
+
+        // Anything more than the lone term keeps the generic shape.
+        final BooleanQuery two = new BooleanQuery.Builder().add(term, Occur.MUST_NOT)
+            .add(new TermQuery(new Term("other", "x")), Occur.MUST_NOT)
+            .build();
+        assertTrue(Queries.fixNegativeQueryIfNeeded(two, QueryVisitor.EMPTY_VISITOR) instanceof BooleanQuery);
     }
 }
