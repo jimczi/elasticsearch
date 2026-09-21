@@ -152,6 +152,20 @@ public final class DictionaryStringColumnReader extends StringColumnReader {
      * {@link StringColumnMetadata.Dictionary#FIRST_TERM_ORDINAL} up, so the term a caller wants the
      * {@code i}th of is at {@code FIRST_TERM_ORDINAL + i}.
      */
+    @Override
+    public int byteLengthAt(long valueAddress) throws IOException {
+        final int ordinal = ordinalAt(valueAddress);
+        if (ordinal == escapeOrdinal) {
+            escapes.get(escapeRankOf(valueAddress), lengthScratch);
+            return lengthScratch.length;
+        }
+        // A term's bytes are stored as they are, so reading one decodes nothing.
+        return termAt(ordinal, lengthScratch).length;
+    }
+
+    /** Where {@link #byteLengthAt} reads a value it only measures. */
+    private final BytesRef lengthScratch = new BytesRef();
+
     public BytesRef termAt(int ordinal, BytesRef dst) throws IOException {
         assert ordinal >= StringColumnMetadata.Dictionary.FIRST_TERM_ORDINAL
             && ordinal < dictionarySize + StringColumnMetadata.Dictionary.FIRST_TERM_ORDINAL

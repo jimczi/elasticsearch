@@ -156,6 +156,40 @@ public class ColumnarKeywordFunctionTests extends ESTestCase {
         }
     }
 
+    /** BYTE_LENGTH over documents without the field among every other shape, which read as null. */
+    public void testByteLengthWithDocumentsWithoutTheField() throws IOException {
+        final String[][] docs = new String[between(200, 800)][];
+        final List<Object> expected = new ArrayList<>();
+        for (int d = 0; d < docs.length; d++) {
+            docs[d] = switch (random().nextInt(6)) {
+                case 0 -> null;
+                case 1 -> new String[] { "abc" };
+                case 2 -> new String[] { null, "one-left" };
+                case 3 -> new String[] { "a", "b" };
+                case 4 -> new String[0];
+                default -> new String[] { "term-" + (d % 5) };
+            };
+            String only = null;
+            int nonNull = 0;
+            for (String slot : docs[d] == null ? new String[0] : docs[d]) {
+                if (slot != null) {
+                    nonNull++;
+                    only = slot;
+                }
+            }
+            expected.add(nonNull == 1 ? new BytesRef(only).length : null);
+        }
+        assertLoaderMatches(
+            docs,
+            fieldName -> new ByteLengthFromBytesRefDocValuesBlockLoader(
+                new MockWarnings(),
+                fieldName,
+                BinaryDocValuesFormat.COLUMNAR_PAYLOAD
+            ),
+            expected
+        );
+    }
+
     /** BYTE_LENGTH over a column whose values all have one length, which stores no lengths and answers from that one. */
     public void testByteLengthOfOneLengthColumn() throws IOException {
         final String[][] docs = new String[between(200, 800)][];
@@ -185,7 +219,10 @@ public class ColumnarKeywordFunctionTests extends ESTestCase {
             try (IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig().setCodec(columnarCodec()))) {
                 for (String[] slots : docs) {
                     final Document doc = new Document();
-                    doc.add(new Field(FIELD, encode(slots), type));
+                    // A null entry is a document without the field at all.
+                    if (slots != null) {
+                        doc.add(new Field(FIELD, encode(slots), type));
+                    }
                     writer.addDocument(doc);
                 }
                 writer.forceMerge(1);
