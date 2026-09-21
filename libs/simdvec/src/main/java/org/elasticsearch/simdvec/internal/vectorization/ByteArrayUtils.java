@@ -76,10 +76,10 @@ final class ByteArrayUtils {
     }
 
     /**
-     * Checks whether {@code term} appears as a contiguous subsequence within {@code value}.
+     * The first occurrence of {@code term} within {@code value}, relative to {@code valueOffset}, or {@code -1}.
      * Adapted from {@code StringUTF16.indexOfLatin1Unsafe}.
      */
-    static boolean contains(byte[] value, int valueOffset, int valueLength, byte[] term, int termOffset, int termLength) {
+    static int indexOf(byte[] value, int valueOffset, int valueLength, byte[] term, int termOffset, int termLength) {
         byte first = term[termOffset];
         int max = valueOffset + valueLength - termLength;
         for (int i = valueOffset; i <= max; i++) {
@@ -93,11 +93,11 @@ final class ByteArrayUtils {
                 for (int k = termOffset + 1; j < end && value[j] == term[k]; j++, k++)
                     ;
                 if (j == end) {
-                    return true;
+                    return i - valueOffset;
                 }
             }
         }
-        return false;
+        return -1;
     }
 
     private static long readLongNative(byte[] arr, int offset) {

@@ -159,6 +159,9 @@ public interface ESVectorUtilSupport {
 
     boolean contains(byte[] value, int valueOffset, int valueLength, byte[] term, int termOffset, int termLength);
 
+    /** The first occurrence of {@code term} in {@code value}, relative to {@code valueOffset}, or {@code -1}. */
+    int indexOf(byte[] value, int valueOffset, int valueLength, byte[] term, int termOffset, int termLength);
+
     void inRangeBitmask(long[] values, long lowerValue, long upperValue, long[] matches);
 
     void linearCombination(float scaleOther, float[] other, int otherOffset, float scaleDest, float[] dest, int destOffset, int length);

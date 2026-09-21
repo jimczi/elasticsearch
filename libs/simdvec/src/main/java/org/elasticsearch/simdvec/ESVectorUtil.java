@@ -873,7 +873,30 @@ public class ESVectorUtil {
         if (termLength > valueLength) {
             return false;
         }
-        return IMPL.contains(value, valueOffset, valueLength, term, termOffset, termLength);
+        return IMPL.indexOf(value, valueOffset, valueLength, term, termOffset, termLength) >= 0;
+    }
+
+    /**
+     * Finds the first occurrence of the byte sequence {@code term} within {@code value}.
+     *
+     * @param value       the byte array to search in
+     * @param valueOffset the starting index within value
+     * @param valueLength the number of bytes to search
+     * @param term        the byte array containing the term to search for
+     * @param termOffset  the starting index within term
+     * @param termLength  the number of bytes in the term
+     * @return the index of the first occurrence relative to {@code valueOffset}, or {@code -1} if not found
+     */
+    public static int indexOf(byte[] value, int valueOffset, int valueLength, byte[] term, int termOffset, int termLength) {
+        Objects.checkFromIndexSize(valueOffset, valueLength, value.length);
+        Objects.checkFromIndexSize(termOffset, termLength, term.length);
+        if (termLength == 0) {
+            return 0;
+        }
+        if (termLength > valueLength) {
+            return -1;
+        }
+        return IMPL.indexOf(value, valueOffset, valueLength, term, termOffset, termLength);
     }
 
     /**

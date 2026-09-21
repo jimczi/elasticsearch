@@ -1184,6 +1184,48 @@ public class ESVectorUtilTests extends BaseVectorizationTests {
         }
     }
 
+    public void testIndexOfTermRandom() {
+        int iterations = atLeast(500);
+        for (int iter = 0; iter < iterations; iter++) {
+            int padding = randomIntBetween(0, 20);
+            int valueLen = randomIntBetween(1, 500);
+            byte[] value = new byte[padding + valueLen + padding];
+            // A small alphabet, so partial matches and repeated occurrences are common.
+            for (int i = 0; i < value.length; i++) {
+                value[i] = (byte) randomIntBetween('a', 'd');
+            }
+            int termLen = randomIntBetween(1, Math.min(valueLen, 8));
+            byte[] term = new byte[termLen];
+            if (randomBoolean()) {
+                int startPos = randomIntBetween(0, valueLen - termLen);
+                System.arraycopy(value, padding + startPos, term, 0, termLen);
+            } else {
+                for (int i = 0; i < termLen; i++) {
+                    term[i] = (byte) randomIntBetween('a', 'e');
+                }
+            }
+            int expected = scalarIndexOf(value, padding, valueLen, term, termLen);
+            assertEquals(expected, ESVectorUtil.indexOf(value, padding, valueLen, term, 0, termLen));
+            assertEquals(expected, defaultedProvider.getVectorUtilSupport().indexOf(value, padding, valueLen, term, 0, termLen));
+            assertEquals(expected, panamaProvider.getVectorUtilSupport().indexOf(value, padding, valueLen, term, 0, termLen));
+        }
+    }
+
+    public void testIndexOfTermEmptyAndTooLong() {
+        byte[] value = "hello".getBytes(StandardCharsets.UTF_8);
+        assertEquals(0, ESVectorUtil.indexOf(value, 0, value.length, new byte[0], 0, 0));
+        assertEquals(-1, ESVectorUtil.indexOf(value, 0, 2, value, 0, value.length));
+    }
+
+    private static int scalarIndexOf(byte[] value, int valueOffset, int valueLength, byte[] term, int termLength) {
+        for (int i = 0; i + termLength <= valueLength; i++) {
+            if (Arrays.equals(value, valueOffset + i, valueOffset + i + termLength, term, 0, termLength)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private void assertContains(String value, String term, boolean expected) {
         byte[] valueBytes = value.getBytes(StandardCharsets.UTF_8);
         byte[] termBytes = term.getBytes(StandardCharsets.UTF_8);

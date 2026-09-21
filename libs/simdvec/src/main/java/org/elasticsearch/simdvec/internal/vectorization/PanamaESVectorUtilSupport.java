@@ -2132,9 +2132,14 @@ public sealed class PanamaESVectorUtilSupport implements ESVectorUtilSupport per
 
     @Override
     public boolean contains(byte[] value, int valueOffset, int valueLength, byte[] term, int termOffset, int termLength) {
+        return indexOf(value, valueOffset, valueLength, term, termOffset, termLength) >= 0;
+    }
+
+    @Override
+    public int indexOf(byte[] value, int valueOffset, int valueLength, byte[] term, int termOffset, int termLength) {
         // Scalar logic is faster for short values (below approximately 24 bytes)
         if (valueLength < 24) {
-            return ByteArrayUtils.contains(value, valueOffset, valueLength, term, termOffset, termLength);
+            return ByteArrayUtils.indexOf(value, valueOffset, valueLength, term, termOffset, termLength);
         }
 
         byte first = term[termOffset];
@@ -2157,12 +2162,13 @@ public sealed class PanamaESVectorUtilSupport implements ESVectorUtilSupport per
                     break;
                 }
                 if (middleBytesMatch(value, absPos, term, termOffset, termLength)) {
-                    return true;
+                    return absPos - valueOffset;
                 }
                 mask &= mask - 1;
             }
         }
-        return ByteArrayUtils.contains(value, i, valueOffset + valueLength - i, term, termOffset, termLength);
+        int tail = ByteArrayUtils.indexOf(value, i, valueOffset + valueLength - i, term, termOffset, termLength);
+        return tail < 0 ? -1 : i + tail - valueOffset;
     }
 
     /** Checks bytes between first and last (exclusive) since those were already verified by the SIMD masks. */

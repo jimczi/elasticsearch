@@ -673,7 +673,12 @@ public final class DefaultESVectorUtilSupport implements ESVectorUtilSupport {
 
     @Override
     public boolean contains(byte[] value, int valueOffset, int valueLength, byte[] term, int termOffset, int termLength) {
-        return ByteArrayUtils.contains(value, valueOffset, valueLength, term, termOffset, termLength);
+        return ByteArrayUtils.indexOf(value, valueOffset, valueLength, term, termOffset, termLength) >= 0;
+    }
+
+    @Override
+    public int indexOf(byte[] value, int valueOffset, int valueLength, byte[] term, int termOffset, int termLength) {
+        return ByteArrayUtils.indexOf(value, valueOffset, valueLength, term, termOffset, termLength);
     }
 
     @Override
