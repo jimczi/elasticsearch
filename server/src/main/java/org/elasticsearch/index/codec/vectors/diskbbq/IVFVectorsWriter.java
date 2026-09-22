@@ -27,9 +27,13 @@ import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.store.DataAccessHint;
+import org.apache.lucene.store.FileDataHint;
+import org.apache.lucene.store.FileTypeHint;
 import org.apache.lucene.store.IOContext;
+import org.apache.lucene.store.NoReuseHint;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
+import org.elasticsearch.index.store.VectorFieldHint;
 import org.apache.lucene.util.IORunnable;
 import org.apache.lucene.util.LongValues;
 import org.elasticsearch.core.IOUtils;
@@ -704,7 +708,11 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         // For byte fields with supportsByteNative(), vectors are written as bytes;
         // otherwise byte IVF indexing is skipped entirely.
         try (
-            IndexOutput vectorsOut = mergeState.segmentInfo.dir.createTempOutput(mergeState.segmentInfo.name, "ivfvec_", IOContext.DEFAULT)
+            IndexOutput vectorsOut = mergeState.segmentInfo.dir.createTempOutput(
+                mergeState.segmentInfo.name,
+                "ivfvec_",
+                rawVectorsContext(fieldInfo)
+            )
         ) {
             tempRawVectorsFileName = vectorsOut.getName();
             // TODO: we only want to write this once but we'll wind up doing it for every field with the same dim and blockdim
@@ -722,7 +730,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             try (
                 IndexOutput docsOut = dense
                     ? null
-                    : mergeState.segmentInfo.dir.createTempOutput(mergeState.segmentInfo.name, "ivfdoc_", IOContext.DEFAULT)
+                    : mergeState.segmentInfo.dir.createTempOutput(mergeState.segmentInfo.name, "ivfdoc_", mergeContext(fieldInfo))
             ) {
                 if (docsOut != null) {
                     docsFileName = docsOut.getName();
@@ -754,7 +762,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         try (
             IndexInput vectors = mergeState.segmentInfo.dir.openInput(
                 tempRawVectorsFileName,
-                IOContext.DEFAULT.withHints(DataAccessHint.SEQUENTIAL)
+                rawVectorsContext(fieldInfo)
             );
             IndexInput docs = docsFileName == null
                 ? null
@@ -784,7 +792,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             try {
                 // TODO do this better, we shouldn't have to write to a temp file, we should be able to
                 // just from the merged vector values, the tricky part is the random access.
-                centroidTemp = mergeState.segmentInfo.dir.createTempOutput(mergeState.segmentInfo.name, "civf_", IOContext.DEFAULT);
+                centroidTemp = mergeState.segmentInfo.dir.createTempOutput(mergeState.segmentInfo.name, "civf_", mergeContext(fieldInfo));
                 centroidTempName = centroidTemp.getName();
                 CentroidInformation<?> centroidAssignments = calculateCentroids(fieldInfo, vectorValues, mergeState);
                 // write the centroids to a temporary file so we are not holding them on heap
@@ -995,4 +1003,24 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
 
     private record FieldWriter(FieldInfo fieldInfo, FlatFieldVectorsWriter<?> delegate) {}
 
+
+    /**
+     * The context for a file this writer produces during a merge. Temporary files carry nothing in
+     * their name, so a directory only knows what they hold and which field they belong to from what
+     * is said here.
+     */
+    protected IOContext mergeContext(FieldInfo fieldInfo) {
+        return segmentWriteState.context.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, new VectorFieldHint(fieldInfo.name));
+    }
+
+    /** The merged raw vectors, written once and read back by ordinal to build the clusters. */
+    private IOContext rawVectorsContext(FieldInfo fieldInfo) {
+        return segmentWriteState.context.withHints(
+            FileTypeHint.DATA,
+            FileDataHint.KNN_VECTORS,
+            DataAccessHint.SEQUENTIAL,
+            NoReuseHint.INSTANCE,
+            new VectorFieldHint(fieldInfo.name)
+        );
+    }
 }

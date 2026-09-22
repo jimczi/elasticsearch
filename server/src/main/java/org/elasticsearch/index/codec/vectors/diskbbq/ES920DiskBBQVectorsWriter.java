@@ -237,7 +237,7 @@ public class ES920DiskBBQVectorsWriter extends IVFVectorsWriter<ES920DiskBBQVect
             IndexOutput quantizedVectorsTemp = mergeState.segmentInfo.dir.createTempOutput(
                 mergeState.segmentInfo.name,
                 "qvec_",
-                IOContext.DEFAULT
+                mergeContext(fieldInfo)
             )
         ) {
             quantizedVectorsTempName = quantizedVectorsTemp.getName();

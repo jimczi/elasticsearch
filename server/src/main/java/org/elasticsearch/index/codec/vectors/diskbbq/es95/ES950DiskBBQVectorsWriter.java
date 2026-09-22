@@ -311,7 +311,7 @@ public class ES950DiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInde
             IndexOutput quantizedVectorsTemp = mergeState.segmentInfo.dir.createTempOutput(
                 mergeState.segmentInfo.name,
                 "qvec_",
-                IOContext.DEFAULT
+                mergeContext(fieldInfo)
             )
         ) {
             quantizedVectorsTempName = quantizedVectorsTemp.getName();

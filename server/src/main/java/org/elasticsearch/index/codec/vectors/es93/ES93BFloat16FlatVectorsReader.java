@@ -37,16 +37,21 @@ import org.apache.lucene.search.AcceptDocs;
 import org.apache.lucene.search.KnnCollector;
 import org.apache.lucene.store.ChecksumIndexInput;
 import org.apache.lucene.store.DataAccessHint;
+import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FileDataHint;
 import org.apache.lucene.store.FileTypeHint;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
+import org.apache.lucene.store.NoReuseHint;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.hnsw.RandomVectorScorer;
 import org.elasticsearch.core.IOUtils;
 import org.elasticsearch.index.codec.vectors.BFloat16;
+import org.elasticsearch.index.store.VectorFieldHint;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.nio.file.NoSuchFileException;
 import java.util.Map;
 
 import static org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsReader.readSimilarityFunction;
@@ -57,19 +62,50 @@ public final class ES93BFloat16FlatVectorsReader extends FlatVectorsReader {
 
     private static final long SHALLOW_SIZE = RamUsageEstimator.shallowSizeOfInstance(ES93BFloat16FlatVectorsReader.class);
 
-    private final IntObjectHashMap<FieldEntry> fields = new IntObjectHashMap<>();
+    private final IntObjectHashMap<FieldEntry> fields;
     private final FlatVectorsScorer vectorScorer;
     private final IndexInput vectorData;
     private final FieldInfos fieldInfos;
     private final IOContext dataContext;
+    // what a merge needs to map the vectors for itself
+    private final Directory directory;
+    private final String vectorDataFN;
+    // the reader this one was cloned from, which owns the mapping merges read
+    private final ES93BFloat16FlatVectorsReader original;
+    private IndexInput mergeVectorData;
+    private boolean closed;
+
+    /** Shares everything the merge instance can reuse, over a mapping of its own. */
+    private ES93BFloat16FlatVectorsReader(ES93BFloat16FlatVectorsReader reader, IndexInput vectorData) {
+        this.fields = reader.fields;
+        this.vectorScorer = reader.vectorScorer;
+        this.vectorData = vectorData;
+        this.fieldInfos = reader.fieldInfos;
+        this.dataContext = reader.dataContext;
+        this.directory = reader.directory;
+        this.vectorDataFN = reader.vectorDataFN;
+        this.original = reader.original;
+    }
 
     public ES93BFloat16FlatVectorsReader(SegmentReadState state, FlatVectorsScorer scorer) throws IOException {
+        this.fields = new IntObjectHashMap<>();
         int versionMeta = readMetadata(state);
+        this.directory = state.directory;
+        this.vectorDataFN = IndexFileNames.segmentFileName(
+            state.segmentInfo.name,
+            state.segmentSuffix,
+            ES93BFloat16FlatVectorsFormat.VECTOR_DATA_EXTENSION
+        );
+        this.original = this;
         this.fieldInfos = state.fieldInfos;
         this.vectorScorer = scorer;
         // Flat formats are used to randomly access vectors from their node ID that is stored
         // in the HNSW graph.
-        dataContext = state.context.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, DataAccessHint.RANDOM);
+        // the field these vectors belong to, so a directory can look it up in the mapping
+        VectorFieldHint field = VectorFieldHint.forSuffix(state.fieldInfos, state.segmentSuffix);
+        dataContext = field == null
+            ? state.context.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, DataAccessHint.RANDOM)
+            : state.context.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, DataAccessHint.RANDOM, field);
         try {
             vectorData = openDataInput(
                 state,
@@ -171,11 +207,62 @@ public final class ES93BFloat16FlatVectorsReader extends FlatVectorsReader {
         CodecUtil.checksumEntireFile(vectorData);
     }
 
+    /**
+     * A merge copies these vectors front to back. Read advice applies to a whole mapping, so it maps
+     * them again rather than re-advising the one searches are reading, and a directory can tell the
+     * two opens apart. Closed by {@link #finishMerge()}.
+     */
     @Override
     public FlatVectorsReader getMergeInstance() throws IOException {
-        // Update the read advice since vectors are guaranteed to be accessed sequentially for merge
-        vectorData.updateIOContext(dataContext.withHints(DataAccessHint.SEQUENTIAL));
-        return this;
+        return new ES93BFloat16FlatVectorsReader(this, original.mergeVectorData().clone());
+    }
+
+    /**
+     * The vectors as a merge reads them, front to back. Read advice applies to a whole mapping, so
+     * a merge maps them again rather than re-advising the one searches are reading at random, and a
+     * directory can tell the two opens apart. Mapped on the first merge and closed with this reader,
+     * since merge instances are never closed.
+     */
+    private synchronized IndexInput mergeVectorData() throws IOException {
+        assert original == this;
+        ensureOpen();
+        if (mergeVectorData == null) {
+            if (dataContext.hints(DataAccessHint.class).findFirst().orElse(null) != DataAccessHint.RANDOM) {
+                mergeVectorData = vectorData;
+            } else {
+                try {
+                    // withHints replaces the set, so carry over what the reader was opened with
+                    var field = dataContext.hints(VectorFieldHint.class).findFirst().orElse(null);
+                    mergeVectorData = directory.openInput(
+                        vectorDataFN,
+                        field == null
+                            ? dataContext.withHints(
+                                FileTypeHint.DATA,
+                                FileDataHint.KNN_VECTORS,
+                                DataAccessHint.SEQUENTIAL,
+                                NoReuseHint.INSTANCE
+                            )
+                            : dataContext.withHints(
+                                FileTypeHint.DATA,
+                                FileDataHint.KNN_VECTORS,
+                                DataAccessHint.SEQUENTIAL,
+                                NoReuseHint.INSTANCE,
+                                field
+                            )
+                    );
+                } catch (FileNotFoundException | NoSuchFileException e) {
+                    // an open reader outlives its files, so fall back to the mapping it already holds
+                    mergeVectorData = vectorData;
+                }
+            }
+        }
+        return mergeVectorData;
+    }
+
+    private void ensureOpen() throws IOException {
+        if (closed) {
+            throw new org.apache.lucene.store.AlreadyClosedException("this reader is closed");
+        }
     }
 
     @Override
@@ -254,15 +341,11 @@ public final class ES93BFloat16FlatVectorsReader extends FlatVectorsReader {
     }
 
     @Override
-    public void finishMerge() throws IOException {
-        // This makes sure that the access pattern hint is reverted back since HNSW implementation
-        // needs it
-        vectorData.updateIOContext(dataContext);
-    }
-
-    @Override
-    public void close() throws IOException {
-        IOUtils.close(vectorData);
+    public synchronized void close() throws IOException {
+        if (closed == false) {
+            closed = true;
+            IOUtils.close(vectorData, original == this && mergeVectorData != vectorData ? mergeVectorData : null);
+        }
     }
 
     private record FieldEntry(
