@@ -10,8 +10,10 @@
 package org.elasticsearch.index.store;
 
 import org.apache.lucene.misc.store.DirectIODirectory;
+import org.apache.lucene.store.DataAccessHint;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
+import org.apache.lucene.store.FileDataHint;
 import org.apache.lucene.store.FileSwitchDirectory;
 import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.IOContext;
@@ -21,8 +23,10 @@ import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.NIOFSDirectory;
 import org.apache.lucene.store.NativeFSLockFactory;
+import org.apache.lucene.store.NoReuseHint;
 import org.apache.lucene.store.ReadAdvice;
 import org.apache.lucene.store.SimpleFSLockFactory;
+import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
@@ -89,13 +93,32 @@ public class FsDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
 
     @Override
     public Directory newDirectory(IndexSettings indexSettings, ShardPath path) throws IOException {
+        return newDirectory(indexSettings, path, null, VectorFieldOptions.NONE);
+    }
+
+    @Override
+    public Directory newDirectory(
+        IndexSettings indexSettings,
+        ShardPath path,
+        ShardRouting shardRouting,
+        VectorFieldOptions vectorFieldOptions
+    ) throws IOException {
         final Path location = path.resolveIndex();
         final LockFactory lockFactory = indexSettings.getValue(INDEX_LOCK_FACTOR_SETTING);
         Files.createDirectories(location);
-        return newFSDirectory(location, lockFactory, indexSettings);
+        return newFSDirectory(location, lockFactory, indexSettings, vectorFieldOptions);
     }
 
     protected Directory newFSDirectory(Path location, LockFactory lockFactory, IndexSettings indexSettings) throws IOException {
+        return newFSDirectory(location, lockFactory, indexSettings, VectorFieldOptions.NONE);
+    }
+
+    protected Directory newFSDirectory(
+        Path location,
+        LockFactory lockFactory,
+        IndexSettings indexSettings,
+        VectorFieldOptions vectorFieldOptions
+    ) throws IOException {
         final int asyncPrefetchLimit = indexSettings.getValue(ASYNC_PREFETCH_LIMIT);
         final String storeType = indexSettings.getSettings()
             .get(IndexModule.INDEX_STORE_TYPE_SETTING.getKey(), IndexModule.Type.FS.getSettingsKey());
@@ -112,7 +135,12 @@ public class FsDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
                 final FSDirectory primaryDirectory = FSDirectory.open(location, lockFactory);
                 if (primaryDirectory instanceof MMapDirectory mMapDirectory) {
                     mMapDirectory = adjustSharedArenaGrouping(mMapDirectory);
-                    return new HybridDirectory(lockFactory, setMMapFunctions(mMapDirectory, preLoadExtensions), asyncPrefetchLimit);
+                    return new HybridDirectory(
+                        lockFactory,
+                        setMMapFunctions(mMapDirectory, preLoadExtensions),
+                        asyncPrefetchLimit,
+                        vectorFieldOptions
+                    );
                 } else {
                     return primaryDirectory;
                 }
@@ -183,10 +211,21 @@ public class FsDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
         /** set once a direct I/O create has succeeded in this directory, see {@link #mergeDirectIOCreates(String)} */
         private volatile boolean mergeDirectIOCreatesWork;
         private static final AtomicInteger DIRECT_IO_PROBE_ID = new AtomicInteger();
+        private final VectorFieldOptions vectorFieldOptions;
 
         public HybridDirectory(LockFactory lockFactory, MMapDirectory delegate, int asyncPrefetchLimit) throws IOException {
+            this(lockFactory, delegate, asyncPrefetchLimit, null);
+        }
+
+        public HybridDirectory(
+            LockFactory lockFactory,
+            MMapDirectory delegate,
+            int asyncPrefetchLimit,
+            VectorFieldOptions vectorFieldOptions
+        ) throws IOException {
             super(delegate.getDirectory(), lockFactory);
             this.delegate = delegate;
+            this.vectorFieldOptions = vectorFieldOptions;
 
             DirectIODirectory directIO = null;
             DirectIODirectory mergeDirectIO = null;
@@ -226,13 +265,15 @@ public class FsDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
         @Override
         public IndexInput openInput(String name, IOContext context) throws IOException {
             Throwable directIOException = null;
-            // merge-context opens go to the merge delegate, which only takes raw vector files; whether a
-            // field's merges carry the hint is its on_disk_merge option, decided in the codec. Everything
-            // else with a direct I/O hint is a rescore read
-            DirectIODirectory dio = context.context() == IOContext.Context.MERGE ? mergeDirectIODelegate : directIODelegate;
-            if (dio != null
-                && context.hints().contains(DirectIOHint.INSTANCE)
-                && (context.context() != IOContext.Context.MERGE || isRawVectorFile(name))) {
+            // a merge reads the raw vectors front to back and a rescore reads them at random, which
+            // is what picks the buffer; a merge that reopened them says so with the access hint even
+            // though it kept the context it was opened with
+            boolean sequential = context.context() == IOContext.Context.MERGE
+                || context.hints().contains(DataAccessHint.SEQUENTIAL);
+            DirectIODirectory dio = sequential ? mergeDirectIODelegate : directIODelegate;
+            boolean hinted = context.hints().contains(DirectIOHint.INSTANCE)
+                && (context.context() != IOContext.Context.MERGE || isRawVectorFile(name));
+            if (dio != null && (hinted || useDirectIO(name, context))) {
                 ensureOpen();
                 ensureCanRead(name);
                 try {
@@ -397,6 +438,24 @@ public class FsDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
         }
 
         static final Set<String> NO_MMAP_FILE_SUFFIXES = Set.of("fdt", "disi", "address-data", "block-addresses", "block-doc-ranges");
+
+        /**
+         * Whether to read this file with direct I/O, from what the open says and what the mapping
+         * says about the field it belongs to. Only the raw vectors of a field that asked to keep
+         * them off the page cache, and only when they are read the way that option is about.
+         */
+        private boolean useDirectIO(String name, IOContext context) {
+            if (vectorFieldOptions == null || context.hints().contains(NoReuseHint.INSTANCE) == false) {
+                return false;
+            }
+            var field = context.hints(VectorFieldHint.class).findFirst().orElse(null);
+            if (field == null) {
+                // several fields share the file, so the mapping of one of them says nothing about it
+                return false;
+            }
+            var options = vectorFieldOptions.get(field.field());
+            return context.hints().contains(DataAccessHint.SEQUENTIAL) ? options.onDiskMerge() : options.onDiskRescore();
+        }
 
         MMapDirectory getDelegate() {
             return delegate;
