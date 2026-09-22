@@ -19,6 +19,7 @@ import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.engine.EngineException;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.index.shard.ShardPath;
+import org.elasticsearch.index.store.VectorFieldOptions;
 import org.elasticsearch.indices.cluster.IndexRemovalReason;
 import org.elasticsearch.indices.recovery.RecoveryState;
 
@@ -57,6 +58,24 @@ public interface IndexStorePlugin {
          */
         default Directory newDirectory(IndexSettings indexSettings, ShardPath shardPath, ShardRouting shardRouting) throws IOException {
             return newDirectory(indexSettings, shardPath);
+        }
+
+        /**
+         * Creates a new directory per shard. This method is called once per shard on shard creation.
+         * @param indexSettings the shards index settings
+         * @param shardPath the path the shard is using
+         * @param shardRouting the {@link ShardRouting}
+         * @param vectorFieldOptions what the mapping says about each dense vector field, reflecting mapping updates
+         * @return a new lucene directory instance
+         * @throws IOException if an IOException occurs while opening the directory
+         */
+        default Directory newDirectory(
+            IndexSettings indexSettings,
+            ShardPath shardPath,
+            ShardRouting shardRouting,
+            VectorFieldOptions vectorFieldOptions
+        ) throws IOException {
+            return newDirectory(indexSettings, shardPath, shardRouting);
         }
     }
 

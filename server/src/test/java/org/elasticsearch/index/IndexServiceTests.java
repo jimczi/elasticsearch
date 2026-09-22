@@ -21,6 +21,7 @@ import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.index.shard.IndexShardTestCase;
+import org.elasticsearch.index.store.VectorFieldOptions;
 import org.elasticsearch.index.translog.Translog;
 import org.elasticsearch.indices.IndicesService;
 import org.elasticsearch.plugins.Plugin;
@@ -502,6 +503,58 @@ public class IndexServiceTests extends ESSingleNodeTestCase {
             .get();
         indexMetadata = clusterAdmin().prepareState(TEST_REQUEST_TIMEOUT).get().getState().metadata().getProject().index("test");
         assertEquals("20s", indexMetadata.getSettings().get(IndexSettings.INDEX_TRANSLOG_SYNC_INTERVAL_SETTING.getKey()));
+    }
+
+    public void testVectorFieldOptionsComeFromTheMapping() throws IOException {
+        IndexService indexService = createIndex("test", indicesAdmin().prepareCreate("test").setMapping("""
+            {
+              "properties": {
+                "plain": { "type": "dense_vector", "dims": 64 },
+                "merged": {
+                  "type": "dense_vector", "dims": 64,
+                  "index_options": { "type": "bbq_hnsw", "on_disk_merge": true }
+                },
+                "rescored": {
+                  "type": "dense_vector", "dims": 64,
+                  "index_options": { "type": "bbq_hnsw", "on_disk_rescore": true }
+                },
+                "outer": {
+                  "properties": {
+                    "inner": {
+                      "type": "dense_vector", "dims": 64,
+                      "index_options": { "type": "bbq_hnsw", "on_disk_merge": true, "on_disk_rescore": true }
+                    }
+                  }
+                },
+                "text": { "type": "keyword" }
+              }
+            }"""));
+
+        assertEquals(new VectorFieldOptions.Options(false, false), indexService.vectorFieldOptions("plain"));
+        assertEquals(new VectorFieldOptions.Options(false, true), indexService.vectorFieldOptions("merged"));
+        assertEquals(new VectorFieldOptions.Options(true, false), indexService.vectorFieldOptions("rescored"));
+        assertEquals(new VectorFieldOptions.Options(true, true), indexService.vectorFieldOptions("outer.inner"));
+        assertEquals(VectorFieldOptions.Options.NONE, indexService.vectorFieldOptions("text"));
+        assertEquals(VectorFieldOptions.Options.NONE, indexService.vectorFieldOptions("absent"));
+    }
+
+    /** A mapping update reaches the directory, since the options are read each time a file is opened. */
+    public void testVectorFieldOptionsFollowAMappingUpdate() throws IOException {
+        IndexService indexService = createIndex("test", indicesAdmin().prepareCreate("test").setMapping("""
+            { "properties": { "vector": { "type": "dense_vector", "dims": 64 } } }"""));
+        assertEquals(VectorFieldOptions.Options.NONE, indexService.vectorFieldOptions("vector"));
+
+        indicesAdmin().preparePutMapping("test").setSource("""
+            {
+              "properties": {
+                "added": {
+                  "type": "dense_vector", "dims": 64,
+                  "index_options": { "type": "bbq_hnsw", "on_disk_merge": true }
+                }
+              }
+            }""", XContentType.JSON).get();
+
+        assertEquals(new VectorFieldOptions.Options(false, true), indexService.vectorFieldOptions("added"));
     }
 
     public static void closeIndexService(IndexService indexService) throws IOException {

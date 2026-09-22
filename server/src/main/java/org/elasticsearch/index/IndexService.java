@@ -64,6 +64,8 @@ import org.elasticsearch.index.mapper.MappingLookup;
 import org.elasticsearch.index.mapper.MappingParserContext;
 import org.elasticsearch.index.mapper.NodeMappingStats;
 import org.elasticsearch.index.mapper.RuntimeField;
+import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper.DenseVectorFieldType;
+import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper.DenseVectorIndexOptions;
 import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.index.query.SearchIndexNameMatcher;
@@ -86,6 +88,7 @@ import org.elasticsearch.index.similarity.SimilarityService;
 import org.elasticsearch.index.store.PluggableDirectoryMetricsHolder;
 import org.elasticsearch.index.store.Store;
 import org.elasticsearch.index.store.StoreMetrics;
+import org.elasticsearch.index.store.VectorFieldOptions;
 import org.elasticsearch.index.translog.Translog;
 import org.elasticsearch.indices.breaker.CircuitBreakerService;
 import org.elasticsearch.indices.cluster.IndexRemovalReason;
@@ -397,6 +400,24 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         return mapperService;
     }
 
+    /**
+     * What the mapping currently says about a dense vector field, for a directory deciding how to open its files.
+     * Read on each call so that a mapping update takes effect on the next file a shard opens.
+     */
+    // visible for testing
+    VectorFieldOptions.Options vectorFieldOptions(String field) {
+        if (mapperService == null) {
+            return VectorFieldOptions.Options.NONE;
+        }
+        if (mapperService.fieldType(field) instanceof DenseVectorFieldType vectorField) {
+            DenseVectorIndexOptions indexOptions = vectorField.getIndexOptions();
+            if (indexOptions != null) {
+                return new VectorFieldOptions.Options(indexOptions.isOnDiskRescore(), indexOptions.isOnDiskMerge());
+            }
+        }
+        return VectorFieldOptions.Options.NONE;
+    }
+
     public SimilarityService similarityService() {
         return similarityService;
     }
@@ -569,7 +590,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                     warmer.warm(reader, shard, IndexService.this.indexSettings);
                 }
             };
-            final Directory directory = directoryFactory.newDirectory(this.indexSettings, path, routing);
+            final Directory directory = directoryFactory.newDirectory(this.indexSettings, path, routing, this::vectorFieldOptions);
             store = new Store(
                 shardId,
                 this.indexSettings,
