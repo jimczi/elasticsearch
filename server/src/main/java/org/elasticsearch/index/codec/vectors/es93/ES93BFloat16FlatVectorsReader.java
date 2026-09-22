@@ -54,7 +54,6 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.file.NoSuchFileException;
 import java.util.Map;
-import java.util.stream.Stream;
 
 import static org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsReader.readSimilarityFunction;
 import static org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsReader.readVectorEncoding;
@@ -398,12 +397,14 @@ public final class ES93BFloat16FlatVectorsReader extends FlatVectorsReader {
         }
     }
 
-    /** The context this reader was opened with, read front to back and not worth keeping. */
+    /**
+     * The same file as a merge reads it, front to back and not worth keeping. Keeps the context the
+     * reader was opened with, so an open the merge made stays a merge open.
+     */
     private static IOContext mergeContext(IOContext dataContext) {
-        IOContext.FileOpenHint[] hints = Stream.concat(
-            dataContext.hints().stream().filter(hint -> hint instanceof DataAccessHint == false),
-            Stream.of(DataAccessHint.SEQUENTIAL, NoReuseHint.INSTANCE)
-        ).toArray(IOContext.FileOpenHint[]::new);
-        return dataContext.withHints(hints);
+        VectorFieldHint field = dataContext.hints(VectorFieldHint.class).findFirst().orElse(null);
+        return field == null
+            ? dataContext.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, DataAccessHint.SEQUENTIAL, NoReuseHint.INSTANCE)
+            : dataContext.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, DataAccessHint.SEQUENTIAL, NoReuseHint.INSTANCE, field);
     }
 }

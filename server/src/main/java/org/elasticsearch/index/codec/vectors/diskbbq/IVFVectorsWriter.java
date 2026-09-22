@@ -763,7 +763,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
             IndexInput vectors = mergeState.segmentInfo.dir.openInput(tempRawVectorsFileName, rawVectorsContext(fieldInfo));
             IndexInput docs = docsFileName == null
                 ? null
-                : mergeState.segmentInfo.dir.openInput(docsFileName, IOContext.DEFAULT.withHints(DataAccessHint.SEQUENTIAL))
+                : mergeState.segmentInfo.dir.openInput(docsFileName, mergeContext(fieldInfo).withHints(DataAccessHint.SEQUENTIAL))
         ) {
             final KMeansFloatVectorValues floatVectorValues;
             final KMeansByteVectorValues byteVectorValues;
@@ -831,7 +831,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
                 CodecUtil.writeFooter(centroidTemp);
                 IOUtils.close(centroidTemp);
 
-                try (IndexInput centroidsInput = mergeState.segmentInfo.dir.openInput(centroidTempName, IOContext.DEFAULT)) {
+                try (IndexInput centroidsInput = mergeState.segmentInfo.dir.openInput(centroidTempName, mergeContext(fieldInfo))) {
                     final CentroidSupplier centroidSupplier;
                     final CentroidOffsetAndLength centroidOffsetAndLength;
 
