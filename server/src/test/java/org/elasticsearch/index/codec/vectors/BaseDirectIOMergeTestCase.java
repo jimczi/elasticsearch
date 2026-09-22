@@ -23,9 +23,9 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.NativeFSLockFactory;
+import org.apache.lucene.store.NoReuseHint;
 import org.apache.lucene.tests.index.BaseKnnVectorsFormatTestCase;
 import org.apache.lucene.tests.util.TestUtil;
-import org.elasticsearch.index.codec.vectors.es818.DirectIOHint;
 import org.elasticsearch.index.store.FsDirectoryFactory;
 import org.elasticsearch.test.ESTestCase;
 
@@ -48,7 +48,7 @@ abstract class BaseDirectIOMergeTestCase extends ESTestCase {
 
     record FileIO(Op op, String name, IOContext.Context context, boolean directIO) {
         static FileIO of(Op op, String name, IOContext context) {
-            return new FileIO(op, name, context.context(), context.hints().contains(DirectIOHint.INSTANCE));
+            return new FileIO(op, name, context.context(), context.hints().contains(NoReuseHint.INSTANCE));
         }
 
         boolean mergeDirectIO() {

@@ -239,7 +239,7 @@ public class ES920DiskBBQVectorsFormat extends KnnVectorsFormat {
         return new ES920DiskBBQVectorsReader(state, (f, dio, odm) -> {
             var format = supportedFormats.get(f);
             if (format == null) return null;
-            return format.fieldsReader(state, dio, odm);
+            return format.fieldsReader(state);
         });
     }
 

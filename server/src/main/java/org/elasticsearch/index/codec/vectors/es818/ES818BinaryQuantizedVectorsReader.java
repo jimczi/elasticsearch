@@ -39,6 +39,7 @@ import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.AcceptDocs;
 import org.apache.lucene.search.KnnCollector;
 import org.apache.lucene.search.VectorScorer;
+import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.ChecksumIndexInput;
 import org.apache.lucene.store.DataAccessHint;
 import org.apache.lucene.store.Directory;
@@ -47,6 +48,7 @@ import org.apache.lucene.store.FileTypeHint;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.store.NoReuseHint;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.SuppressForbidden;
@@ -67,10 +69,11 @@ import org.elasticsearch.simdvec.ESVectorUtil;
 import java.io.Closeable;
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.nio.file.NoSuchFileException;
 import java.nio.ByteBuffer;
+import java.nio.file.NoSuchFileException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsReader.readSimilarityFunction;
 import static org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsReader.readVectorEncoding;
@@ -97,6 +100,7 @@ public class ES818BinaryQuantizedVectorsReader extends FlatVectorsReader impleme
     // the reader this one was cloned from, which owns the mapping merges read
     private final ES818BinaryQuantizedVectorsReader original;
     private IndexInput mergeQuantizedVectorData;
+    private boolean closed;
 
     @SuppressWarnings("this-escape")
     public ES818BinaryQuantizedVectorsReader(
@@ -151,7 +155,11 @@ public class ES818BinaryQuantizedVectorsReader extends FlatVectorsReader impleme
         }
     }
 
-    private ES818BinaryQuantizedVectorsReader(ES818BinaryQuantizedVectorsReader clone, FlatVectorsReader rawVectorsReader, IndexInput quantizedVectorData) {
+    private ES818BinaryQuantizedVectorsReader(
+        ES818BinaryQuantizedVectorsReader clone,
+        FlatVectorsReader rawVectorsReader,
+        IndexInput quantizedVectorData
+    ) {
         this.rawVectorsReader = rawVectorsReader;
         this.vectorScorer = clone.vectorScorer;
         this.quantizedVectorData = quantizedVectorData;
@@ -163,26 +171,34 @@ public class ES818BinaryQuantizedVectorsReader extends FlatVectorsReader impleme
     }
 
     /**
-     * A merge copies these vectors front to back. Read advice applies to a whole mapping, so it
-     * maps them again rather than re-advising the one searches are reading at random. Mapped on
-     * the first merge and closed with this reader, since merge instances are never closed.
+     * The vectors as a merge reads them, front to back. Searches read the same file at random and
+     * read advice applies to a whole mapping, so a merge maps it again. Mapped on the first merge
+     * and closed with this reader, since merge instances are never closed.
      */
     @Override
     public FlatVectorsReader getMergeInstance() throws IOException {
-        return new ES818BinaryQuantizedVectorsReader(this, rawVectorsReader.getMergeInstance(), original.mergeQuantizedVectorData().clone());
+        return new ES818BinaryQuantizedVectorsReader(
+            this,
+            rawVectorsReader.getMergeInstance(),
+            original.mergeQuantizedVectorData().clone()
+        );
     }
 
     private synchronized IndexInput mergeQuantizedVectorData() throws IOException {
         assert original == this;
+        if (closed) {
+            throw new AlreadyClosedException("this reader is closed");
+        }
         if (mergeQuantizedVectorData == null) {
-            try {
-                mergeQuantizedVectorData = directory.openInput(
-                    quantizedVectorDataFN,
-                    dataContext.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, DataAccessHint.SEQUENTIAL)
-                );
-            } catch (FileNotFoundException | NoSuchFileException e) {
-                // an open reader outlives its files, so fall back to the mapping it already holds
+            if (dataContext.hints(DataAccessHint.class).findFirst().orElse(null) != DataAccessHint.RANDOM) {
                 mergeQuantizedVectorData = quantizedVectorData;
+            } else {
+                try {
+                    mergeQuantizedVectorData = directory.openInput(quantizedVectorDataFN, mergeContext(dataContext));
+                } catch (FileNotFoundException | NoSuchFileException e) {
+                    // an open reader outlives its files, so fall back to the mapping it already holds
+                    mergeQuantizedVectorData = quantizedVectorData;
+                }
             }
         }
         return mergeQuantizedVectorData;
@@ -314,7 +330,11 @@ public class ES818BinaryQuantizedVectorsReader extends FlatVectorsReader impleme
     }
 
     @Override
-    public void close() throws IOException {
+    public synchronized void close() throws IOException {
+        if (closed) {
+            return;
+        }
+        closed = true;
         IOUtils.close(
             quantizedVectorData,
             rawVectorsReader,
@@ -797,5 +817,14 @@ public class ES818BinaryQuantizedVectorsReader extends FlatVectorsReader impleme
         public int totalVectorCount() {
             return vectorValues.size();
         }
+    }
+
+    /** The context this reader was opened with, read front to back and not worth keeping. */
+    private static IOContext mergeContext(IOContext dataContext) {
+        IOContext.FileOpenHint[] hints = Stream.concat(
+            dataContext.hints().stream().filter(hint -> hint instanceof DataAccessHint == false),
+            Stream.of(DataAccessHint.SEQUENTIAL, NoReuseHint.INSTANCE)
+        ).toArray(IOContext.FileOpenHint[]::new);
+        return dataContext.withHints(hints);
     }
 }

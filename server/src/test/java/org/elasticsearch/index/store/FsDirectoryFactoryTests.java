@@ -19,6 +19,7 @@ import org.apache.lucene.store.MergeInfo;
 import org.apache.lucene.store.NIOFSDirectory;
 import org.apache.lucene.store.NativeFSLockFactory;
 import org.apache.lucene.store.NoLockFactory;
+import org.apache.lucene.store.NoReuseHint;
 import org.apache.lucene.store.SleepingLockWrapper;
 import org.apache.lucene.tests.mockfile.FilterFileSystemProvider;
 import org.apache.lucene.tests.mockfile.FilterPath;
@@ -29,8 +30,6 @@ import org.elasticsearch.index.Index;
 import org.elasticsearch.index.IndexModule;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.IndexVersion;
-import org.elasticsearch.index.codec.vectors.DirectIOContext;
-import org.elasticsearch.index.codec.vectors.es818.DirectIOHint;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.index.shard.ShardPath;
 import org.elasticsearch.test.ESTestCase;
@@ -209,11 +208,15 @@ public class FsDirectoryFactoryTests extends ESTestCase {
         }
     }
 
-    /** A merge-context write of raw vectors with the direct I/O hint, as the codec issues it. */
+    /** A field whose mapping asks to keep its raw vectors off the page cache. */
+    private static final VectorFieldOptions ON_DISK_VECTOR_FIELD = VectorFieldOptions.of(
+        Map.of("vector", new VectorFieldOptions.Options(true, true))
+    );
+
+    /** A merge-context write of raw vectors, as a writer issues it. */
     private static IOContext directIOMergeContext() {
-        return DirectIOContext.mergeWrite(
-            IOContext.merge(new MergeInfo(randomIntBetween(1, 1000), randomLongBetween(1, 1 << 20), false, -1))
-        );
+        return IOContext.merge(new MergeInfo(randomIntBetween(1, 1000), randomLongBetween(1, 1 << 20), false, -1))
+            .union(NoReuseHint.INSTANCE, new VectorFieldHint("vector"));
     }
 
     /**
@@ -254,7 +257,8 @@ public class FsDirectoryFactoryTests extends ESTestCase {
             FsDirectoryFactory.HybridDirectory dir = new FsDirectoryFactory.HybridDirectory(
                 NativeFSLockFactory.INSTANCE,
                 new MMapDirectory(path),
-                64
+                64,
+                ON_DISK_VECTOR_FIELD
             )
         ) {
             boolean direct = mergeCreatesAreDirect(dir);
@@ -292,7 +296,12 @@ public class FsDirectoryFactoryTests extends ESTestCase {
             try (IndexOutput plain = dir.createOutput("_0_plain.vec", IOContext.merge(new MergeInfo(10, 1024, false, -1)))) {
                 assertThat(plain, hasToString(not(containsString("DirectIOIndexOutput"))));
             }
-            try (IndexOutput plain = dir.createOutput("_0_flush.vec", IOContext.DEFAULT.withHints(DirectIOHint.INSTANCE))) {
+            try (
+                IndexOutput plain = dir.createOutput(
+                    "_0_flush.vec",
+                    IOContext.DEFAULT.withHints(NoReuseHint.INSTANCE, new VectorFieldHint("vector"))
+                )
+            ) {
                 assertThat(plain, hasToString(not(containsString("DirectIOIndexOutput"))));
             }
 
@@ -336,7 +345,8 @@ public class FsDirectoryFactoryTests extends ESTestCase {
             FsDirectoryFactory.HybridDirectory dir = new FsDirectoryFactory.HybridDirectory(
                 NativeFSLockFactory.INSTANCE,
                 new MMapDirectory(path),
-                0
+                0,
+                ON_DISK_VECTOR_FIELD
             )
         ) {
             byte[] existing = new byte[randomIntBetween(1, 512)];
@@ -390,7 +400,8 @@ public class FsDirectoryFactoryTests extends ESTestCase {
             FsDirectoryFactory.HybridDirectory dir = new FsDirectoryFactory.HybridDirectory(
                 NativeFSLockFactory.INSTANCE,
                 new MMapDirectory(root),
-                0
+                0,
+                ON_DISK_VECTOR_FIELD
             )
         ) {
             try (IndexOutput out = dir.createOutput("_0.vec", directIOMergeContext())) {
@@ -441,7 +452,8 @@ public class FsDirectoryFactoryTests extends ESTestCase {
             FsDirectoryFactory.HybridDirectory dir = new FsDirectoryFactory.HybridDirectory(
                 NativeFSLockFactory.INSTANCE,
                 new MMapDirectory(root),
-                0
+                0,
+                ON_DISK_VECTOR_FIELD
             )
         ) {
             try (IndexOutput out = dir.createOutput("_0.vec", directIOMergeContext())) {
@@ -481,7 +493,8 @@ public class FsDirectoryFactoryTests extends ESTestCase {
             FsDirectoryFactory.HybridDirectory dir = new FsDirectoryFactory.HybridDirectory(
                 NativeFSLockFactory.INSTANCE,
                 new MMapDirectory(root),
-                0
+                0,
+                ON_DISK_VECTOR_FIELD
             )
         ) {
             try (IndexOutput out = dir.createOutput("_0.vec", directIOMergeContext())) {

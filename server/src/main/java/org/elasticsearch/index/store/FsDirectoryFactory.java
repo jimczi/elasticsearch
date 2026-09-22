@@ -35,7 +35,6 @@ import org.elasticsearch.core.SuppressForbidden;
 import org.elasticsearch.index.IndexModule;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.StandardIOBehaviorHint;
-import org.elasticsearch.index.codec.vectors.es818.DirectIOHint;
 import org.elasticsearch.index.shard.ShardPath;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
@@ -265,15 +264,10 @@ public class FsDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
         @Override
         public IndexInput openInput(String name, IOContext context) throws IOException {
             Throwable directIOException = null;
-            // a merge reads the raw vectors front to back and a rescore reads them at random, which
-            // is what picks the buffer; a merge that reopened them says so with the access hint even
-            // though it kept the context it was opened with
-            boolean sequential = context.context() == IOContext.Context.MERGE
-                || context.hints().contains(DataAccessHint.SEQUENTIAL);
+            // the buffer follows the access: a merge reads front to back, a rescore at random
+            boolean sequential = context.context() == IOContext.Context.MERGE || context.hints().contains(DataAccessHint.SEQUENTIAL);
             DirectIODirectory dio = sequential ? mergeDirectIODelegate : directIODelegate;
-            boolean hinted = context.hints().contains(DirectIOHint.INSTANCE)
-                && (context.context() != IOContext.Context.MERGE || isRawVectorFile(name));
-            if (dio != null && (hinted || useDirectIO(name, context))) {
+            if (dio != null && useDirectIO(name, context)) {
                 ensureOpen();
                 ensureCanRead(name);
                 try {
@@ -318,8 +312,7 @@ public class FsDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
             // Segment file names are not normally reused.
             if (mergeDirectIODelegate != null
                 && context.context() == IOContext.Context.MERGE
-                && context.hints().contains(DirectIOHint.INSTANCE)
-                && isRawVectorFile(name)
+                && useDirectIO(name, context)
                 && getPendingDeletions().contains(name) == false) {
                 if (mergeDirectIOCreates(name)) {
                     Log.debug("Creating {} with direct IO", name);
@@ -381,6 +374,13 @@ public class FsDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
          * readers open metadata through {@code openChecksumInput}, which never carries the hint, so that
          * half only guards against a future caller.
          */
+
+        /** A temporary file holding vector data, which has no extension of its own to go by. */
+        private static boolean isTemporaryVectorFile(String name, IOContext context) {
+            return LuceneFilesExtensions.fromExtension(getExtension(name)) == LuceneFilesExtensions.TMP
+                && context.hints().contains(FileDataHint.KNN_VECTORS);
+        }
+
         static boolean isRawVectorFile(String name) {
             return LuceneFilesExtensions.fromExtension(getExtension(name)) == LuceneFilesExtensions.VEC;
         }
@@ -448,13 +448,21 @@ public class FsDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
             if (vectorFieldOptions == null || context.hints().contains(NoReuseHint.INSTANCE) == false) {
                 return false;
             }
+            // direct I/O only pays on the raw vectors themselves, whether they are the field's file
+            // or a copy of them a merge keeps for as long as it runs
+            if (isRawVectorFile(name) == false && isTemporaryVectorFile(name, context) == false) {
+                return false;
+            }
             var field = context.hints(VectorFieldHint.class).findFirst().orElse(null);
             if (field == null) {
                 // several fields share the file, so the mapping of one of them says nothing about it
                 return false;
             }
             var options = vectorFieldOptions.get(field.field());
-            return context.hints().contains(DataAccessHint.SEQUENTIAL) ? options.onDiskMerge() : options.onDiskRescore();
+            // a merge reads and writes them front to back, a rescore reads them at random
+            return context.context() == IOContext.Context.MERGE || context.hints().contains(DataAccessHint.SEQUENTIAL)
+                ? options.onDiskMerge()
+                : options.onDiskRescore();
         }
 
         MMapDirectory getDelegate() {

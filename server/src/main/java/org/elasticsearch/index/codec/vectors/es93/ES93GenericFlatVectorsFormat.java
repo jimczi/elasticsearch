@@ -132,7 +132,7 @@ public class ES93GenericFlatVectorsFormat extends AbstractFlatVectorsFormat {
             useDirectIO,
             onDiskMerge,
             state,
-            writeFormat.fieldsWriter(state, onDiskMerge && directIOMergeWrites)
+            writeFormat.fieldsWriter(state)
         );
     }
 
@@ -141,7 +141,7 @@ public class ES93GenericFlatVectorsFormat extends AbstractFlatVectorsFormat {
         return new ES93GenericFlatVectorsReader(META, state, (f, dio, odm) -> {
             var format = supportedFormats.get(f);
             if (format == null) return null;
-            return format.fieldsReader(state, dio, odm);
+            return format.fieldsReader(state);
         });
     }
 

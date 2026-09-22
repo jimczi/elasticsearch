@@ -526,7 +526,7 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
             rawVectorFormat.getName(),
             useDirectIO,
             onDiskMerge,
-            rawVectorFormat.fieldsWriter(state, onDiskMerge),
+            rawVectorFormat.fieldsWriter(state),
             quantEncoding,
             vectorPerCluster,
             centroidsPerParentCluster,
@@ -544,7 +544,7 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
         return new ES940DiskBBQVectorsReader(state, (f, dio, odm) -> {
             var format = supportedFormats.get(f);
             if (format == null) return null;
-            return format.fieldsReader(state, dio, odm);
+            return format.fieldsReader(state);
         });
     }
 

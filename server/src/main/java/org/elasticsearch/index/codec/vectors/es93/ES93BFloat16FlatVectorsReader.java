@@ -35,6 +35,7 @@ import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.internal.hppc.IntObjectHashMap;
 import org.apache.lucene.search.AcceptDocs;
 import org.apache.lucene.search.KnnCollector;
+import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.ChecksumIndexInput;
 import org.apache.lucene.store.DataAccessHint;
 import org.apache.lucene.store.Directory;
@@ -53,6 +54,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.file.NoSuchFileException;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsReader.readSimilarityFunction;
 import static org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsReader.readVectorEncoding;
@@ -218,10 +220,10 @@ public final class ES93BFloat16FlatVectorsReader extends FlatVectorsReader {
     }
 
     /**
-     * The vectors as a merge reads them, front to back. Read advice applies to a whole mapping, so
-     * a merge maps them again rather than re-advising the one searches are reading at random, and a
-     * directory can tell the two opens apart. Mapped on the first merge and closed with this reader,
-     * since merge instances are never closed.
+     * The vectors as a merge reads them, front to back. Searches read the same file at random and
+     * read advice applies to a whole mapping, so a merge maps it again and a directory sees the two
+     * opens separately. Mapped on the first merge and closed with this reader, since merge instances
+     * are never closed.
      */
     private synchronized IndexInput mergeVectorData() throws IOException {
         assert original == this;
@@ -231,25 +233,7 @@ public final class ES93BFloat16FlatVectorsReader extends FlatVectorsReader {
                 mergeVectorData = vectorData;
             } else {
                 try {
-                    // withHints replaces the set, so carry over what the reader was opened with
-                    var field = dataContext.hints(VectorFieldHint.class).findFirst().orElse(null);
-                    mergeVectorData = directory.openInput(
-                        vectorDataFN,
-                        field == null
-                            ? dataContext.withHints(
-                                FileTypeHint.DATA,
-                                FileDataHint.KNN_VECTORS,
-                                DataAccessHint.SEQUENTIAL,
-                                NoReuseHint.INSTANCE
-                            )
-                            : dataContext.withHints(
-                                FileTypeHint.DATA,
-                                FileDataHint.KNN_VECTORS,
-                                DataAccessHint.SEQUENTIAL,
-                                NoReuseHint.INSTANCE,
-                                field
-                            )
-                    );
+                    mergeVectorData = directory.openInput(vectorDataFN, mergeContext(dataContext));
                 } catch (FileNotFoundException | NoSuchFileException e) {
                     // an open reader outlives its files, so fall back to the mapping it already holds
                     mergeVectorData = vectorData;
@@ -261,7 +245,7 @@ public final class ES93BFloat16FlatVectorsReader extends FlatVectorsReader {
 
     private void ensureOpen() throws IOException {
         if (closed) {
-            throw new org.apache.lucene.store.AlreadyClosedException("this reader is closed");
+            throw new AlreadyClosedException("this reader is closed");
         }
     }
 
@@ -412,5 +396,14 @@ public final class ES93BFloat16FlatVectorsReader extends FlatVectorsReader {
             final var ordToDoc = OrdToDocDISIReaderConfiguration.fromStoredMeta(input, size);
             return new FieldEntry(similarityFunction, vectorEncoding, vectorDataOffset, vectorDataLength, dimension, size, ordToDoc, info);
         }
+    }
+
+    /** The context this reader was opened with, read front to back and not worth keeping. */
+    private static IOContext mergeContext(IOContext dataContext) {
+        IOContext.FileOpenHint[] hints = Stream.concat(
+            dataContext.hints().stream().filter(hint -> hint instanceof DataAccessHint == false),
+            Stream.of(DataAccessHint.SEQUENTIAL, NoReuseHint.INSTANCE)
+        ).toArray(IOContext.FileOpenHint[]::new);
+        return dataContext.withHints(hints);
     }
 }

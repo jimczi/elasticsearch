@@ -187,7 +187,7 @@ public class ESNextDiskASHVectorsFormat extends KnnVectorsFormat {
             rawVectorFormat.getName(),
             useDirectIO,
             onDiskMerge,
-            rawVectorFormat.fieldsWriter(state, onDiskMerge),
+            rawVectorFormat.fieldsWriter(state),
             vectorPerCluster,
             centroidsPerParentCluster,
             mergeExec,
@@ -206,7 +206,7 @@ public class ESNextDiskASHVectorsFormat extends KnnVectorsFormat {
         return new ESNextDiskASHVectorsReader(state, (f, dio, odm) -> {
             var format = supportedFormats.get(f);
             if (format == null) return null;
-            return format.fieldsReader(state, dio, odm);
+            return format.fieldsReader(state);
         }, ashConfig.queryBitsPerDim());
     }
 

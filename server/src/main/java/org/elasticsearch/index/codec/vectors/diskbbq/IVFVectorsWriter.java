@@ -30,10 +30,9 @@ import org.apache.lucene.store.DataAccessHint;
 import org.apache.lucene.store.FileDataHint;
 import org.apache.lucene.store.FileTypeHint;
 import org.apache.lucene.store.IOContext;
-import org.apache.lucene.store.NoReuseHint;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
-import org.elasticsearch.index.store.VectorFieldHint;
+import org.apache.lucene.store.NoReuseHint;
 import org.apache.lucene.util.IORunnable;
 import org.apache.lucene.util.LongValues;
 import org.elasticsearch.core.IOUtils;
@@ -43,6 +42,7 @@ import org.elasticsearch.index.codec.vectors.cluster.ClusteringByteVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.ClusteringVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansByteVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
+import org.elasticsearch.index.store.VectorFieldHint;
 import org.elasticsearch.simdvec.ESVectorUtil;
 
 import java.io.IOException;
@@ -760,10 +760,7 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
         // Even when the file might be sample, the reads will be always in increase order, therefore we set the ReadAdvice to SEQUENTIAL
         // so the OS can optimize read ahead in low memory situations.
         try (
-            IndexInput vectors = mergeState.segmentInfo.dir.openInput(
-                tempRawVectorsFileName,
-                rawVectorsContext(fieldInfo)
-            );
+            IndexInput vectors = mergeState.segmentInfo.dir.openInput(tempRawVectorsFileName, rawVectorsContext(fieldInfo));
             IndexInput docs = docsFileName == null
                 ? null
                 : mergeState.segmentInfo.dir.openInput(docsFileName, IOContext.DEFAULT.withHints(DataAccessHint.SEQUENTIAL))
@@ -1002,7 +999,6 @@ public abstract class IVFVectorsWriter<CI> extends KnnVectorsWriter {
     }
 
     private record FieldWriter(FieldInfo fieldInfo, FlatFieldVectorsWriter<?> delegate) {}
-
 
     /**
      * The context for a file this writer produces during a merge. Temporary files carry nothing in
