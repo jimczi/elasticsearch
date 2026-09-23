@@ -193,17 +193,7 @@ public class FsDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
             if (context.hints().contains(StandardIOBehaviorHint.INSTANCE)) {
                 return Optional.of(ReadAdvice.NORMAL);
             }
-            // Both kinds of advice take a mapping out of the recency tracking that decides what is
-            // reclaimed first, so they are only for a file that says it is not read again.
-            if (context.hints().contains(NoReuseHint.INSTANCE)) {
-                if (context.hints().contains(DataAccessHint.RANDOM)) {
-                    return Optional.of(ReadAdvice.RANDOM);
-                }
-                if (context.hints().contains(DataAccessHint.SEQUENTIAL)) {
-                    return Optional.of(ReadAdvice.SEQUENTIAL);
-                }
-            }
-            return Optional.of(Constants.DEFAULT_READADVICE);
+            return Optional.of(ReadAdvicePolicy.adviceFor(context).orElse(Constants.DEFAULT_READADVICE));
         };
     }
 

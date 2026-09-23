@@ -8,9 +8,8 @@
 package org.elasticsearch.xpack.stateless.cache.reader;
 
 import org.apache.lucene.store.AlreadyClosedException;
-import org.apache.lucene.store.DataAccessHint;
 import org.apache.lucene.store.IOContext;
-import org.apache.lucene.store.NoReuseHint;
+import org.apache.lucene.store.ReadAdvice;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.ResourceAlreadyUploadedException;
 import org.elasticsearch.action.ActionListener;
@@ -28,6 +27,7 @@ import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.core.CheckedConsumer;
 import org.elasticsearch.core.Streams;
 import org.elasticsearch.index.store.PluggableDirectoryMetricsHolder;
+import org.elasticsearch.index.store.ReadAdvicePolicy;
 import org.elasticsearch.index.store.StoreMetrics;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
@@ -35,7 +35,6 @@ import org.elasticsearch.xpack.stateless.StatelessPlugin;
 import org.elasticsearch.xpack.stateless.cache.StatelessSharedBlobCacheService;
 import org.elasticsearch.xpack.stateless.commits.BlobFileRanges;
 import org.elasticsearch.xpack.stateless.lucene.BlobCacheIndexInput;
-import org.elasticsearch.xpack.stateless.lucene.StatelessAdviceHint;
 
 import java.io.IOException;
 import java.lang.foreign.MemorySegment;
@@ -74,11 +73,6 @@ public class CacheFileReader {
 
     // The cache maps its file a second time for this, see SharedBytes#MADVISE_RANDOM_FEATURE_FLAG.
     static final FeatureFlag MADVISE_RANDOM_FEATURE_FLAG = SharedBytes.MADVISE_RANDOM_FEATURE_FLAG;
-
-    // Separate feature flag for selectively enabling MADV_RANDOM on the indexing tier
-    // for use-cases that have been individually validated (e.g. stored fields).
-    // Override with -Des.stateless_index_tier_madvise_random_feature_flag_enabled=true|false.
-    static final FeatureFlag INDEX_TIER_MADVISE_RANDOM_FEATURE_FLAG = new FeatureFlag("stateless_index_tier_madvise_random");
 
     private final StatelessSharedBlobCacheService.CacheFile cacheFile;
     private final CacheBlobReader cacheBlobReader;
@@ -153,7 +147,7 @@ public class CacheFileReader {
             blobCacheMetrics,
             relativeTimeInMillisSupplier,
             regionSize,
-            contextToAdvice(context, hasSearchRole),
+            contextToAdvice(context),
             0,
             Long.MAX_VALUE,
             hasSearchRole,
@@ -229,7 +223,7 @@ public class CacheFileReader {
      * @param subFileLength the sub-file's length in bytes
      */
     public CacheFileReader copyWithContext(IOContext context, long subFileOffset, long subFileLength) {
-        int advice = contextToAdvice(context, hasSearchRole);
+        int advice = contextToAdvice(context);
         long exclStart;
         long exclEnd;
         if (advice == SharedBytes.MADV_RANDOM && regionSize > 0) {
@@ -260,47 +254,22 @@ public class CacheFileReader {
      * Maps Lucene's {@link DataAccessHint} and ES-specific {@link StatelessAdviceHint} to the
      * corresponding {@code madvise} advice, branched by node role.
      */
-    static int contextToAdvice(IOContext context, boolean hasSearchRole) {
-        if (hasSearchRole) {
-            return searchAdvice(context);
-        } else {
-            return indexingAdvice(context);
-        }
-    }
-
-    private static int searchAdvice(IOContext context) {
-        // Random advice costs the mapping its place in the recency tracking that decides what is
-        // reclaimed first, so it is only for a file that says its pages are not read again.
-        if (MADVISE_RANDOM_FEATURE_FLAG.isEnabled()
-            && context.hints().contains(NoReuseHint.INSTANCE)
-            && context.hints().contains(DataAccessHint.RANDOM)) {
-            return SharedBytes.MADV_RANDOM;
-        }
-        return SharedBytes.MADV_NORMAL;
-    }
-
     /**
-     * On indexing nodes, returns {@code MADV_RANDOM} only for use-cases that have been individually
-     * validated via {@link StatelessAdviceHint}. Once all use-cases are validated, the
-     * {@link StatelessAdviceHint} gate can be removed to match {@link #searchAdvice}.
+     * The advice a read of this blob asks for. Both kinds of advice take the mapping out of the recency tracking
+     * that decides what is reclaimed first, so it is only for a file that says its pages are not read again, and
+     * the access pattern then picks which one. The same on both tiers: an indexing node searches its own shards,
+     * and a file read the same way wants the same advice wherever it is read.
      */
-    private static int indexingAdvice(IOContext context) {
-        if (INDEX_TIER_MADVISE_RANDOM_FEATURE_FLAG.isEnabled()
-            && context.hints().contains(NoReuseHint.INSTANCE)
-            && context.hints().contains(DataAccessHint.RANDOM)
-            && containsStatelessAdviceHint(context)) {
-            return SharedBytes.MADV_RANDOM;
+    static int contextToAdvice(IOContext context) {
+        if (MADVISE_RANDOM_FEATURE_FLAG.isEnabled() == false) {
+            return SharedBytes.MADV_NORMAL;
         }
-        return SharedBytes.MADV_NORMAL;
-    }
-
-    private static boolean containsStatelessAdviceHint(IOContext context) {
-        for (var hint : context.hints()) {
-            if (hint instanceof StatelessAdviceHint) {
-                return true;
-            }
-        }
-        return false;
+        // The cache keeps a mapping advised for random reads beside its normal one. It keeps none advised
+        // sequentially, so a read that asks for that is served through the normal mapping: it would give up the
+        // same recency, and there is nothing here for the readahead to gain that the cache has not already read.
+        return ReadAdvicePolicy.adviceFor(context).orElse(ReadAdvice.NORMAL) == ReadAdvice.RANDOM
+            ? SharedBytes.MADV_RANDOM
+            : SharedBytes.MADV_NORMAL;
     }
 
     /**

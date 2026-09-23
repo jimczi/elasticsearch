@@ -56,7 +56,7 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
 
     public void testContextToAdviceWithRandomHint() {
         IOContext randomCtx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE);
-        int advice = CacheFileReaderTestUtils.contextToAdvice(randomCtx, true);
+        int advice = CacheFileReaderTestUtils.contextToAdvice(randomCtx);
 
         if (CacheFileReaderTestUtils.isMadviseRandomEnabled()) {
             assertEquals(SharedBytes.MADV_RANDOM, advice);
@@ -68,72 +68,18 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
     public void testContextToAdviceWithRandomHintButReadAgain() {
         // Random advice costs the mapping its recency, so asking for random access is not enough.
         IOContext randomCtx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM);
-        assertEquals(SharedBytes.MADV_NORMAL, CacheFileReaderTestUtils.contextToAdvice(randomCtx, true));
+        assertEquals(SharedBytes.MADV_NORMAL, CacheFileReaderTestUtils.contextToAdvice(randomCtx));
     }
 
     public void testContextToAdviceWithoutRandomHint() {
-        assertEquals(SharedBytes.MADV_NORMAL, CacheFileReaderTestUtils.contextToAdvice(IOContext.DEFAULT, true));
+        assertEquals(SharedBytes.MADV_NORMAL, CacheFileReaderTestUtils.contextToAdvice(IOContext.DEFAULT));
     }
 
-    public void testContextToAdviceWithRandomHintButNoSearchRole() {
+    /** An indexing node searches its own shards, so a file read the same way is advised the same way there. */
+    public void testContextToAdviceIsTheSameOnEitherTier() {
         IOContext randomCtx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE);
-        assertEquals(SharedBytes.MADV_NORMAL, CacheFileReaderTestUtils.contextToAdvice(randomCtx, false));
-    }
-
-    // --- Index-tier StatelessAdviceHint tests ---
-
-    public void testContextToAdviceWithStatelessHintOnIndexTier() {
-        IOContext ctx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE, StatelessAdviceHint.STORED_FIELDS);
-        int advice = CacheFileReaderTestUtils.contextToAdvice(ctx, false);
-
-        if (CacheFileReaderTestUtils.isIndexTierMadviseRandomEnabled()) {
-            assertEquals(SharedBytes.MADV_RANDOM, advice);
-        } else {
-            assertEquals(SharedBytes.MADV_NORMAL, advice);
-        }
-    }
-
-    public void testContextToAdviceWithStatelessHintOnSearchTier() {
-        IOContext ctx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE, StatelessAdviceHint.STORED_FIELDS);
-        int advice = CacheFileReaderTestUtils.contextToAdvice(ctx, true);
-
-        if (CacheFileReaderTestUtils.isMadviseRandomEnabled()) {
-            assertEquals(SharedBytes.MADV_RANDOM, advice);
-        } else {
-            assertEquals(SharedBytes.MADV_NORMAL, advice);
-        }
-    }
-
-    public void testContextToAdviceWithStatelessHintAloneOnIndexTier() {
-        // StatelessAdviceHint without DataAccessHint.RANDOM should NOT trigger MADV_RANDOM
-        IOContext ctx = IOContext.DEFAULT.withHints(StatelessAdviceHint.STORED_FIELDS);
-        int advice = CacheFileReaderTestUtils.contextToAdvice(ctx, false);
-        assertEquals(SharedBytes.MADV_NORMAL, advice);
-    }
-
-    public void testContextToAdviceWithoutStatelessHintOnIndexTier() {
-        IOContext randomCtx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE);
-        assertEquals(SharedBytes.MADV_NORMAL, CacheFileReaderTestUtils.contextToAdvice(randomCtx, false));
-    }
-
-    // --- IndexDirectory.maybeAddStatelessAdviceHint tests ---
-
-    public void testMaybeAddStatelessAdviceHintForStoredFieldsFile() {
-        IOContext ctx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE);
-        IOContext result = IndexDirectory.maybeAddStatelessAdviceHint("_0.fdt", ctx);
-        assertTrue(result.hints().contains(StatelessAdviceHint.STORED_FIELDS));
-        assertTrue(result.hints().contains(DataAccessHint.RANDOM));
-    }
-
-    public void testMaybeAddStatelessAdviceHintIgnoresNonStoredFieldsFile() {
-        IOContext ctx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE);
-        IOContext result = IndexDirectory.maybeAddStatelessAdviceHint("_0.vec", ctx);
-        assertFalse(result.hints().contains(StatelessAdviceHint.STORED_FIELDS));
-    }
-
-    public void testMaybeAddStatelessAdviceHintIgnoresWithoutRandomHint() {
-        IOContext result = IndexDirectory.maybeAddStatelessAdviceHint("_0.fdt", IOContext.DEFAULT);
-        assertFalse(result.hints().contains(StatelessAdviceHint.STORED_FIELDS));
+        final int expected = CacheFileReaderTestUtils.isMadviseRandomEnabled() ? SharedBytes.MADV_RANDOM : SharedBytes.MADV_NORMAL;
+        assertEquals(expected, CacheFileReaderTestUtils.contextToAdvice(randomCtx));
     }
 
     // --- Top-level file (exclusive blob) tests ---
