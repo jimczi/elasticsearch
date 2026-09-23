@@ -10,6 +10,7 @@ package org.elasticsearch.xpack.stateless.cache.reader;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.DataAccessHint;
 import org.apache.lucene.store.IOContext;
+import org.apache.lucene.store.NoReuseHint;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.ResourceAlreadyUploadedException;
 import org.elasticsearch.action.ActionListener;
@@ -71,11 +72,8 @@ public class CacheFileReader {
         CachePopulationSource.Peer.name()
     );
 
-    // On post-6.4 Linux kernels, MADV_RANDOM causes pages to not be marked as accessed,
-    // leading to aggressive eviction under MGLRU even without memory pressure.
-    // Enabled on snapshot builds for benchmarking; disabled in production.
-    // Override with -Des.blob_cache_madvise_random_feature_flag_enabled=true|false.
-    static final FeatureFlag MADVISE_RANDOM_FEATURE_FLAG = new FeatureFlag("blob_cache_madvise_random");
+    // The cache maps its file a second time for this, see SharedBytes#MADVISE_RANDOM_FEATURE_FLAG.
+    static final FeatureFlag MADVISE_RANDOM_FEATURE_FLAG = SharedBytes.MADVISE_RANDOM_FEATURE_FLAG;
 
     // Separate feature flag for selectively enabling MADV_RANDOM on the indexing tier
     // for use-cases that have been individually validated (e.g. stored fields).
@@ -271,7 +269,11 @@ public class CacheFileReader {
     }
 
     private static int searchAdvice(IOContext context) {
-        if (MADVISE_RANDOM_FEATURE_FLAG.isEnabled() && context.hints().contains(DataAccessHint.RANDOM)) {
+        // Random advice costs the mapping its place in the recency tracking that decides what is
+        // reclaimed first, so it is only for a file that says its pages are not read again.
+        if (MADVISE_RANDOM_FEATURE_FLAG.isEnabled()
+            && context.hints().contains(NoReuseHint.INSTANCE)
+            && context.hints().contains(DataAccessHint.RANDOM)) {
             return SharedBytes.MADV_RANDOM;
         }
         return SharedBytes.MADV_NORMAL;
@@ -284,6 +286,7 @@ public class CacheFileReader {
      */
     private static int indexingAdvice(IOContext context) {
         if (INDEX_TIER_MADVISE_RANDOM_FEATURE_FLAG.isEnabled()
+            && context.hints().contains(NoReuseHint.INSTANCE)
             && context.hints().contains(DataAccessHint.RANDOM)
             && containsStatelessAdviceHint(context)) {
             return SharedBytes.MADV_RANDOM;
@@ -574,10 +577,6 @@ public class CacheFileReader {
                 // ranges that may share a region with adjacent files get MADV_NORMAL.
                 final int advice = adviceForRange(rangeToWrite);
                 bytesRead = cacheFile.populateAndRead(rangeToWrite, rangeToRead, (channel, channelPos, relativePos, len) -> {
-                    // Apply madvise so the kernel uses the correct access pattern for this region.
-                    // Covers both already-resident regions (warmed by prefetch/prewarm services)
-                    // and freshly-filled regions. The call is idempotent — skipped when unchanged.
-                    channel.madvise(advice);
                     logger.trace(
                         "{}: reading cached [{}][{}-{}]",
                         initiator.toString(),
@@ -585,7 +584,7 @@ public class CacheFileReader {
                         rangeToRead.start(),
                         rangeToRead.start() + len
                     );
-                    return SharedBytes.readCacheFile(channel, channelPos, relativePos, len, byteBufferReference);
+                    return SharedBytes.readCacheFile(channel, channelPos, relativePos, len, byteBufferReference, advice);
                 }, rangeMissingHandler, resourceDescription);
                 byteBufferReference.finish(bytesRead);
             } catch (Exception e) {

@@ -846,7 +846,7 @@ public class SharedBlobCacheWarmingServiceTests extends ESTestCase {
                             // assert that what's read from the cache matches the vbcc contents
                             tempBuffer.clear();
                             tempBuffer.limit(length);
-                            channel.read(tempBuffer, channelPos);
+                            channel.read(tempBuffer, channelPos, SharedBytes.MADV_NORMAL);
                             tempBuffer.flip();
                             try (var vbccInputStream = vbcc.getFrozenInputStreamForUpload((int) testRange.start() + relativePos, length)) {
                                 byte[] vbccBytes = vbccInputStream.readAllBytes();

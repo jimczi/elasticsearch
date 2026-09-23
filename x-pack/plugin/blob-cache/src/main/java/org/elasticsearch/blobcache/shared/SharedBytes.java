@@ -13,6 +13,7 @@ import org.apache.lucene.util.Unwrappable;
 import org.elasticsearch.blobcache.BlobCacheUtils;
 import org.elasticsearch.blobcache.common.ByteBufferReference;
 import org.elasticsearch.common.unit.ByteSizeValue;
+import org.elasticsearch.common.util.FeatureFlag;
 import org.elasticsearch.core.AbstractRefCounted;
 import org.elasticsearch.core.IOUtils;
 import org.elasticsearch.core.Streams;
@@ -28,8 +29,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.lang.foreign.MemorySegment;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileChannel.MapMode;
@@ -61,6 +60,16 @@ public class SharedBytes extends AbstractRefCounted {
         StandardOpenOption.CREATE };
 
     private static final long MAX_BYTES_PER_MAP = ByteSizeValue.ofGb(1).getBytes();
+
+    /**
+     * Whether a region read at random is served through a mapping advised {@code MADV_RANDOM}.
+     *
+     * <p>On post-6.4 Linux kernels, MADV_RANDOM causes pages to not be marked as accessed, leading
+     * to aggressive eviction under MGLRU even without memory pressure. Enabled on snapshot builds
+     * for benchmarking; disabled in production.
+     * Override with -Des.blob_cache_madvise_random_feature_flag_enabled=true|false.
+     */
+    public static final FeatureFlag MADVISE_RANDOM_FEATURE_FLAG = new FeatureFlag("blob_cache_madvise_random");
 
     private static final byte[] ZEROES = new byte[PAGE_SIZE];
 
@@ -110,28 +119,56 @@ public class SharedBytes extends AbstractRefCounted {
             int mapSize = regionsPerMmap * regionSize;
             int lastMapSize = Math.toIntExact(fileSize % mapSize);
             int mapCount = Math.toIntExact(fileSize / mapSize) + (lastMapSize == 0 ? 0 : 1);
-            MappedSegment[] parentMmaps = new MappedSegment[mapCount];
-            for (int i = 0; i < mapCount - 1; i++) {
-                parentMmaps[i] = map(fileChannel, MapMode.READ_ONLY, (long) mapSize * i, mapSize);
+            MappedSegment[] parentMmaps = mapWhole(mapCount, mapSize, lastMapSize);
+            // A second mapping of the same file, advised once for reads that do not come back to
+            // the same pages. The advice belongs to the mapping rather than to a region, so a
+            // region says nothing about how it is read and can be recycled to another file freely.
+            MappedSegment[] randomMmaps = MADVISE_RANDOM_FEATURE_FLAG.isEnabled() ? mapWhole(mapCount, mapSize, lastMapSize) : null;
+            if (randomMmaps != null) {
+                for (MappedSegment randomMmap : randomMmaps) {
+                    randomMmap.madvise(0, randomMmap.segment().byteSize(), MADV_RANDOM);
+                }
             }
-            parentMmaps[mapCount - 1] = map(
-                fileChannel,
-                MapMode.READ_ONLY,
-                (long) mapSize * (mapCount - 1),
-                lastMapSize == 0 ? mapSize : lastMapSize
-            );
             for (int i = 0; i < numRegions; i++) {
-                ios[i] = new IO(i, parentMmaps[i / regionsPerMmap].slice((long) (i % regionsPerMmap) * regionSize, regionSize));
+                long offset = (long) (i % regionsPerMmap) * regionSize;
+                ios[i] = new IO(
+                    i,
+                    parentMmaps[i / regionsPerMmap].slice(offset, regionSize),
+                    randomMmaps == null ? null : randomMmaps[i / regionsPerMmap].slice(offset, regionSize)
+                );
             }
-            this.mmapCloseables = getMmapCloseables(parentMmaps);
+            Closeable[] closeables = getMmapCloseables(parentMmaps);
+            if (randomMmaps != null) {
+                Closeable[] randomCloseables = getMmapCloseables(randomMmaps);
+                Closeable[] both = new Closeable[closeables.length + randomCloseables.length];
+                System.arraycopy(closeables, 0, both, 0, closeables.length);
+                System.arraycopy(randomCloseables, 0, both, closeables.length, randomCloseables.length);
+                closeables = both;
+            }
+            this.mmapCloseables = closeables;
         } else {
             for (int i = 0; i < numRegions; i++) {
-                ios[i] = new IO(i, null);
+                ios[i] = new IO(i, null, null);
             }
             this.mmapCloseables = null;
         }
         this.writeBytes = writeBytes;
         this.readBytes = readBytes;
+    }
+
+    /** Maps the whole cache file, in chunks of at most {@link #MAX_BYTES_PER_MAP}. */
+    private MappedSegment[] mapWhole(int mapCount, int mapSize, int lastMapSize) throws IOException {
+        MappedSegment[] mmaps = new MappedSegment[mapCount];
+        for (int i = 0; i < mapCount - 1; i++) {
+            mmaps[i] = map(fileChannel, MapMode.READ_ONLY, (long) mapSize * i, mapSize);
+        }
+        mmaps[mapCount - 1] = map(
+            fileChannel,
+            MapMode.READ_ONLY,
+            (long) mapSize * (mapCount - 1),
+            lastMapSize == 0 ? mapSize : lastMapSize
+        );
+        return mmaps;
     }
 
     private Closeable[] getMmapCloseables(MappedSegment[] mappedSegments) {
@@ -294,11 +331,18 @@ public class SharedBytes extends AbstractRefCounted {
      * @param relativePos position in {@code byteBufferReference}
      * @param length number of bytes to read
      * @param byteBufferReference buffer reference
+     * @param advice how the caller reads this region, see {@link #MADV_NORMAL} and {@link #MADV_RANDOM}
      * @return number of bytes read
      * @throws IOException on failure
      */
-    public static int readCacheFile(final IO fc, int channelPos, int relativePos, int length, final ByteBufferReference byteBufferReference)
-        throws IOException {
+    public static int readCacheFile(
+        final IO fc,
+        int channelPos,
+        int relativePos,
+        int length,
+        final ByteBufferReference byteBufferReference,
+        int advice
+    ) throws IOException {
         if (length == 0L) {
             return 0;
         }
@@ -306,7 +350,7 @@ public class SharedBytes extends AbstractRefCounted {
         final ByteBuffer dup = byteBufferReference.tryAcquire(relativePos, length);
         if (dup != null) {
             try {
-                bytesRead = fc.read(dup, channelPos);
+                bytesRead = fc.read(dup, channelPos, advice);
                 if (bytesRead == -1) {
                     BlobCacheUtils.throwEOF(channelPos, dup.remaining());
                 }
@@ -347,35 +391,34 @@ public class SharedBytes extends AbstractRefCounted {
 
     public final class IO {
 
-        private static final VarHandle VH_CURRENT_ADVICE;
-
-        static {
-            try {
-                VH_CURRENT_ADVICE = MethodHandles.lookup().findVarHandle(IO.class, "currentAdvice", int.class);
-            } catch (NoSuchFieldException | IllegalAccessException e) {
-                throw new ExceptionInInitializerError(e);
-            }
-        }
-
         private final long pageStart;
 
         private final MappedSegment mappedSegment;
+        private final MappedSegment randomMappedSegment;
 
-        // Cached reference to the region's MemorySegment
+        // Cached references to this region within each of the two mappings
         private final MemorySegment mmapSegment;
+        private final MemorySegment randomSegment;
 
-        // Racy but safe: opaque access avoids a memory fence on the hot read path.
-        // A stale read may cause a redundant (but idempotent) madvise syscall.
-        private int currentAdvice = MADV_NORMAL;
-
-        private IO(final int sharedBytesPos, MappedSegment mappedSegment) {
+        private IO(final int sharedBytesPos, MappedSegment mappedSegment, MappedSegment randomMappedSegment) {
             long physicalOffset = (long) sharedBytesPos * regionSize;
             assert physicalOffset <= (long) numRegions * regionSize;
             this.pageStart = physicalOffset;
             this.mappedSegment = mappedSegment;
+            this.randomMappedSegment = randomMappedSegment != null ? randomMappedSegment : mappedSegment;
             this.mmapSegment = mappedSegment != null ? mappedSegment.segment() : null;
+            this.randomSegment = this.randomMappedSegment != null ? this.randomMappedSegment.segment() : null;
         }
 
+        /** This region as seen through the mapping advised for {@code advice}. */
+        private MemorySegment segmentFor(int advice) {
+            return advice == MADV_RANDOM ? randomSegment : mmapSegment;
+        }
+
+        /**
+         * Reads the range into the page cache. The two mappings share the pages they cover, so the
+         * advice a mapping carries does not change what this brings in.
+         */
         public boolean prefetch(long offset, long length) {
             if (mmap) {
                 mappedSegment.prefetch(offset, length);
@@ -384,32 +427,14 @@ public class SharedBytes extends AbstractRefCounted {
             return false;
         }
 
-        /**
-         * Advises the OS about the expected access pattern for this region.
-         * Skips the syscall if the advice matches what was previously set.
-         *
-         * @param advice the posix_madvise access pattern advice constant
-         */
-        public void madvise(int advice) {
-            if (mmap && (int) VH_CURRENT_ADVICE.getOpaque(this) != advice) {
-                mappedSegment.madvise(0, regionSize, advice);
-                VH_CURRENT_ADVICE.setOpaque(this, advice);
-            }
-        }
-
-        // visible for testing
-        int currentAdvice() {
-            return (int) VH_CURRENT_ADVICE.getOpaque(this);
-        }
-
         @SuppressForbidden(reason = "Use positional reads on purpose")
-        public int read(ByteBuffer dst, int position) throws IOException {
+        public int read(ByteBuffer dst, int position, int advice) throws IOException {
             int remaining = dst.remaining();
             checkOffsets(position, remaining);
             final int bytesRead;
             if (mmap) {
                 bytesRead = remaining;
-                MemorySegment.copy(mmapSegment, position, MemorySegment.ofBuffer(dst), 0, bytesRead);
+                MemorySegment.copy(segmentFor(advice), position, MemorySegment.ofBuffer(dst), 0, bytesRead);
                 dst.position(dst.position() + bytesRead);
             } else {
                 bytesRead = fileChannel.read(dst, pageStart + position);
@@ -426,10 +451,10 @@ public class SharedBytes extends AbstractRefCounted {
          * @param length   the number of bytes, {@code position + length} must not exceed the region size
          * @throws IllegalArgumentException if the position/length are out of bounds
          */
-        public MemorySegment memorySegmentSlice(int position, int length) {
+        public MemorySegment memorySegmentSlice(int position, int length, int advice) {
             if (mmap) {
                 checkOffsets(position, length);
-                return mmapSegment.asSlice(position, length);
+                return segmentFor(advice).asSlice(position, length);
             }
             return null;
         }
@@ -443,9 +468,10 @@ public class SharedBytes extends AbstractRefCounted {
          * @param position the starting position within the region, in bytes
          * @return the raw native address, or {@code -1L} if not memory-mapped
          */
-        public long addressAt(int position) {
-            if (mmap && mmapSegment.address() > 0) {
-                return mmapSegment.address() + position;
+        public long addressAt(int position, int advice) {
+            MemorySegment segment = mmap ? segmentFor(advice) : null;
+            if (segment != null && segment.address() > 0) {
+                return segment.address() + position;
             }
             return -1L;
         }

@@ -1362,8 +1362,7 @@ public class SharedBlobCacheService<KeyType extends SharedBlobCacheService.KeyBa
         boolean tryRead(ByteBuffer buf, long offset, int advice) throws IOException {
             SharedBytes.IO ioRef = nonVolatileIO();
             if (ioRef != null) {
-                ioRef.madvise(advice);
-                int readBytes = ioRef.read(buf, blobCacheService.getRegionRelativePosition(offset));
+                int readBytes = ioRef.read(buf, blobCacheService.getRegionRelativePosition(offset), advice);
                 if (isEvicted()) {
                     buf.position(buf.position() - readBytes);
                     return false;
@@ -1390,8 +1389,7 @@ public class SharedBlobCacheService<KeyType extends SharedBlobCacheService.KeyBa
             SharedBytes.IO ioRef = nonVolatileIO();
             if (ioRef != null && tryIncRef()) {
                 try {
-                    ioRef.madvise(advice);
-                    MemorySegment slice = ioRef.memorySegmentSlice(blobCacheService.getRegionRelativePosition(offset), length);
+                    MemorySegment slice = ioRef.memorySegmentSlice(blobCacheService.getRegionRelativePosition(offset), length, advice);
                     if (slice != null && isEvicted() == false) {
                         action.accept(slice);
                         return true;
@@ -1813,12 +1811,11 @@ public class SharedBlobCacheService<KeyType extends SharedBlobCacheService.KeyBa
                             return false;
                         }
                         held[heldCount++] = region;
-                        ioRef.madvise(advice);
                     }
 
                     // Write the raw address directly into the caller's output buffer.
                     // addressAt() returns -1L when not mmap-ed, which means unavailable.
-                    long addr = ioRef.addressAt(getRegionRelativePosition(offset));
+                    long addr = ioRef.addressAt(getRegionRelativePosition(offset), advice);
                     if (addr == -1L) {
                         return false;
                     }

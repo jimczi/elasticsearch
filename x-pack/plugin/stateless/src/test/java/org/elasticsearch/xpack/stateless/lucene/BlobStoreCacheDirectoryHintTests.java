@@ -10,6 +10,7 @@ package org.elasticsearch.xpack.stateless.lucene;
 import org.apache.lucene.store.DataAccessHint;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
+import org.apache.lucene.store.NoReuseHint;
 import org.elasticsearch.blobcache.BlobCacheMetrics;
 import org.elasticsearch.blobcache.common.ByteRange;
 import org.elasticsearch.blobcache.shared.SharedBytes;
@@ -46,7 +47,7 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
         var dir = createCapturingDirectory(capturedContext);
         dir.updateMetadata(Map.of("_0.vec", createBlobFileRanges(1L, 0L, 0, 1024)), 1024L);
 
-        dir.openInput("_0.vec", IOContext.DEFAULT.withHints(DataAccessHint.RANDOM));
+        dir.openInput("_0.vec", IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE));
 
         assertTrue(capturedContext.get().hints().contains(DataAccessHint.RANDOM));
     }
@@ -54,7 +55,7 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
     // --- contextToAdvice tests ---
 
     public void testContextToAdviceWithRandomHint() {
-        IOContext randomCtx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM);
+        IOContext randomCtx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE);
         int advice = CacheFileReaderTestUtils.contextToAdvice(randomCtx, true);
 
         if (CacheFileReaderTestUtils.isMadviseRandomEnabled()) {
@@ -64,19 +65,25 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
         }
     }
 
+    public void testContextToAdviceWithRandomHintButReadAgain() {
+        // Random advice costs the mapping its recency, so asking for random access is not enough.
+        IOContext randomCtx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM);
+        assertEquals(SharedBytes.MADV_NORMAL, CacheFileReaderTestUtils.contextToAdvice(randomCtx, true));
+    }
+
     public void testContextToAdviceWithoutRandomHint() {
         assertEquals(SharedBytes.MADV_NORMAL, CacheFileReaderTestUtils.contextToAdvice(IOContext.DEFAULT, true));
     }
 
     public void testContextToAdviceWithRandomHintButNoSearchRole() {
-        IOContext randomCtx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM);
+        IOContext randomCtx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE);
         assertEquals(SharedBytes.MADV_NORMAL, CacheFileReaderTestUtils.contextToAdvice(randomCtx, false));
     }
 
     // --- Index-tier StatelessAdviceHint tests ---
 
     public void testContextToAdviceWithStatelessHintOnIndexTier() {
-        IOContext ctx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, StatelessAdviceHint.STORED_FIELDS);
+        IOContext ctx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE, StatelessAdviceHint.STORED_FIELDS);
         int advice = CacheFileReaderTestUtils.contextToAdvice(ctx, false);
 
         if (CacheFileReaderTestUtils.isIndexTierMadviseRandomEnabled()) {
@@ -87,7 +94,7 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
     }
 
     public void testContextToAdviceWithStatelessHintOnSearchTier() {
-        IOContext ctx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, StatelessAdviceHint.STORED_FIELDS);
+        IOContext ctx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE, StatelessAdviceHint.STORED_FIELDS);
         int advice = CacheFileReaderTestUtils.contextToAdvice(ctx, true);
 
         if (CacheFileReaderTestUtils.isMadviseRandomEnabled()) {
@@ -105,21 +112,21 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
     }
 
     public void testContextToAdviceWithoutStatelessHintOnIndexTier() {
-        IOContext randomCtx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM);
+        IOContext randomCtx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE);
         assertEquals(SharedBytes.MADV_NORMAL, CacheFileReaderTestUtils.contextToAdvice(randomCtx, false));
     }
 
     // --- IndexDirectory.maybeAddStatelessAdviceHint tests ---
 
     public void testMaybeAddStatelessAdviceHintForStoredFieldsFile() {
-        IOContext ctx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM);
+        IOContext ctx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE);
         IOContext result = IndexDirectory.maybeAddStatelessAdviceHint("_0.fdt", ctx);
         assertTrue(result.hints().contains(StatelessAdviceHint.STORED_FIELDS));
         assertTrue(result.hints().contains(DataAccessHint.RANDOM));
     }
 
     public void testMaybeAddStatelessAdviceHintIgnoresNonStoredFieldsFile() {
-        IOContext ctx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM);
+        IOContext ctx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE);
         IOContext result = IndexDirectory.maybeAddStatelessAdviceHint("_0.vec", ctx);
         assertFalse(result.hints().contains(StatelessAdviceHint.STORED_FIELDS));
     }
@@ -142,7 +149,7 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
             BlobCacheMetrics.NOOP,
             System::currentTimeMillis,
             REGION_SIZE,
-            IOContext.DEFAULT.withHints(DataAccessHint.RANDOM),
+            IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE),
             true,
             true
         );
@@ -164,7 +171,7 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
             BlobCacheMetrics.NOOP,
             System::currentTimeMillis,
             REGION_SIZE,
-            IOContext.DEFAULT.withHints(DataAccessHint.RANDOM),
+            IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE),
             true,
             true
         );
@@ -199,7 +206,11 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
         // .vec at offset 10MB, length 500MB - 20MB = 480MB within the compound blob
         long subFileOffset = 10 * 1024 * 1024L;
         long subFileLength = 480 * 1024 * 1024L;
-        var slice = original.copyWithContext(IOContext.DEFAULT.withHints(DataAccessHint.RANDOM), subFileOffset, subFileLength);
+        var slice = original.copyWithContext(
+            IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE),
+            subFileOffset,
+            subFileLength
+        );
 
         if (CacheFileReaderTestUtils.isMadviseRandomEnabled()) {
             assertEquals(SharedBytes.MADV_RANDOM, CacheFileReaderTestUtils.getDesiredAdvice(slice));
@@ -235,7 +246,11 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
         // .vec at offset 5MB, length 8MB — fits within one region boundary, no exclusive regions
         long subFileOffset = 5 * 1024 * 1024L;
         long subFileLength = 8 * 1024 * 1024L;
-        var slice = original.copyWithContext(IOContext.DEFAULT.withHints(DataAccessHint.RANDOM), subFileOffset, subFileLength);
+        var slice = original.copyWithContext(
+            IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE),
+            subFileOffset,
+            subFileLength
+        );
 
         if (CacheFileReaderTestUtils.isMadviseRandomEnabled()) {
             assertEquals(SharedBytes.MADV_RANDOM, CacheFileReaderTestUtils.getDesiredAdvice(slice));
@@ -267,7 +282,11 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
         // .vec at region boundary, length = 3 regions
         long subFileOffset = 2L * REGION_SIZE;
         long subFileLength = 3L * REGION_SIZE;
-        var slice = original.copyWithContext(IOContext.DEFAULT.withHints(DataAccessHint.RANDOM), subFileOffset, subFileLength);
+        var slice = original.copyWithContext(
+            IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE),
+            subFileOffset,
+            subFileLength
+        );
 
         if (CacheFileReaderTestUtils.isMadviseRandomEnabled()) {
             assertEquals(subFileOffset, CacheFileReaderTestUtils.getExclusiveStart(slice));
@@ -297,7 +316,11 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
         // .vec starts at 10MB, 480MB long → exclusive range [16MB, 480MB)
         long subFileOffset = 10 * 1024 * 1024L;
         long subFileLength = 480 * 1024 * 1024L;
-        var slice = original.copyWithContext(IOContext.DEFAULT.withHints(DataAccessHint.RANDOM), subFileOffset, subFileLength);
+        var slice = original.copyWithContext(
+            IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE),
+            subFileOffset,
+            subFileLength
+        );
 
         if (CacheFileReaderTestUtils.isMadviseRandomEnabled()) {
             // Range fully inside exclusive region → MADV_RANDOM
@@ -326,7 +349,7 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
             BlobCacheMetrics.NOOP,
             System::currentTimeMillis,
             REGION_SIZE,
-            IOContext.DEFAULT.withHints(DataAccessHint.RANDOM),
+            IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE),
             true,
             true
         );
@@ -360,7 +383,11 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
 
         long subFileOffset = 10 * 1024 * 1024L;
         long subFileLength = 480 * 1024 * 1024L;
-        var slice = original.copyWithContext(IOContext.DEFAULT.withHints(DataAccessHint.RANDOM), subFileOffset, subFileLength);
+        var slice = original.copyWithContext(
+            IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE),
+            subFileOffset,
+            subFileLength
+        );
 
         if (CacheFileReaderTestUtils.isMadviseRandomEnabled()) {
             long exclEnd = CacheFileReaderTestUtils.getExclusiveEnd(slice);
@@ -419,7 +446,7 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
             true
         );
         var indexInput = new BlobCacheIndexInput("test.cfs", IOContext.DEFAULT, reader, null, 500 * 1024 * 1024, 0);
-        IOContext randomCtx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM);
+        IOContext randomCtx = IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE);
         // .vec at offset 10MB, length 100MB
         long sliceOffset = 10 * 1024 * 1024L;
         long sliceLength = 100 * 1024 * 1024L;
@@ -476,7 +503,7 @@ public class BlobStoreCacheDirectoryHintTests extends ESTestCase {
             BlobCacheMetrics.NOOP,
             System::currentTimeMillis,
             REGION_SIZE,
-            IOContext.DEFAULT.withHints(DataAccessHint.RANDOM),
+            IOContext.DEFAULT.withHints(DataAccessHint.RANDOM, NoReuseHint.INSTANCE),
             true,
             true
         );

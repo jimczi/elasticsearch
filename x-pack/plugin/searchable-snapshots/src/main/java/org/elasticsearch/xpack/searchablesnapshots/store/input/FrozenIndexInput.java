@@ -174,7 +174,7 @@ public final class FrozenIndexInput extends MetadataCachingIndexInput implements
                     length,
                     cacheFile
                 );
-                final int read = SharedBytes.readCacheFile(channel, pos, relativePos, len, byteBufferReference);
+                final int read = SharedBytes.readCacheFile(channel, pos, relativePos, len, byteBufferReference, SharedBytes.MADV_NORMAL);
                 stats.addCachedBytesRead(read);
                 return read;
             },

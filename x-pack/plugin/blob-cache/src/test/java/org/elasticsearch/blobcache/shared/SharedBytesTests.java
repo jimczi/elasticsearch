@@ -91,7 +91,7 @@ public class SharedBytesTests extends ESTestCase {
                 assertThat(bytesWritten, equalTo(fullRegionRandomData.length));
                 // read back region and verify whole region is written correctly
                 byte[] readRegionData = new byte[regionSize];
-                sharedBytes.getFileChannel(region).read(ByteBuffer.wrap(readRegionData), 0);
+                sharedBytes.getFileChannel(region).read(ByteBuffer.wrap(readRegionData), 0, SharedBytes.MADV_NORMAL);
                 assertArrayEquals(fullRegionRandomData, readRegionData);
             }
             // now write less than a full region
@@ -110,7 +110,7 @@ public class SharedBytesTests extends ESTestCase {
                 assertThat(bytesWritten, greaterThanOrEqualTo(randomData.length));
                 // read back region and verify region is written starting from position and padded with 0
                 byte[] readRegionData = new byte[bytesWritten];
-                sharedBytes.getFileChannel(region).read(ByteBuffer.wrap(readRegionData), position);
+                sharedBytes.getFileChannel(region).read(ByteBuffer.wrap(readRegionData), position, SharedBytes.MADV_NORMAL);
                 for (int i = 0; i < randomData.length; i++) {
                     assertEquals(randomData[i], readRegionData[i]);
                 }
@@ -156,7 +156,7 @@ public class SharedBytesTests extends ESTestCase {
             // memorySegmentSlice returns a non-null read-only segment with correct data
             int sliceOffset = randomIntBetween(0, regionSize / 2);
             int sliceLength = randomIntBetween(1, regionSize - sliceOffset);
-            MemorySegment slice = io.memorySegmentSlice(sliceOffset, sliceLength);
+            MemorySegment slice = io.memorySegmentSlice(sliceOffset, sliceLength, SharedBytes.MADV_NORMAL);
             assertNotNull(slice);
             assertTrue(slice.isReadOnly());
             assertEquals(sliceLength, slice.byteSize());
@@ -190,7 +190,7 @@ public class SharedBytesTests extends ESTestCase {
             SharedBytes.IO io = sharedBytes.getFileChannel(region);
 
             // memorySegmentSlice returns null when not mmap'd
-            assertThat(io.memorySegmentSlice(0, regionSize), nullValue());
+            assertThat(io.memorySegmentSlice(0, regionSize, SharedBytes.MADV_NORMAL), nullValue());
         } finally {
             if (sharedBytes != null) {
                 sharedBytes.decRef();
@@ -214,8 +214,8 @@ public class SharedBytesTests extends ESTestCase {
             SharedBytes.IO io = sharedBytes.getFileChannel(0);
 
             var expectedType = Assertions.ENABLED ? AssertionError.class : IllegalArgumentException.class;
-            expectThrows(expectedType, () -> io.memorySegmentSlice(regionSize - 10, 20));
-            expectThrows(expectedType, () -> io.memorySegmentSlice(-1, 10));
+            expectThrows(expectedType, () -> io.memorySegmentSlice(regionSize - 10, 20, SharedBytes.MADV_NORMAL));
+            expectThrows(expectedType, () -> io.memorySegmentSlice(-1, 10, SharedBytes.MADV_NORMAL));
         } finally {
             if (sharedBytes != null) {
                 sharedBytes.decRef();
@@ -280,8 +280,11 @@ public class SharedBytesTests extends ESTestCase {
         }
     }
 
-    // Verify that a freshly created region starts with MADV_NORMAL advice.
-    public void testMadviseDefaultIsNormal() throws Exception {
+    /**
+     * A region is read through the mapping whose advice the caller names, so the advice is fixed per
+     * mapping and a region carries nothing over to whichever file uses it next.
+     */
+    public void testRegionIsReadThroughTheMappingItsAdviceNames() throws Exception {
         int regions = randomIntBetween(1, 4);
         int regionSize = randomIntBetween(1, 16) * SharedBytes.PAGE_SIZE;
         var nodeSettings = Settings.builder()
@@ -291,82 +294,33 @@ public class SharedBytesTests extends ESTestCase {
             .build();
         SharedBytes sharedBytes = null;
         try (var nodeEnv = new NodeEnvironment(nodeSettings, TestEnvironment.newEnvironment(nodeSettings))) {
-            sharedBytes = new SharedBytes(regions, regionSize, nodeEnv, ignored -> {}, ignored -> {}, randomBoolean());
-            for (int i = 0; i < regions; i++) {
-                assertThat(sharedBytes.getFileChannel(i).currentAdvice(), equalTo(SharedBytes.MADV_NORMAL));
-            }
-        } finally {
-            if (sharedBytes != null) {
-                sharedBytes.decRef();
-            }
-        }
-    }
-
-    // Verify that madvise updates currentAdvice on an mmap'd region and can be changed back.
-    public void testMadviseTracksCurrentAdvice() throws Exception {
-        int regions = 1;
-        int regionSize = 4 * SharedBytes.PAGE_SIZE;
-        var nodeSettings = Settings.builder()
-            .put(Node.NODE_NAME_SETTING.getKey(), "node")
-            .put("path.home", createTempDir())
-            .putList(Environment.PATH_DATA_SETTING.getKey(), createTempDir().toString())
-            .build();
-        SharedBytes sharedBytes = null;
-        try (var nodeEnv = new NodeEnvironment(nodeSettings, TestEnvironment.newEnvironment(nodeSettings))) {
             sharedBytes = new SharedBytes(regions, regionSize, nodeEnv, ignored -> {}, ignored -> {}, true);
-            SharedBytes.IO io = sharedBytes.getFileChannel(0);
-            assertThat(io.currentAdvice(), equalTo(SharedBytes.MADV_NORMAL));
-            io.madvise(SharedBytes.MADV_RANDOM);
-            assertThat(io.currentAdvice(), equalTo(SharedBytes.MADV_RANDOM));
-            io.madvise(SharedBytes.MADV_NORMAL);
-            assertThat(io.currentAdvice(), equalTo(SharedBytes.MADV_NORMAL));
-        } finally {
-            if (sharedBytes != null) {
-                sharedBytes.decRef();
-            }
-        }
-    }
+            var io = sharedBytes.getFileChannel(randomIntBetween(0, regions - 1));
 
-    // Verify that calling madvise with the already-current advice does not throw.
-    public void testMadviseNoOpWhenAdviceUnchanged() throws Exception {
-        int regions = 1;
-        int regionSize = 4 * SharedBytes.PAGE_SIZE;
-        var nodeSettings = Settings.builder()
-            .put(Node.NODE_NAME_SETTING.getKey(), "node")
-            .put("path.home", createTempDir())
-            .putList(Environment.PATH_DATA_SETTING.getKey(), createTempDir().toString())
-            .build();
-        SharedBytes sharedBytes = null;
-        try (var nodeEnv = new NodeEnvironment(nodeSettings, TestEnvironment.newEnvironment(nodeSettings))) {
-            sharedBytes = new SharedBytes(regions, regionSize, nodeEnv, ignored -> {}, ignored -> {}, true);
-            SharedBytes.IO io = sharedBytes.getFileChannel(0);
-            io.madvise(SharedBytes.MADV_NORMAL);
-            assertThat(io.currentAdvice(), equalTo(SharedBytes.MADV_NORMAL));
-            io.madvise(SharedBytes.MADV_RANDOM);
-            io.madvise(SharedBytes.MADV_RANDOM);
-            assertThat(io.currentAdvice(), equalTo(SharedBytes.MADV_RANDOM));
-        } finally {
-            if (sharedBytes != null) {
-                sharedBytes.decRef();
-            }
-        }
-    }
+            byte[] written = randomByteArrayOfLength(regionSize);
+            io.write(ByteBuffer.wrap(written), 0);
 
-    // Verify that madvise is a no-op on non-mmap'd regions and currentAdvice stays at default.
-    public void testMadviseNoOpWhenNotMmap() throws Exception {
-        int regions = 1;
-        int regionSize = 4 * SharedBytes.PAGE_SIZE;
-        var nodeSettings = Settings.builder()
-            .put(Node.NODE_NAME_SETTING.getKey(), "node")
-            .put("path.home", createTempDir())
-            .putList(Environment.PATH_DATA_SETTING.getKey(), createTempDir().toString())
-            .build();
-        SharedBytes sharedBytes = null;
-        try (var nodeEnv = new NodeEnvironment(nodeSettings, TestEnvironment.newEnvironment(nodeSettings))) {
-            sharedBytes = new SharedBytes(regions, regionSize, nodeEnv, ignored -> {}, ignored -> {}, false);
-            SharedBytes.IO io = sharedBytes.getFileChannel(0);
-            io.madvise(SharedBytes.MADV_RANDOM);
-            assertThat(io.currentAdvice(), equalTo(SharedBytes.MADV_NORMAL));
+            ByteBuffer viaNormal = ByteBuffer.allocate(regionSize);
+            ByteBuffer viaRandom = ByteBuffer.allocate(regionSize);
+            io.read(viaNormal, 0, SharedBytes.MADV_NORMAL);
+            io.read(viaRandom, 0, SharedBytes.MADV_RANDOM);
+
+            assertArrayEquals("both mappings show the region's bytes", written, viaNormal.array());
+            assertArrayEquals("both mappings show the region's bytes", written, viaRandom.array());
+
+            if (SharedBytes.MADVISE_RANDOM_FEATURE_FLAG.isEnabled()) {
+                assertNotEquals(
+                    "a random read is served through its own mapping",
+                    io.addressAt(0, SharedBytes.MADV_NORMAL),
+                    io.addressAt(0, SharedBytes.MADV_RANDOM)
+                );
+            } else {
+                assertEquals(
+                    "without the flag there is one mapping",
+                    io.addressAt(0, SharedBytes.MADV_NORMAL),
+                    io.addressAt(0, SharedBytes.MADV_RANDOM)
+                );
+            }
         } finally {
             if (sharedBytes != null) {
                 sharedBytes.decRef();
