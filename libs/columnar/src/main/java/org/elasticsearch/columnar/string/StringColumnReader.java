@@ -150,7 +150,16 @@ public abstract sealed class StringColumnReader permits PlainStringColumnReader,
      * addressed by rank.
      */
     protected boolean pageable() {
-        return meta.hasValueAddresses() == false && meta.hasNullSlots() == false;
+        return oneSlotEachDocument() && meta.hasNullSlots() == false;
+    }
+
+    /**
+     * Whether a document's rank addresses its slot, so a slot is reached without the addresses. A null slot does
+     * not change that: it is a slot like any other, and only a caller that needs every slot to carry a value has
+     * to ask about nulls as well.
+     */
+    protected boolean oneSlotEachDocument() {
+        return meta.hasValueAddresses() == false;
     }
 
     /** Whether every document of the page just resolved holds exactly one value. */
@@ -1430,14 +1439,21 @@ public abstract sealed class StringColumnReader permits PlainStringColumnReader,
         }
         growPageDocs(count);
         ranksOfAll(docs, offset, count);
-        final boolean oneApiece = pageable();
+        // A rank addresses the slot directly wherever the documents each hold one, whether or not some slot is
+        // null, so only a column addressing its values has to walk them.
+        final boolean oneApiece = oneSlotEachDocument();
+        final boolean nulls = meta.hasNullSlots();
         for (int i = 0; i < count; i++) {
             final int rank = pageRanks[i];
             if (rank == ColumnIterator.NO_RANK) {
                 counts[i] = 0;
             } else if (oneApiece) {
-                counts[i] = 1;
-                lengths[i] = byteLengthAt(rank);
+                if (nulls && isNullSlot(rank)) {
+                    counts[i] = 0;
+                } else {
+                    counts[i] = 1;
+                    lengths[i] = byteLengthAt(rank);
+                }
             } else {
                 final long first = firstValueAddress(rank);
                 final long slots = valueCount(rank);
