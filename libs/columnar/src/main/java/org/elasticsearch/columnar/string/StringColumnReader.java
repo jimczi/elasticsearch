@@ -873,8 +873,11 @@ public abstract sealed class StringColumnReader permits PlainStringColumnReader,
             this.bits = new FixedBitSet(blockSize);
         }
 
-        /** Corrects the bits of the loaded block for numbers the ranges alone misjudge; {@code bits[i]} is {@code block[i]}. */
-        protected void adjust(long[] block, int count, long[] bits) {}
+        /**
+         * Corrects the bits of the loaded block for numbers the ranges alone misjudge; {@code bits[i]} is
+         * {@code block[i]}, the slot {@code first + i}.
+         */
+        protected void adjust(long first, long[] block, int count, long[] bits) throws IOException {}
 
         final boolean holds(long slot) throws IOException {
             load(slot >>> shift);
@@ -963,7 +966,7 @@ public abstract sealed class StringColumnReader permits PlainStringColumnReader,
             if (count <= mask) {
                 bits.clear(count, mask + 1);
             }
-            adjust(block, count, words);
+            adjust(first, block, count, words);
             loaded = window;
         }
     }

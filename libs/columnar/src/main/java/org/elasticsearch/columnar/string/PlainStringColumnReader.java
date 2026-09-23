@@ -199,7 +199,7 @@ public final class PlainStringColumnReader extends StringColumnReader {
     private SlotWindow codeWindow(long... ranges) {
         return new SlotWindow(values.codes(), ranges) {
             @Override
-            protected void adjust(long[] block, int count, long[] bits) {
+            protected void adjust(long first, long[] block, int count, long[] bits) {
                 // A block never starts with a repeat.
                 for (int i = 1; i < count; i++) {
                     if (block[i] == PlainValues.REPEAT) {
