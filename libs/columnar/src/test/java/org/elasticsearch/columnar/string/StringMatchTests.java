@@ -21,6 +21,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Collectors;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 
@@ -124,6 +126,47 @@ public class StringMatchTests extends ColumnarStringTestCase {
             assertEquals("the approximation offers only the escaped values", expectedEscaped, count(absent.approximation()));
             assertEquals("and the bytes pick the one", List.of(3), matched(reader.matchTerm(new BytesRef("rare-alpine-3"))));
         });
+    }
+
+    /**
+     * A set of terms says which lengths it accepts, so a column keeping the lengths beside its values skips every
+     * slot that cannot be one of them. The answer is the same as without the hint, whatever the column's shape.
+     */
+    public void testASetOfTermsIsPrunedByItsLengths() throws IOException {
+        final boolean multiValued = randomBoolean();
+        final boolean sparse = randomBoolean();
+        final String[] vocabulary = { "a", "bb", "ccc", "dddd", "eeeeeeee", "", "ffffffffffffffff" };
+        final BytesRef[][] docSlots = new BytesRef[between(1000, 4000)][];
+        for (int d = 0; d < docSlots.length; d++) {
+            if (sparse && random().nextInt(5) == 0) {
+                continue;
+            }
+            final int slots = multiValued && random().nextInt(3) == 0 ? between(0, 3) : 1;
+            docSlots[d] = new BytesRef[slots];
+            for (int i = 0; i < slots; i++) {
+                docSlots[d][i] = multiValued && i > 0 && random().nextInt(6) == 0 ? null : new BytesRef(randomFrom(vocabulary));
+            }
+        }
+        // Neighbouring lengths, so the ranges fold; a length nothing holds; and a set of one.
+        final List<Set<String>> sets = List.of(
+            Set.of("a", "bb", "ccc"),
+            Set.of("dddd", "ffffffffffffffff"),
+            Set.of("zzzzzzzzzzzzzzzzzzzzz"),
+            Set.of(""),
+            Set.of("eeeeeeee")
+        );
+        for (DictionaryPolicy policy : List.of(DictionaryPolicy.NONE, ROOMY)) {
+            withColumn(docSlots, randomValidBlockSize(), randomChunkCodec(), randomTargetChunkBytes(), policy, (metadata, reader) -> {
+                final String layout = reader.hasDictionary() ? "dictionary" : "plain";
+                for (Set<String> set : sets) {
+                    final Set<BytesRef> terms = set.stream().map(BytesRef::new).collect(Collectors.toSet());
+                    final int[] lengths = terms.stream().mapToInt(t -> t.length).distinct().sorted().toArray();
+                    final FixedBitSet expected = anySlot(docSlots, set::contains);
+                    assertMatchesAndRuns(layout + " set " + set + " hinted", expected, () -> reader.match(terms::contains, lengths));
+                    assertMatchesAndRuns(layout + " set " + set + " unhinted", expected, () -> reader.match(terms::contains));
+                }
+            });
+        }
     }
 
     /**

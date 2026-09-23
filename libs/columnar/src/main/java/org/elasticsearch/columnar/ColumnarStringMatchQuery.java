@@ -53,8 +53,19 @@ public final class ColumnarStringMatchQuery extends Query {
     private final Predicate<BytesRef> matcher;
     private final Object identity;
     private final ScanBudget budget;
+    /** The distinct byte lengths a value must have for {@link #matcher} to accept it, or null when any could. */
+    private final int[] lengths;
 
     public ColumnarStringMatchQuery(String field, Predicate<BytesRef> matcher, Object identity, ScanBudget budget) {
+        this(field, matcher, identity, budget, null);
+    }
+
+    /**
+     * A match whose accepted values are known to have one of {@code lengths} bytes, sorted. A column keeping the
+     * lengths beside its values settles every other slot without reading it, so a set of terms should say so.
+     */
+    public ColumnarStringMatchQuery(String field, Predicate<BytesRef> matcher, Object identity, ScanBudget budget, int[] lengths) {
+        this.lengths = lengths;
         this.field = Objects.requireNonNull(field);
         this.matcher = Objects.requireNonNull(matcher);
         this.identity = Objects.requireNonNull(identity);
@@ -88,7 +99,7 @@ public final class ColumnarStringMatchQuery extends Query {
                             return DocIdSetIterator.empty();
                         }
                         if (values instanceof StringColumnSource columnar) {
-                            return columnar.reader().match(matcher);
+                            return columnar.reader().match(matcher, lengths);
                         }
 
                         // An overlay rather than the column, as an updated field is: the values are read one

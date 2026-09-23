@@ -290,7 +290,7 @@ public final class DictionaryStringColumnReader extends StringColumnReader {
      * tested on its own.
      */
     @Override
-    protected DocIdSetIterator valueMatches(Predicate<BytesRef> matcher) throws IOException {
+    protected DocIdSetIterator valueMatches(Predicate<BytesRef> matcher, int[] lengths) throws IOException {
         // Indexed by column ordinal, so a block of them selects straight into it. The reserved null keeps
         // its bit clear throughout, which is what stops a null answering for whatever the matcher accepts.
         final FixedBitSet matching = new FixedBitSet(dictionarySize + StringColumnMetadata.Dictionary.FIRST_TERM_ORDINAL);

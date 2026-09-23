@@ -694,7 +694,12 @@ public abstract sealed class StringColumnReader permits PlainStringColumnReader,
 
     /** Documents holding a value with {@code term} inside it; by default every distinct value is tested. */
     protected DocIdSetIterator containsMatches(BytesRef term) throws IOException {
-        return valueMatches(value -> ESVectorUtil.contains(value.bytes, value.offset, value.length, term.bytes, term.offset, term.length));
+        // A value shorter than the term cannot hold it, but the lengths that could are every one at or above it,
+        // so there is no short list to offer.
+        return valueMatches(
+            value -> ESVectorUtil.contains(value.bytes, value.offset, value.length, term.bytes, term.offset, term.length),
+            null
+        );
     }
 
     /**
@@ -710,14 +715,33 @@ public abstract sealed class StringColumnReader permits PlainStringColumnReader,
      * only valid for the duration of the call.
      */
     public DocIdSetIterator match(Predicate<BytesRef> matcher) throws IOException {
+        return match(matcher, null);
+    }
+
+    /**
+     * Documents holding a value {@code matcher} accepts, given the byte lengths a value must have for it to
+     * accept: a set of terms has as many lengths as it has distinct ones, while a range or a regular expression
+     * has none to offer and passes {@code null}. A column keeping the lengths beside its values settles every
+     * other slot without reading it.
+     */
+    public DocIdSetIterator match(Predicate<BytesRef> matcher, int[] lengths) throws IOException {
         if (meta.numDocsWithField() == 0) {
             return DocIdSetIterator.empty();
         }
-        return valueMatches(matcher);
+        if (lengths != null) {
+            if (lengths.length == 0) {
+                return DocIdSetIterator.empty();
+            }
+            // Nothing the matcher accepts is a length the column holds.
+            if (lengths[0] > maxLength() || lengths[lengths.length - 1] < minLength()) {
+                return DocIdSetIterator.empty();
+            }
+        }
+        return valueMatches(matcher, lengths);
     }
 
     /** Documents holding a value {@code matcher} accepts, for a column that knows how its values are reached. */
-    protected abstract DocIdSetIterator valueMatches(Predicate<BytesRef> matcher) throws IOException;
+    protected abstract DocIdSetIterator valueMatches(Predicate<BytesRef> matcher, int[] lengths) throws IOException;
 
     /**
      * Documents whose value equals {@code exact}, or starts with {@code prefix} when {@code exact} is null.

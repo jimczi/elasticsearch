@@ -76,7 +76,9 @@ public final class PlainStringColumnReader extends StringColumnReader {
     }
 
     @Override
-    protected DocIdSetIterator valueMatches(Predicate<BytesRef> matcher) throws IOException {
+    protected DocIdSetIterator valueMatches(Predicate<BytesRef> matcher, int[] lengths) throws IOException {
+        // A slot of another length is settled by its code, so it is never read.
+        final SlotWindow window = lengths == null ? null : codeWindow(codeRanges(lengths));
         final ColumnIterator presence = iterator();
         final BytesRef value = new BytesRef();
         final LastSeen lastSeen = new LastSeen();
@@ -87,7 +89,7 @@ public final class PlainStringColumnReader extends StringColumnReader {
                 final long first = firstValueAddress(rank);
                 final long count = valueCount(rank);
                 if (count == 1) {
-                    if (isNullSlot(first)) {
+                    if (isNullSlot(first) || (window != null && window.holds(first) == false)) {
                         return false;
                     }
                     // A value repeating the one before it answers as it answered.
@@ -103,7 +105,7 @@ public final class PlainStringColumnReader extends StringColumnReader {
                 }
                 for (long i = 0; i < count; i++) {
                     // A null is stored as no bytes, so without this it would be offered as an empty string.
-                    if (isNullSlot(first + i)) {
+                    if (isNullSlot(first + i) || (window != null && window.holds(first + i) == false)) {
                         continue;
                     }
                     values.get(first + i, value);
@@ -193,6 +195,21 @@ public final class PlainStringColumnReader extends StringColumnReader {
      */
     private SlotWindow lengthWindow(long min, long max) {
         return codeWindow(PlainValues.code(min), PlainValues.code(max));
+    }
+
+    /** The inclusive code ranges covering {@code lengths}, runs of neighbouring lengths folded into one. */
+    private static long[] codeRanges(int[] lengths) {
+        final long[] ranges = new long[lengths.length * 2];
+        int count = 0;
+        for (int i = 0; i < lengths.length; i++) {
+            final int start = i;
+            while (i + 1 < lengths.length && lengths[i + 1] == lengths[i] + 1) {
+                i++;
+            }
+            ranges[count++] = PlainValues.code(lengths[start]);
+            ranges[count++] = PlainValues.code(lengths[i]);
+        }
+        return count == ranges.length ? ranges : java.util.Arrays.copyOf(ranges, count);
     }
 
     /** The slots whose stored code is in any of the inclusive {@code ranges}, a repeat taking the answer of the slot before it. */

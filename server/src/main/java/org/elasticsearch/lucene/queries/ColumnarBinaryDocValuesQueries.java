@@ -58,9 +58,12 @@ final class ColumnarBinaryDocValuesQueries implements BinaryDocValuesQueries {
     @Override
     public Query terms(String field, Collection<BytesRef> terms) {
         final Set<BytesRef> set = new HashSet<>(terms);
+        // The lengths the terms take, so a column keeping them beside its values reads only the slots that could be
+        // one of them.
+        final int[] lengths = set.stream().mapToInt(t -> t.length).distinct().sorted().toArray();
         // What the query is compared by, so two of them cache as one however the caller ordered its terms. The terms
         // themselves rather than a rendering of them: there may be tens of thousands.
-        return new ColumnarStringMatchQuery(field, set::contains, new TreeSet<>(terms), BUDGET);
+        return new ColumnarStringMatchQuery(field, set::contains, new TreeSet<>(terms), BUDGET, lengths);
     }
 
     @Override
