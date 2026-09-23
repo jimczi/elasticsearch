@@ -17,6 +17,10 @@ import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.TaskExecutor;
+import org.apache.lucene.store.DataAccessHint;
+import org.apache.lucene.store.FileDataHint;
+import org.apache.lucene.store.FileTypeHint;
+import org.apache.lucene.store.NoReuseHint;
 import org.elasticsearch.index.codec.vectors.DirectIOCapableFlatVectorsFormat;
 import org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidIndexFormat;
@@ -317,7 +321,7 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
         return new ESNextDiskBBQVectorsReader(state, (f, dio, odm) -> {
             var format = supportedFormats.get(f);
             if (format == null) return null;
-            return format.fieldsReader(state);
+            return format.fieldsReader(rescoreOnly(state));
         });
     }
 
@@ -367,6 +371,17 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
             + "sliceField="
             + sliceField
             + ')';
+    }
+
+    /** The raw vectors, read at random to rescore and not read again after that. */
+    private static SegmentReadState rescoreOnly(SegmentReadState state) {
+        return new SegmentReadState(
+            state.directory,
+            state.segmentInfo,
+            state.fieldInfos,
+            state.context.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, DataAccessHint.RANDOM, NoReuseHint.INSTANCE),
+            state.segmentSuffix
+        );
     }
 
 }

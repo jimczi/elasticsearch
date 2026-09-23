@@ -136,11 +136,12 @@ public class ES818BinaryQuantizedVectorsReader extends FlatVectorsReader impleme
             } finally {
                 CodecUtil.checkFooter(meta, priorE);
             }
-            // Quantized vectors are accessed randomly from their node ID stored in the HNSW graph.
+            // how these are read is up to whoever wraps this format; the field they belong to is
+            // added so a directory can look it up in the mapping
             VectorFieldHint field = VectorFieldHint.forSuffix(state.fieldInfos, state.segmentSuffix);
             dataContext = field == null
-                ? state.context.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, DataAccessHint.RANDOM)
-                : state.context.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, DataAccessHint.RANDOM, field);
+                ? state.context.union(FileTypeHint.DATA, FileDataHint.KNN_VECTORS)
+                : state.context.union(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, field);
             quantizedVectorData = openDataInput(
                 state,
                 versionMeta,

@@ -27,6 +27,10 @@ import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.index.Sorter;
 import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.store.DataAccessHint;
+import org.apache.lucene.store.FileDataHint;
+import org.apache.lucene.store.FileTypeHint;
+import org.apache.lucene.store.NoReuseHint;
 import org.apache.lucene.util.hnsw.CloseableRandomVectorScorerSupplier;
 import org.apache.lucene.util.hnsw.RandomVectorScorer;
 import org.apache.lucene.util.hnsw.RandomVectorScorerSupplier;
@@ -129,7 +133,7 @@ public class ES814ScalarQuantizedVectorsFormat extends FlatVectorsFormat {
 
     @Override
     public FlatVectorsReader fieldsReader(SegmentReadState state) throws IOException {
-        FlatVectorsReader rawDelegate = rawVectorFormat.fieldsReader(state);
+        FlatVectorsReader rawDelegate = rawVectorFormat.fieldsReader(rescoreOnly(state));
         return new ES814ScalarQuantizedVectorsReader(
             new Lucene99ScalarQuantizedVectorsReader(state, rawDelegate, flatVectorScorer),
             rawDelegate
@@ -319,4 +323,16 @@ public class ES814ScalarQuantizedVectorsFormat extends FlatVectorsFormat {
     public int getMaxDimensions(String fieldName) {
         return MAX_DIMS_COUNT;
     }
+
+    /** The raw vectors, read at random to rescore and not read again after that. */
+    private static SegmentReadState rescoreOnly(SegmentReadState state) {
+        return new SegmentReadState(
+            state.directory,
+            state.segmentInfo,
+            state.fieldInfos,
+            state.context.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, DataAccessHint.RANDOM, NoReuseHint.INSTANCE),
+            state.segmentSuffix
+        );
+    }
+
 }

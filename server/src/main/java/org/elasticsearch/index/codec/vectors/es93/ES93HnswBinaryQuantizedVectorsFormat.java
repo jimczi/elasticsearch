@@ -26,6 +26,9 @@ import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsReader;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsWriter;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentWriteState;
+import org.apache.lucene.store.DataAccessHint;
+import org.apache.lucene.store.FileDataHint;
+import org.apache.lucene.store.FileTypeHint;
 import org.elasticsearch.index.codec.vectors.AbstractHnswVectorsFormat;
 import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper;
 
@@ -152,6 +155,18 @@ public class ES93HnswBinaryQuantizedVectorsFormat extends AbstractHnswVectorsFor
 
     @Override
     public KnnVectorsReader fieldsReader(SegmentReadState state) throws IOException {
-        return new Lucene99HnswVectorsReader(state, flatVectorsFormat.fieldsReader(state));
+        return new Lucene99HnswVectorsReader(state, flatVectorsFormat.fieldsReader(graphWalk(state)));
     }
+
+    /** The vectors under the graph, walked from node to node as it searches. */
+    private static SegmentReadState graphWalk(SegmentReadState state) {
+        return new SegmentReadState(
+            state.directory,
+            state.segmentInfo,
+            state.fieldInfos,
+            state.context.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, DataAccessHint.RANDOM),
+            state.segmentSuffix
+        );
+    }
+
 }

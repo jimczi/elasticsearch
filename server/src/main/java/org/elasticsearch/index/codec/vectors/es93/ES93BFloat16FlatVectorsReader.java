@@ -100,13 +100,12 @@ public final class ES93BFloat16FlatVectorsReader extends FlatVectorsReader {
         this.original = this;
         this.fieldInfos = state.fieldInfos;
         this.vectorScorer = scorer;
-        // Flat formats are used to randomly access vectors from their node ID that is stored
-        // in the HNSW graph.
-        // the field these vectors belong to, so a directory can look it up in the mapping
+        // how these are read is up to whoever wraps this format; the field they belong to is added
+        // so a directory can look it up in the mapping
         VectorFieldHint field = VectorFieldHint.forSuffix(state.fieldInfos, state.segmentSuffix);
         dataContext = field == null
-            ? state.context.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, DataAccessHint.RANDOM)
-            : state.context.withHints(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, DataAccessHint.RANDOM, field);
+            ? state.context.union(FileTypeHint.DATA, FileDataHint.KNN_VECTORS)
+            : state.context.union(FileTypeHint.DATA, FileDataHint.KNN_VECTORS, field);
         try {
             vectorData = openDataInput(
                 state,
