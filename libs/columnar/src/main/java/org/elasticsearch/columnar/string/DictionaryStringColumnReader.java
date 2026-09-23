@@ -400,7 +400,12 @@ public final class DictionaryStringColumnReader extends StringColumnReader {
         final int ordinal = firstTermAtLeast(term, end);
         if (endOfRun(null, term, ordinal, end) == ordinal) {
             // Not a term the dictionary holds: only an escaped value can be it, and when none escaped nothing is.
-            return escapeCount > 0 ? null : new SlotWindow(SlotBlocks.of(ordinals));
+            if (escapeCount == 0) {
+                return new SlotWindow(SlotBlocks.of(ordinals));
+            }
+            // An escaped slot is the only one that can hold it, so the ordinals settle every other slot and
+            // only the escaped ones take their bytes.
+            return escapeConfirmed(term, true, escapeOrdinal, escapeOrdinal);
         }
         return new SlotWindow(SlotBlocks.of(ordinals), ordinal, ordinal);
     }
@@ -411,9 +416,11 @@ public final class DictionaryStringColumnReader extends StringColumnReader {
         final int ordinal = firstTermAtLeast(term, end);
         if (endOfRun(null, term, ordinal, end) == ordinal) {
             // Not a term the dictionary holds, so only an escaped value can be it, and that takes its bytes.
-            return escapeCount > 0
-                ? null
-                : new SlotWindow(SlotBlocks.of(ordinals), StringColumnMetadata.Dictionary.NULL_ORDINAL, escapeOrdinal);
+            if (escapeCount == 0) {
+                return new SlotWindow(SlotBlocks.of(ordinals), StringColumnMetadata.Dictionary.NULL_ORDINAL, escapeOrdinal);
+            }
+            // Every slot but an escaped one settles it, and an escaped one holds the term only when its bytes do.
+            return escapeConfirmed(term, false, StringColumnMetadata.Dictionary.NULL_ORDINAL, escapeOrdinal);
         }
         // An escaped value is never a term the dictionary holds, so every ordinal but the term's settles it,
         // the null's and the escape's included.
@@ -424,6 +431,32 @@ public final class DictionaryStringColumnReader extends StringColumnReader {
             ordinal + 1L,
             escapeOrdinal
         );
+    }
+
+    /**
+     * A window over {@code ranges} whose escaped slots are decided by their bytes: an escaped slot is kept when
+     * {@code holding} and its value is {@code term}, or when {@code holding} is false and its value is not. Every
+     * other slot is settled by its ordinal, since an escaped value is never a term the dictionary holds.
+     */
+    private SlotWindow escapeConfirmed(BytesRef term, boolean holding, long... ranges) {
+        return new SlotWindow(SlotBlocks.of(ordinals), ranges) {
+            private final BytesRef value = new BytesRef();
+
+            @Override
+            protected void adjust(long first, long[] block, int count, long[] bits) throws IOException {
+                for (int i = 0; i < count; i++) {
+                    if (block[i] != escapeOrdinal) {
+                        continue;
+                    }
+                    escapes.get(escapeRankOf(first + i), value);
+                    if (value.bytesEquals(term) == holding) {
+                        bits[i >>> 6] |= 1L << i;
+                    } else {
+                        bits[i >>> 6] &= ~(1L << i);
+                    }
+                }
+            }
+        };
     }
 
     @Override

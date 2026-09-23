@@ -127,6 +127,51 @@ public class StringMatchTests extends ColumnarStringTestCase {
     }
 
     /**
+     * A negated term on a column holding escaped values is settled by the ordinals everywhere but the escaped
+     * slots, whose bytes decide them. Every shape answers it, absent documents and empty arrays included.
+     */
+    public void testNotTermOnAnEscapedColumn() throws IOException {
+        final boolean multiValued = randomBoolean();
+        final boolean sparse = randomBoolean();
+        final BytesRef[][] docSlots = new BytesRef[between(800, 3000)][];
+        for (int d = 0; d < docSlots.length; d++) {
+            if (sparse && d % 17 == 5) {
+                continue;
+            }
+            final int slots = multiValued && d % 9 == 0 ? between(0, 3) : 1;
+            docSlots[d] = new BytesRef[slots];
+            for (int i = 0; i < slots; i++) {
+                docSlots[d][i] = d % 40 == 3 && i == 0
+                    ? new BytesRef("rare-alpine-" + d)
+                    : new BytesRef(TERMS[(d + i) % (TERMS.length - 1)]);
+            }
+        }
+        // A term the dictionary holds, one only an escape carries, and one nothing holds at all.
+        final String[] probes = { TERMS[0], "rare-alpine-3", "nothing-holds-this" };
+        withColumn(docSlots, randomValidBlockSize(), randomChunkCodec(), randomTargetChunkBytes(), ROOMY, (metadata, reader) -> {
+            assertTrue("a dictionary column", reader.hasDictionary());
+            assertTrue("the rare values escaped", reader.escapeCount() > 0);
+            for (String probe : probes) {
+                final BytesRef term = new BytesRef(probe);
+                final FixedBitSet noneIs = anySlot(docSlots, v -> v.equals(probe));
+                noneIs.flip(0, docSlots.length);
+                assertMatchesAndRuns("escaped not [" + probe + "]", noneIs, () -> reader.matchNotTerm(term, docSlots.length));
+                if (probe.length() >= reader.minLength() && probe.length() <= reader.maxLength()) {
+                    // The ordinals settle every slot but the escaped ones, so the answer needs no confirmation.
+                    final TwoPhaseIterator not = TwoPhaseIterator.unwrap(reader.matchNotTerm(term, docSlots.length));
+                    assertNotNull("not [" + probe + "] is answered in two phases", not);
+                    assertEquals("not [" + probe + "] is settled by the window", 0f, not.matchCost(), 0f);
+                }
+                assertMatchesAndRuns(
+                    "escaped term [" + probe + "]",
+                    anySlot(docSlots, v -> v.equals(probe)),
+                    () -> reader.matchTerm(term)
+                );
+            }
+        });
+    }
+
+    /**
      * A term the window settles reports the run of matching documents it is on, so a scorer excluding the
      * term can step over the run at once. Runs cross window boundaries, and a run's end is exact.
      */
