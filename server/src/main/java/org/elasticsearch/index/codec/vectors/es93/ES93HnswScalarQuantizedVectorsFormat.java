@@ -45,11 +45,10 @@ public class ES93HnswScalarQuantizedVectorsFormat extends AbstractHnswVectorsFor
         DenseVectorFieldMapper.ElementType elementType,
         Float confidenceInterval,
         int bits,
-        boolean compress,
-        boolean useDirectIO
+        boolean compress
     ) {
         super(NAME, maxConn, beamWidth, DEFAULT_NUM_MERGE_WORKER, null, ES93HnswVectorsFormat.HNSW_GRAPH_THRESHOLD);
-        flatVectorFormat = new ES93ScalarQuantizedVectorsFormat(elementType, confidenceInterval, bits, compress, useDirectIO);
+        flatVectorFormat = new ES93ScalarQuantizedVectorsFormat(elementType, confidenceInterval, bits, compress);
     }
 
     public ES93HnswScalarQuantizedVectorsFormat(
@@ -59,12 +58,11 @@ public class ES93HnswScalarQuantizedVectorsFormat extends AbstractHnswVectorsFor
         Float confidenceInterval,
         int bits,
         boolean compress,
-        boolean useDirectIO,
         int numMergeWorkers,
         ExecutorService mergeExec
     ) {
         super(NAME, maxConn, beamWidth, numMergeWorkers, mergeExec, ES93HnswVectorsFormat.HNSW_GRAPH_THRESHOLD);
-        flatVectorFormat = new ES93ScalarQuantizedVectorsFormat(elementType, confidenceInterval, bits, compress, useDirectIO);
+        flatVectorFormat = new ES93ScalarQuantizedVectorsFormat(elementType, confidenceInterval, bits, compress);
     }
 
     public ES93HnswScalarQuantizedVectorsFormat(
@@ -74,7 +72,6 @@ public class ES93HnswScalarQuantizedVectorsFormat extends AbstractHnswVectorsFor
         Float confidenceInterval,
         int bits,
         boolean compress,
-        boolean useDirectIO,
         int numMergeWorkers,
         ExecutorService mergeExec,
         int hnswGraphThreshold
@@ -87,7 +84,7 @@ public class ES93HnswScalarQuantizedVectorsFormat extends AbstractHnswVectorsFor
             mergeExec,
             resolveThreshold(hnswGraphThreshold, ES93HnswVectorsFormat.HNSW_GRAPH_THRESHOLD)
         );
-        flatVectorFormat = new ES93ScalarQuantizedVectorsFormat(elementType, confidenceInterval, bits, compress, useDirectIO);
+        flatVectorFormat = new ES93ScalarQuantizedVectorsFormat(elementType, confidenceInterval, bits, compress);
     }
 
     @Override

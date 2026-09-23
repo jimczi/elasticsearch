@@ -112,7 +112,6 @@ public class ES920DiskBBQVectorsFormatTests extends ESBaseKnnVectorsFormatTestCa
                     random().nextInt(2 * MIN_VECTORS_PER_CLUSTER, ES920DiskBBQVectorsFormat.MAX_VECTORS_PER_CLUSTER),
                     random().nextInt(8, ES920DiskBBQVectorsFormat.MAX_CENTROIDS_PER_PARENT_CLUSTER),
                     DenseVectorFieldMapper.ElementType.FLOAT,
-                    random().nextBoolean(),
                     executorService,
                     numMergingThreads
                 );
@@ -122,7 +121,6 @@ public class ES920DiskBBQVectorsFormatTests extends ESBaseKnnVectorsFormatTestCa
                     random().nextInt(MIN_VECTORS_PER_CLUSTER, 2 * MIN_VECTORS_PER_CLUSTER),
                     random().nextInt(MIN_CENTROIDS_PER_PARENT_CLUSTER, 8),
                     DenseVectorFieldMapper.ElementType.FLOAT,
-                    random().nextBoolean(),
                     executorService,
                     numMergingThreads
                 );

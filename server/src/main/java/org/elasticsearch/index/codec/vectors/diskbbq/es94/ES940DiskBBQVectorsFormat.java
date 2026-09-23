@@ -66,7 +66,9 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
     public static final int VERSION_PACKED_INT4 = 2;
     public static final int VERSION_PACKED_INT2 = 3;
     public static final int VERSION_ON_DISK_MERGE = 4;
-    public static final int VERSION_CURRENT = VERSION_ON_DISK_MERGE;
+    /** No field records the direct I/O options of its mapping; a file is advised from the mapping when it is opened. */
+    public static final int VERSION_NO_DIRECT_IO = 5;
+    public static final int VERSION_CURRENT = VERSION_NO_DIRECT_IO;
     public static final float DYNAMIC_VISIT_RATIO = 0.0f;
 
     private static final DirectIOCapableFlatVectorsFormat float32VectorFormat = new DirectIOCapableLucene99FlatVectorsFormat(
@@ -350,8 +352,6 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
     private final QuantEncoding quantEncoding;
     private final int vectorPerCluster;
     private final int centroidsPerParentCluster;
-    private final boolean useDirectIO;
-    private final boolean onDiskMerge;
     private final DirectIOCapableFlatVectorsFormat rawVectorFormat;
     private final TaskExecutor mergeExec;
     private final int numMergeWorkers;
@@ -370,7 +370,6 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
             vectorPerCluster,
             centroidsPerParentCluster,
             DenseVectorFieldMapper.ElementType.FLOAT,
-            false,
             null,
             1,
             false,
@@ -384,7 +383,6 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
         int vectorPerCluster,
         int centroidsPerParentCluster,
         DenseVectorFieldMapper.ElementType elementType,
-        boolean useDirectIO,
         ExecutorService mergingExecutorService,
         int maxMergingWorkers,
         boolean doPrecondition,
@@ -395,7 +393,6 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
             vectorPerCluster,
             centroidsPerParentCluster,
             elementType,
-            useDirectIO,
             mergingExecutorService,
             maxMergingWorkers,
             doPrecondition,
@@ -409,7 +406,6 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
         int vectorPerCluster,
         int centroidsPerParentCluster,
         DenseVectorFieldMapper.ElementType elementType,
-        boolean useDirectIO,
         ExecutorService mergingExecutorService,
         int maxMergingWorkers,
         boolean doPrecondition,
@@ -421,31 +417,26 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
             vectorPerCluster,
             centroidsPerParentCluster,
             elementType,
-            useDirectIO,
             mergingExecutorService,
             maxMergingWorkers,
             doPrecondition,
             preconditioningBlockDimension,
             flatVectorThreshold,
-            VERSION_CURRENT,
-            false
+            VERSION_CURRENT
         );
     }
 
-    /** @param onDiskMerge whether merges use direct I/O for the raw vectors (the field's {@code on_disk_merge} option) */
     public ES940DiskBBQVectorsFormat(
         QuantEncoding quantEncoding,
         int vectorPerCluster,
         int centroidsPerParentCluster,
         DenseVectorFieldMapper.ElementType elementType,
-        boolean useDirectIO,
         ExecutorService mergingExecutorService,
         int maxMergingWorkers,
         boolean doPrecondition,
         int preconditioningBlockDimension,
         int flatVectorThreshold,
-        int writeVersion,
-        boolean onDiskMerge
+        int writeVersion
     ) {
         super(NAME);
         if (vectorPerCluster < MIN_VECTORS_PER_CLUSTER || vectorPerCluster > MAX_VECTORS_PER_CLUSTER) {
@@ -493,8 +484,6 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
             case BFLOAT16 -> bfloat16VectorFormat;
             default -> throw new IllegalArgumentException("Unsupported element type " + elementType);
         };
-        this.useDirectIO = useDirectIO;
-        this.onDiskMerge = onDiskMerge;
         this.mergeExec = mergingExecutorService == null ? null : new TaskExecutor(mergingExecutorService);
         this.numMergeWorkers = maxMergingWorkers;
         this.preconditioningBlockDimension = preconditioningBlockDimension;
@@ -513,9 +502,6 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
         if (writeVersion >= VERSION_PACKED_INT4 && quantEncoding == QuantEncoding.FOUR_BIT_SYMMETRIC_STRIPED) {
             throw new IllegalArgumentException("Striped 4-bit encoding requires version before " + VERSION_PACKED_INT4);
         }
-        if (writeVersion < VERSION_ON_DISK_MERGE && onDiskMerge) {
-            throw new IllegalArgumentException("on_disk_merge requires version " + VERSION_ON_DISK_MERGE + " or later");
-        }
     }
 
     /** Constructs a format using the given graph construction parameters and scalar quantization. */
@@ -528,8 +514,6 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
         return new ES940DiskBBQVectorsWriter(
             state,
             rawVectorFormat.getName(),
-            useDirectIO,
-            onDiskMerge,
             rawVectorFormat.fieldsWriter(state),
             quantEncoding,
             vectorPerCluster,
@@ -545,7 +529,7 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
 
     @Override
     public KnnVectorsReader fieldsReader(SegmentReadState state) throws IOException {
-        return new ES940DiskBBQVectorsReader(state, (f, dio, odm) -> {
+        return new ES940DiskBBQVectorsReader(state, f -> {
             var format = supportedFormats.get(f);
             if (format == null) return null;
             return format.fieldsReader(rescoreOnly(state));

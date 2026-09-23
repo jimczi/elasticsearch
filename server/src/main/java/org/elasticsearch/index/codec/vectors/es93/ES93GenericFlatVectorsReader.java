@@ -81,7 +81,7 @@ class ES93GenericFlatVectorsReader extends FlatVectorsReader {
         GenericFlatVectorReaders fieldHelper,
         GenericFlatVectorReaders.LoadFlatVectorsReader loadReader
     ) throws IOException {
-        record FieldEntry(String rawVectorFormatName, boolean useDirectIOReads) implements GenericFlatVectorReaders.Field {}
+        record FieldEntry(String rawVectorFormatName) implements GenericFlatVectorReaders.Field {}
 
         for (int fieldNumber = meta.readInt(); fieldNumber != -1; fieldNumber = meta.readInt()) {
             final FieldInfo info = fieldInfos.fieldInfo(fieldNumber);
@@ -90,10 +90,24 @@ class ES93GenericFlatVectorsReader extends FlatVectorsReader {
             }
 
             String rawVectorFormatName = meta.readString();
-            boolean useDirectIOReads = meta.readByte() == 1;
-            boolean onDiskMerge = versionMeta >= ES93GenericFlatVectorsFormat.VERSION_ON_DISK_MERGE && meta.readByte() == 1;
-            FieldEntry entry = new FieldEntry(rawVectorFormatName, useDirectIOReads);
-            fieldHelper.loadField(fieldNumber, entry, onDiskMerge, loadReader);
+            skipDirectIOFlags(meta, versionMeta);
+            FieldEntry entry = new FieldEntry(rawVectorFormatName);
+            fieldHelper.loadField(fieldNumber, entry, loadReader);
+        }
+    }
+
+    /**
+     * Reads past the direct I/O flags a segment written before {@link ES93GenericFlatVectorsFormat#VERSION_NO_DIRECT_IO}
+     * records for a field. They named the {@code on_disk_rescore} and {@code on_disk_merge} options of the mapping the
+     * segment was written under; how a file is read is decided when it is opened, from the mapping as it stands.
+     */
+    private static void skipDirectIOFlags(IndexInput meta, int versionMeta) throws IOException {
+        if (versionMeta >= ES93GenericFlatVectorsFormat.VERSION_NO_DIRECT_IO) {
+            return;
+        }
+        meta.readByte();
+        if (versionMeta >= ES93GenericFlatVectorsFormat.VERSION_ON_DISK_MERGE) {
+            meta.readByte();
         }
     }
 

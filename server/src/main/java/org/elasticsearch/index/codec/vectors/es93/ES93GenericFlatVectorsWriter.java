@@ -27,8 +27,6 @@ import java.util.List;
 class ES93GenericFlatVectorsWriter extends FlatVectorsWriter {
 
     private final String rawVectorFormatName;
-    private final boolean useDirectIOReads;
-    private final boolean onDiskMerge;
     private final FlatVectorsWriter rawVectorWriter;
     private final IndexOutput metaOut;
     private final List<Integer> fieldNumbers = new ArrayList<>();
@@ -37,15 +35,11 @@ class ES93GenericFlatVectorsWriter extends FlatVectorsWriter {
     ES93GenericFlatVectorsWriter(
         GenericFormatMetaInformation metaInfo,
         String rawVectorsFormatName,
-        boolean useDirectIOReads,
-        boolean onDiskMerge,
         SegmentWriteState state,
         FlatVectorsWriter rawWriter
     ) throws IOException {
         super(rawWriter.getFlatVectorScorer());
         this.rawVectorFormatName = rawVectorsFormatName;
-        this.useDirectIOReads = useDirectIOReads;
-        this.onDiskMerge = onDiskMerge;
         this.rawVectorWriter = rawWriter;
 
         final String metaFileName = IndexFileNames.segmentFileName(state.segmentInfo.name, state.segmentSuffix, metaInfo.extension());
@@ -89,8 +83,6 @@ class ES93GenericFlatVectorsWriter extends FlatVectorsWriter {
     private void writeMeta(int field) throws IOException {
         metaOut.writeInt(field);
         metaOut.writeString(rawVectorFormatName);
-        metaOut.writeByte(useDirectIOReads ? (byte) 1 : 0);
-        metaOut.writeByte(onDiskMerge ? (byte) 1 : 0);
     }
 
     @Override

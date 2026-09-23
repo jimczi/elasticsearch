@@ -71,14 +71,14 @@ public class VectorReadHintsTests extends ESTestCase {
 
     private static List<Case> cases() {
         return List.of(
-            new Case("hnsw", new ES93HnswVectorsFormat(16, 100, RAW, 1, null, -1, false), true, false),
-            new Case("int8_hnsw", new ES94HnswScalarQuantizedVectorsFormat(16, 100, RAW, 7, false, 1, null, -1, false), true, true),
-            new Case("int4_hnsw", new ES94HnswScalarQuantizedVectorsFormat(16, 100, RAW, 4, false, 1, null, -1, false), true, true),
-            new Case("bbq_hnsw", new ES93HnswBinaryQuantizedVectorsFormat(16, 100, RAW, false, 1, null, -1, false), true, true),
-            new Case("int8_flat", new ES94ScalarQuantizedVectorsFormat(RAW, 7, false, false), false, true),
-            new Case("int4_flat", new ES94ScalarQuantizedVectorsFormat(RAW, 4, false, false), false, true),
-            new Case("bbq_flat", new ES93BinaryQuantizedVectorsFormat(RAW, false, false), false, true),
-            new Case("flat", new ES93FlatVectorFormat(RAW, false), false, false),
+            new Case("hnsw", new ES93HnswVectorsFormat(16, 100, RAW, 1, null, -1), true, false),
+            new Case("int8_hnsw", new ES94HnswScalarQuantizedVectorsFormat(16, 100, RAW, 7, 1, null, -1), true, true),
+            new Case("int4_hnsw", new ES94HnswScalarQuantizedVectorsFormat(16, 100, RAW, 4, 1, null, -1), true, true),
+            new Case("bbq_hnsw", new ES93HnswBinaryQuantizedVectorsFormat(16, 100, RAW, 1, null, -1), true, true),
+            new Case("int8_flat", new ES94ScalarQuantizedVectorsFormat(RAW, 7), false, true),
+            new Case("int4_flat", new ES94ScalarQuantizedVectorsFormat(RAW, 4), false, true),
+            new Case("bbq_flat", new ES93BinaryQuantizedVectorsFormat(RAW), false, true),
+            new Case("flat", new ES93FlatVectorFormat(RAW), false, false),
             new Case(
                 "bbq_disk",
                 new ES950DiskBBQVectorsFormat(
@@ -86,7 +86,6 @@ public class VectorReadHintsTests extends ESTestCase {
                     ES950DiskBBQVectorsFormat.DEFAULT_VECTORS_PER_CLUSTER,
                     ES950DiskBBQVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
                     DenseVectorFieldMapper.ElementType.BFLOAT16,
-                    false,
                     null,
                     1,
                     false,

@@ -81,8 +81,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
     public ES940DiskBBQVectorsWriter(
         SegmentWriteState state,
         String rawVectorFormatName,
-        boolean useDirectIOReads,
-        boolean onDiskMerge,
+
         FlatVectorsWriter rawVectorDelegate,
         ES940DiskBBQVectorsFormat.QuantEncoding encoding,
         int vectorPerCluster,
@@ -96,8 +95,6 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
         this(
             state,
             rawVectorFormatName,
-            useDirectIOReads,
-            onDiskMerge,
             rawVectorDelegate,
             encoding,
             vectorPerCluster,
@@ -114,8 +111,7 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
     ES940DiskBBQVectorsWriter(
         SegmentWriteState state,
         String rawVectorFormatName,
-        boolean useDirectIOReads,
-        boolean onDiskMerge,
+
         FlatVectorsWriter rawVectorDelegate,
         ES940DiskBBQVectorsFormat.QuantEncoding encoding,
         int vectorPerCluster,
@@ -130,17 +126,15 @@ public class ES940DiskBBQVectorsWriter extends IVFVectorsWriter<ES940DiskBBQVect
         super(
             state,
             rawVectorFormatName,
-            useDirectIOReads,
             rawVectorDelegate,
             writeVersion,
             ES940DiskBBQVectorsFormat.NAME,
             ES940DiskBBQVectorsFormat.IVF_META_EXTENSION,
             ES940DiskBBQVectorsFormat.CENTROID_EXTENSION,
             ES940DiskBBQVectorsFormat.CLUSTER_EXTENSION,
-            true,
+            writeVersion < ES940DiskBBQVectorsFormat.VERSION_NO_DIRECT_IO,
             flatVectorThreshold,
-            onDiskMerge,
-            writeVersion >= ES940DiskBBQVectorsFormat.VERSION_ON_DISK_MERGE
+            writeVersion >= ES940DiskBBQVectorsFormat.VERSION_ON_DISK_MERGE && writeVersion < ES940DiskBBQVectorsFormat.VERSION_NO_DIRECT_IO
         );
         this.vectorPerCluster = vectorPerCluster;
         this.centroidsPerParentCluster = centroidsPerParentCluster;

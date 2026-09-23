@@ -300,14 +300,12 @@ public class KnnIndexTester {
                         args.ivfClusterSize(),
                         centroidsPerParentCluster,
                         elementType,
-                        false,
                         exec,
                         mergeWorkers,
                         flatVectorThreshold,
                         sliceField,
                         IvfFlushConfigSource.empty(),
-                        IvfMergeConfigResolver.useCodecDefault(),
-                        false
+                        IvfMergeConfigResolver.useCodecDefault()
                     );
                 } else {
                     var encoding = resolveQuantEncoding(quantizeBits, args.queryQuantizeBits());
@@ -319,7 +317,6 @@ public class KnnIndexTester {
                         args.ivfClusterSize(),
                         centroidsPerParentCluster,
                         elementType,
-                        args.onDiskRescore(),
                         exec,
                         mergeWorkers,
                         args.doPrecondition(),
@@ -327,8 +324,7 @@ public class KnnIndexTester {
                         flatVectorThreshold,
                         sliceField,
                         IvfFlushConfigSource.empty(),
-                        mergeConfigResolver,
-                        false
+                        mergeConfigResolver
                     );
                 }
             }
@@ -353,35 +349,30 @@ public class KnnIndexTester {
                     elementType,
                     mergeWorkers,
                     exec,
-                    args.flatVectorThreshold(),
-                    false
+                    args.flatVectorThreshold()
                 );
                 case 1 -> new ES93HnswBinaryQuantizedVectorsFormat(
                     args.hnswM(),
                     args.hnswEfConstruction(),
                     elementType,
-                    false,
                     mergeWorkers,
                     exec,
-                    args.flatVectorThreshold(),
-                    false
+                    args.flatVectorThreshold()
                 );
                 default -> new ES94HnswScalarQuantizedVectorsFormat(
                     args.hnswM(),
                     args.hnswEfConstruction(),
                     elementType,
                     quantizeBits,
-                    false,
                     mergeWorkers,
                     exec,
-                    args.flatVectorThreshold(),
-                    false
+                    args.flatVectorThreshold()
                 );
             };
             case FLAT -> switch (quantizeBits) {
-                case null -> new ES93FlatVectorFormat(elementType, false);
-                case 1 -> new ES93BinaryQuantizedVectorsFormat(elementType, false, false);
-                default -> new ES94ScalarQuantizedVectorsFormat(elementType, quantizeBits, false, false);
+                case null -> new ES93FlatVectorFormat(elementType);
+                case 1 -> new ES93BinaryQuantizedVectorsFormat(elementType);
+                default -> new ES94ScalarQuantizedVectorsFormat(elementType, quantizeBits);
             };
         };
 

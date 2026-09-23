@@ -68,7 +68,6 @@ public class VectorFileAccessAuditTests extends ESTestCase {
                 ES950DiskBBQVectorsFormat.DEFAULT_VECTORS_PER_CLUSTER,
                 ES950DiskBBQVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
                 DenseVectorFieldMapper.ElementType.BFLOAT16,
-                false,
                 null,
                 1,
                 false,

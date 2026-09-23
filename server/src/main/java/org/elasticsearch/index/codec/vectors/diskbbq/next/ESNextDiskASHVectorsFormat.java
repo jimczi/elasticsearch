@@ -54,7 +54,9 @@ public class ESNextDiskASHVectorsFormat extends KnnVectorsFormat {
     public static final int VERSION_START = 1;
     public static final int VERSION_DIRECT_IO = VERSION_START;
     public static final int VERSION_ON_DISK_MERGE = VERSION_START;
-    public static final int VERSION_CURRENT = VERSION_START;
+    /** No field records the direct I/O options of its mapping; a file is advised from the mapping when it is opened. */
+    public static final int VERSION_NO_DIRECT_IO = 2;
+    public static final int VERSION_CURRENT = VERSION_NO_DIRECT_IO;
     public static final float DYNAMIC_VISIT_RATIO = 0.0f;
 
     private static final DirectIOCapableFlatVectorsFormat float32VectorFormat = new DirectIOCapableLucene99FlatVectorsFormat(
@@ -92,8 +94,6 @@ public class ESNextDiskASHVectorsFormat extends KnnVectorsFormat {
     private final IvfSegmentConfig.AshConfig ashConfig;
     private final int vectorPerCluster;
     private final int centroidsPerParentCluster;
-    private final boolean useDirectIO;
-    private final boolean onDiskMerge;
     private final DirectIOCapableFlatVectorsFormat rawVectorFormat;
     private final TaskExecutor mergeExec;
     private final int numMergeWorkers;
@@ -113,31 +113,26 @@ public class ESNextDiskASHVectorsFormat extends KnnVectorsFormat {
             vectorPerCluster,
             centroidsPerParentCluster,
             DenseVectorFieldMapper.ElementType.FLOAT,
-            false,
             null,
             1,
             defaultFlatThreshold(vectorPerCluster),
             sliceField,
             IvfFlushConfigSource.empty(),
-            IvfMergeConfigResolver.useCodecDefault(),
-            false
+            IvfMergeConfigResolver.useCodecDefault()
         );
     }
 
-    /** @param onDiskMerge whether merges use direct I/O for the raw vectors (the field's {@code on_disk_merge} option) */
     public ESNextDiskASHVectorsFormat(
         IvfSegmentConfig.AshConfig ashConfig,
         int vectorPerCluster,
         int centroidsPerParentCluster,
         DenseVectorFieldMapper.ElementType elementType,
-        boolean useDirectIO,
         ExecutorService mergingExecutorService,
         int maxMergingWorkers,
         int flatVectorThreshold,
         String sliceField,
         IvfFlushConfigSource ivfFlushConfigSource,
-        IvfMergeConfigResolver ivfMergeConfigResolver,
-        boolean onDiskMerge
+        IvfMergeConfigResolver ivfMergeConfigResolver
     ) {
         super(NAME);
         if (vectorPerCluster < MIN_VECTORS_PER_CLUSTER || vectorPerCluster > MAX_VECTORS_PER_CLUSTER) {
@@ -173,8 +168,6 @@ public class ESNextDiskASHVectorsFormat extends KnnVectorsFormat {
             case BFLOAT16 -> bfloat16VectorFormat;
             default -> throw new IllegalArgumentException("Unsupported element type " + elementType);
         };
-        this.useDirectIO = useDirectIO;
-        this.onDiskMerge = onDiskMerge;
         this.mergeExec = mergingExecutorService == null ? null : new TaskExecutor(mergingExecutorService);
         this.numMergeWorkers = maxMergingWorkers;
         this.flatVectorThreshold = flatVectorThreshold == -1 ? defaultFlatThreshold(vectorPerCluster) : flatVectorThreshold;
@@ -189,8 +182,6 @@ public class ESNextDiskASHVectorsFormat extends KnnVectorsFormat {
         return new ESNextDiskASHVectorsWriter(
             state,
             rawVectorFormat.getName(),
-            useDirectIO,
-            onDiskMerge,
             rawVectorFormat.fieldsWriter(state),
             vectorPerCluster,
             centroidsPerParentCluster,
@@ -207,7 +198,7 @@ public class ESNextDiskASHVectorsFormat extends KnnVectorsFormat {
     @Override
     public KnnVectorsReader fieldsReader(SegmentReadState state) throws IOException {
         ESNextDiskBBQVectorsFormat.validateSliceSort(sliceField, state.segmentInfo.getIndexSort());
-        return new ESNextDiskASHVectorsReader(state, (f, dio, odm) -> {
+        return new ESNextDiskASHVectorsReader(state, f -> {
             var format = supportedFormats.get(f);
             if (format == null) return null;
             return format.fieldsReader(rescoreOnly(state));
