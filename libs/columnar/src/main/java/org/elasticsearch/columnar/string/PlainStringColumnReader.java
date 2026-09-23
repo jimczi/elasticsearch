@@ -235,13 +235,43 @@ public final class PlainStringColumnReader extends StringColumnReader {
 
     @Override
     protected SlotWindow slotsNotHoldingWindow(BytesRef term) throws IOException {
-        if (term.length > 0) {
-            // A value of the term's length has to be compared, so the lengths do not settle it.
+        final long code = PlainValues.code(term.length);
+        // Every code but the term's length settles it, a null's included; a repeat takes the answer before it.
+        if (term.length == 0) {
+            return codeWindow(PlainValues.NULL, code - 1, code + 1, Long.MAX_VALUE);
+        }
+        if (minLength() == term.length && maxLength() == term.length) {
+            // Every slot is the term's length, so the codes settle nothing and reading them all would cost more
+            // than answering a document at a time.
             return null;
         }
-        // Every code but the empty length's settles it, a null's included; a repeat takes the answer before it.
-        final long code = PlainValues.code(0);
-        return codeWindow(PlainValues.NULL, code - 1, code + 1, Long.MAX_VALUE);
+        // A slot of the term's length is the only one whose bytes decide it, so the window settles the rest for
+        // free and reads only those. A repeat is corrected after, so it takes the answer of the slot before it.
+        return new SlotWindow(values.codes(), PlainValues.NULL, code - 1, code + 1, Long.MAX_VALUE) {
+            private final LastSeen lastSeen = new LastSeen();
+
+            @Override
+            protected void adjust(long first, long[] block, int count, long[] bits) throws IOException {
+                for (int i = 0; i < count; i++) {
+                    if (block[i] == code && matchesSlot(first + i, null, term, lastSeen)) {
+                        bits[i >>> 6] &= ~(1L << i);
+                    } else if (block[i] == code) {
+                        bits[i >>> 6] |= 1L << i;
+                    }
+                }
+                // A block never starts with a repeat.
+                for (int i = 1; i < count; i++) {
+                    if (block[i] == PlainValues.REPEAT) {
+                        final int before = i - 1;
+                        if ((bits[before >>> 6] & (1L << before)) != 0) {
+                            bits[i >>> 6] |= 1L << i;
+                        } else {
+                            bits[i >>> 6] &= ~(1L << i);
+                        }
+                    }
+                }
+            }
+        };
     }
 
     /**

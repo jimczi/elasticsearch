@@ -320,6 +320,93 @@ public class StringMatchTests extends ColumnarStringTestCase {
      * Every pushdown holds on a multi-valued column too: documents holding several values, some null, some none at
      * all, across presence blocks with every document present, a few missing, and few present.
      */
+    /**
+     * A negated term on a plain column is settled by the stored lengths everywhere but the slots of the term's
+     * own length, so it never falls back to a scan of every document.
+     */
+    public void testNotTermOnAPlainColumnIsSettledByTheLengths() throws IOException {
+        final BytesRef[] docValues = new BytesRef[between(800, 3000)];
+        for (int d = 0; d < docValues.length; d++) {
+            docValues[d] = new BytesRef(TERMS[d % (TERMS.length - 1)]);
+        }
+        withColumn(docValues, randomValidBlockSize(), randomChunkCodec(), randomTargetChunkBytes(), DictionaryPolicy.NONE, (metadata, reader) -> {
+            assertFalse("a plain column", reader.hasDictionary());
+            // A term the column holds, and one of a length it holds that it does not: both reach the window,
+            // where a term outside the column's lengths would already be settled whole-column.
+            final String held = TERMS[0];
+            final String sameLength = randomValueOtherThanMany(
+                v -> List.of(TERMS).contains(v),
+                () -> randomAlphaOfLength(held.length())
+            );
+            for (String probe : List.of(held, sameLength)) {
+                final BytesRef term = new BytesRef(probe);
+                final TwoPhaseIterator not = TwoPhaseIterator.unwrap(reader.matchNotTerm(term, docValues.length));
+                assertNotNull("not [" + probe + "] is answered in two phases", not);
+                assertEquals("not [" + probe + "] is settled by the lengths", 0f, not.matchCost(), 0f);
+            }
+        });
+    }
+
+    /**
+     * A column whose values are all one length settles nothing by length, so every matcher has to fall back to
+     * the values while still answering for absent documents, empty arrays and nulls.
+     */
+    public void testPushdownsOnConstantLengthColumns() throws IOException {
+        final int length = between(1, 6);
+        final boolean multiValued = randomBoolean();
+        final boolean sparse = randomBoolean();
+        final String[] vocabulary = new String[between(2, 6)];
+        for (int i = 0; i < vocabulary.length; i++) {
+            vocabulary[i] = randomAlphaOfLength(length);
+        }
+        final BytesRef[][] docSlots = new BytesRef[between(2000, 6000)][];
+        for (int d = 0; d < docSlots.length; d++) {
+            if (sparse && random().nextInt(4) == 0) {
+                continue;
+            }
+            final int slots = multiValued && random().nextInt(3) == 0 ? between(0, 3) : 1;
+            docSlots[d] = new BytesRef[slots];
+            for (int s = 0; s < slots; s++) {
+                docSlots[d][s] = multiValued && s > 0 && random().nextInt(5) == 0
+                    ? null
+                    : new BytesRef(randomFrom(vocabulary));
+            }
+        }
+        final String present = vocabulary[0];
+        final String absent = randomValueOtherThanMany(v -> List.of(vocabulary).contains(v), () -> randomAlphaOfLength(length));
+        // A term of another length can never be held, and the empty term is settled by the lengths alone.
+        final String[] probes = { present, absent, "", randomAlphaOfLength(length + 1) };
+        for (DictionaryPolicy policy : List.of(DictionaryPolicy.NONE, ROOMY)) {
+            withColumn(docSlots, randomValidBlockSize(), randomChunkCodec(), randomTargetChunkBytes(), policy, (metadata, reader) -> {
+                final String layout = (reader.hasDictionary() ? "dictionary" : "plain")
+                    + " one-length"
+                    + (sparse ? " sparse" : " dense")
+                    + (multiValued ? " multi-valued" : "");
+                for (String probe : probes) {
+                    final BytesRef term = new BytesRef(probe);
+                    assertMatchesAndRuns(
+                        layout + " term [" + probe + "]",
+                        anySlot(docSlots, v -> v.equals(probe)),
+                        () -> reader.matchTerm(term)
+                    );
+                    final FixedBitSet noneIs = anySlot(docSlots, v -> v.equals(probe));
+                    noneIs.flip(0, docSlots.length);
+                    assertMatchesAndRuns(layout + " not [" + probe + "]", noneIs, () -> reader.matchNotTerm(term, docSlots.length));
+                    assertMatchesAndRuns(
+                        layout + " prefix [" + probe + "]",
+                        anySlot(docSlots, v -> v.startsWith(probe)),
+                        () -> reader.matchPrefix(term)
+                    );
+                    assertMatchesAndRuns(
+                        layout + " contains [" + probe + "]",
+                        anySlot(docSlots, v -> v.contains(probe)),
+                        () -> reader.matchContains(term)
+                    );
+                }
+            });
+        }
+    }
+
     public void testPushdownsOnMultiValuedColumns() throws IOException {
         final int blockDocs = 1 << 16;
         final BytesRef[][] docSlots = new BytesRef[blockDocs * 2 + between(1000, 20000)][];
