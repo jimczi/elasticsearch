@@ -21,10 +21,14 @@ import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.store.DataAccessHint;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FileTypeHint;
 import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
+import org.apache.lucene.store.MergeInfo;
 import org.apache.lucene.store.NoReuseHint;
+import org.apache.lucene.store.ReadAdvice;
+import org.apache.lucene.util.Constants;
 import org.elasticsearch.index.codec.vectors.diskbbq.QuantEncoding;
 import org.elasticsearch.index.codec.vectors.diskbbq.es95.ES950DiskBBQVectorsFormat;
 import org.elasticsearch.index.codec.vectors.es93.ES93BinaryQuantizedVectorsFormat;
@@ -40,6 +44,7 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -116,6 +121,99 @@ public class VectorReadHintsTests extends ESTestCase {
                 each.rescoresFromRaw(),
                 hints.contains(NoReuseHint.INSTANCE)
             );
+        }
+    }
+
+    /** Advice that costs a mapping its recency is only for files that say they are not read again. */
+    public void testOnlyNoReuseFilesGetAdvice() {
+        var advice = FsDirectoryFactory.getReadAdviceFunc();
+
+        assertEquals(
+            "vectors a graph walks must stay eligible for reclaim by age",
+            Optional.of(Constants.DEFAULT_READADVICE),
+            advice.apply("_0.vec", IOContext.DEFAULT.withHints(FileTypeHint.DATA, DataAccessHint.RANDOM))
+        );
+        assertEquals(
+            "a file that is not read again can give up its recency",
+            Optional.of(ReadAdvice.RANDOM),
+            advice.apply("_0.vec", IOContext.DEFAULT.withHints(FileTypeHint.DATA, DataAccessHint.RANDOM, NoReuseHint.INSTANCE))
+        );
+        assertEquals(
+            "sequential advice costs recency too, so it needs saying as well",
+            Optional.of(Constants.DEFAULT_READADVICE),
+            advice.apply("_0.vec", IOContext.DEFAULT.withHints(FileTypeHint.DATA, DataAccessHint.SEQUENTIAL))
+        );
+        assertEquals(
+            "a merge that says it reads front to back and does not come back",
+            Optional.of(ReadAdvice.SEQUENTIAL),
+            advice.apply("_0.vec", IOContext.DEFAULT.withHints(FileTypeHint.DATA, DataAccessHint.SEQUENTIAL, NoReuseHint.INSTANCE))
+        );
+    }
+
+    /** A merge is not on its own a reason to advise anything. */
+    public void testMergeContextAloneAdvisesNothing() {
+        var advice = FsDirectoryFactory.getReadAdviceFunc();
+        IOContext merge = IOContext.merge(new MergeInfo(1, 1L, false, 1)).withHints(FileTypeHint.DATA);
+
+        assertEquals(Optional.of(Constants.DEFAULT_READADVICE), advice.apply("_0.vec", merge));
+        assertEquals(
+            "a merge building a graph reads at random and says so",
+            Optional.of(Constants.DEFAULT_READADVICE),
+            advice.apply("_0.vec", merge.withHints(FileTypeHint.DATA, DataAccessHint.RANDOM))
+        );
+    }
+
+    /** The hints a searcher's open of the raw vectors file carries. */
+    private Set<IOContext.FileOpenHint> openHintsForVectorData(KnnVectorsFormat format) throws Exception {
+        Map<String, IOContext> opens = new HashMap<>();
+        try (Directory dir = new RecordingDirectory(newDirectory(), opens)) {
+            IndexWriterConfig iwc = new IndexWriterConfig();
+            iwc.setCodec(new OneFormatCodec(format));
+            iwc.setUseCompoundFile(false);
+            try (IndexWriter w = new IndexWriter(dir, iwc)) {
+                for (int i = 0; i < 64; i++) {
+                    Document doc = new Document();
+                    doc.add(new KnnFloatVectorField("vector", randomVector(), VectorSimilarityFunction.DOT_PRODUCT));
+                    w.addDocument(doc);
+                }
+                w.commit();
+                opens.clear();
+                try (DirectoryReader reader = DirectoryReader.open(dir)) {
+                    assertEquals(1, reader.leaves().size());
+                }
+            }
+        }
+        return opens.entrySet()
+            .stream()
+            .filter(e -> e.getKey().endsWith(".vec"))
+            .map(Map.Entry::getValue)
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("no raw vectors file was opened, saw " + opens.keySet()))
+            .hints();
+    }
+
+    private static float[] randomVector() {
+        float[] v = new float[DIM];
+        for (int i = 0; i < DIM; i++) {
+            v[i] = randomFloat() + 0.01f;
+        }
+        return v;
+    }
+
+    private static class RecordingDirectory extends FilterDirectory {
+        private final Map<String, IOContext> opens;
+
+        RecordingDirectory(Directory in, Map<String, IOContext> opens) {
+            super(in);
+            this.opens = opens;
+        }
+
+        @Override
+        public IndexInput openInput(String name, IOContext context) throws IOException {
+            synchronized (opens) {
+                opens.putIfAbsent(name, context);
+            }
+            return super.openInput(name, context);
         }
     }
 

@@ -26,6 +26,7 @@ import org.apache.lucene.store.NativeFSLockFactory;
 import org.apache.lucene.store.NoReuseHint;
 import org.apache.lucene.store.ReadAdvice;
 import org.apache.lucene.store.SimpleFSLockFactory;
+import org.apache.lucene.util.Constants;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.settings.Setting;
@@ -181,12 +182,28 @@ public class FsDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
         return MMapDirectory.NO_FILES;
     }
 
+    /**
+     * The advice a mapping is opened with, taken from what the caller says about the file rather
+     * than from how the file came to be opened. A merge gets sequential advice because the reader
+     * doing it asks for it, not because it is a merge, and only for a file it says it will not read
+     * again.
+     */
     public static BiFunction<String, IOContext, Optional<ReadAdvice>> getReadAdviceFunc() {
         return (name, context) -> {
             if (context.hints().contains(StandardIOBehaviorHint.INSTANCE)) {
                 return Optional.of(ReadAdvice.NORMAL);
             }
-            return MMapDirectory.ADVISE_BY_CONTEXT.apply(name, context);
+            // Both kinds of advice take a mapping out of the recency tracking that decides what is
+            // reclaimed first, so they are only for a file that says it is not read again.
+            if (context.hints().contains(NoReuseHint.INSTANCE)) {
+                if (context.hints().contains(DataAccessHint.RANDOM)) {
+                    return Optional.of(ReadAdvice.RANDOM);
+                }
+                if (context.hints().contains(DataAccessHint.SEQUENTIAL)) {
+                    return Optional.of(ReadAdvice.SEQUENTIAL);
+                }
+            }
+            return Optional.of(Constants.DEFAULT_READADVICE);
         };
     }
 
