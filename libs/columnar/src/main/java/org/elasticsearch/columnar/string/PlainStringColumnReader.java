@@ -430,6 +430,9 @@ public final class PlainStringColumnReader extends StringColumnReader {
         startPageSlots(values);
         int slots = 0;
         int at = 0;
+        long previous = -1;
+        int previousLength = -1;
+        int previousSlot = -1;
         for (int i = 0; i < docCount; i++) {
             final int rank = pageRanks[i];
             if (rank == ColumnIterator.NO_RANK) {
@@ -442,12 +445,21 @@ public final class PlainStringColumnReader extends StringColumnReader {
                 if (isNullSlot(address)) {
                     continue;
                 }
-                this.values.get(address, scratch);
-                final int slot = pageSlotFor(scratch, slots);
-                if (slot == slots) {
-                    slots++;
+                // A value read from the same stored bytes as the one before it is a repeat without looking at
+                // them, so a run of equal values is named once however the documents divide it.
+                final long identity = this.values.read(address, scratch);
+                if (previousSlot < 0 || identity != previous || scratch.length != previousLength) {
+                    final int slot = previousSlot >= 0 && pageSlotHolds(previousSlot, scratch)
+                        ? previousSlot
+                        : pageSlotFor(scratch, slots);
+                    if (slot == slots) {
+                        slots++;
+                    }
+                    previous = identity;
+                    previousLength = scratch.length;
+                    previousSlot = slot;
                 }
-                pageOrdinals[at++] = slot;
+                pageOrdinals[at++] = previousSlot;
             }
         }
         assert at == values : "wrote " + at + " values, counted " + values;
