@@ -51,6 +51,7 @@ import org.apache.lucene.util.packed.PackedInts;
 import org.elasticsearch.core.Assertions;
 import org.elasticsearch.core.IOUtils;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.index.codec.PrefetchableDocValues;
 import org.elasticsearch.index.codec.tsdb.pipeline.PipelineDescriptor;
 import org.elasticsearch.index.mapper.BlockLoader;
 import org.elasticsearch.index.mapper.blockloader.docvalues.BlockDocValuesReader;
@@ -526,6 +527,16 @@ public abstract class AbstractTSDBDocValuesProducer extends DocValuesProducer {
             final RandomAccessInput docOffsetsData = this.data.randomAccessSlice(entry.docOffsetsOffset, entry.docOffsetLength);
             final DirectMonotonicReader docOffsets = DirectMonotonicReader.getInstance(entry.docOffsetMeta, docOffsetsData);
             return new DenseBinaryDocValues(maxDoc) {
+                private CompressedBinaryPrefetcher prefetcher;
+
+                @Override
+                public boolean prefetch(int stage, int[] docs, int from, int to) throws IOException {
+                    if (prefetcher == null) {
+                        prefetcher = new CompressedBinaryPrefetcher(entry);
+                    }
+                    return prefetcher.prefetch(stage, docs, from, to);
+                }
+
                 final BinaryDecoder decoder = new BinaryDecoder(
                     entry.compression.compressionMode().newDecompressor(),
                     addresses,
@@ -632,6 +643,16 @@ public abstract class AbstractTSDBDocValuesProducer extends DocValuesProducer {
             final RandomAccessInput docOffsetsData = this.data.randomAccessSlice(entry.docOffsetsOffset, entry.docOffsetLength);
             final DirectMonotonicReader docOffsets = DirectMonotonicReader.getInstance(entry.docOffsetMeta, docOffsetsData);
             return new SparseBinaryDocValues(disi) {
+                private CompressedBinaryPrefetcher prefetcher;
+
+                @Override
+                public boolean prefetch(int stage, int[] docs, int from, int to) throws IOException {
+                    if (prefetcher == null) {
+                        prefetcher = new CompressedBinaryPrefetcher(entry);
+                    }
+                    return prefetcher.prefetch(stage, docs, from, to);
+                }
+
                 final BinaryDecoder decoder = new BinaryDecoder(
                     entry.compression.compressionMode().newDecompressor(),
                     addresses,
@@ -1147,7 +1168,13 @@ public abstract class AbstractTSDBDocValuesProducer extends DocValuesProducer {
     public abstract static class TSDBBinaryDocValues extends BinaryDocValues
         implements
             BlockLoader.OptionalColumnAtATimeReader,
-            BlockLoader.OptionalLengthReader {
+            BlockLoader.OptionalLengthReader,
+            PrefetchableDocValues {
+
+        @Override
+        public boolean prefetch(int stage, int[] docs, int from, int to) throws IOException {
+            return false;
+        }
 
         /**
          * Returns the raw compressed block backing the value this iterator is currently positioned
@@ -1437,6 +1464,16 @@ public abstract class AbstractTSDBDocValuesProducer extends DocValuesProducer {
         final NumericDocValues ords = getNumeric(entry.ordsEntry, entry.termsDictEntry.termsDictSize, null);
         return new BaseSortedDocValues(entry) {
 
+            private SortedPrefetcher prefetcher;
+
+            @Override
+            public boolean prefetch(int stage, int[] docs, int from, int to) throws IOException {
+                if (prefetcher == null) {
+                    prefetcher = new SortedPrefetcher(entry);
+                }
+                return prefetcher.prefetch(stage, docs, from, to);
+            }
+
             @Override
             public RandomAccessNumericValues tryRandomAccess() throws IOException {
                 // A sorted column holds its ordinals on a numeric column.
@@ -1562,7 +1599,13 @@ public abstract class AbstractTSDBDocValuesProducer extends DocValuesProducer {
         implements
             BlockLoader.OptionalColumnAtATimeReader,
             PartitionedDocValues,
-            RandomAccessNumericValues.Provider {
+            RandomAccessNumericValues.Provider,
+            PrefetchableDocValues {
+
+        @Override
+        public boolean prefetch(int stage, int[] docs, int from, int to) throws IOException {
+            return false;
+        }
 
         @Override
         public RandomAccessNumericValues tryRandomAccess() throws IOException {
@@ -1641,7 +1684,14 @@ public abstract class AbstractTSDBDocValuesProducer extends DocValuesProducer {
     public abstract static class BaseDenseNumericValues extends NumericDocValues
         implements
             BlockLoader.OptionalColumnAtATimeReader,
-            RandomAccessNumericValues.Provider {
+            RandomAccessNumericValues.Provider,
+            PrefetchableDocValues {
+
+        @Override
+        public boolean prefetch(int stage, int[] docs, int from, int to) throws IOException {
+            return false;
+        }
+
         private final int maxDoc;
         protected int doc = -1;
 
@@ -1714,8 +1764,16 @@ public abstract class AbstractTSDBDocValuesProducer extends DocValuesProducer {
         abstract SortedOrdinalReader sortedOrdinalReader();
     }
 
-    abstract static class BaseSparseNumericValues extends NumericDocValues implements BlockLoader.OptionalColumnAtATimeReader {
+    abstract static class BaseSparseNumericValues extends NumericDocValues
+        implements
+            BlockLoader.OptionalColumnAtATimeReader,
+            PrefetchableDocValues {
         protected final IndexedDISI disi;
+
+        @Override
+        public boolean prefetch(int stage, int[] docs, int from, int to) throws IOException {
+            return false;
+        }
 
         BaseSparseNumericValues(IndexedDISI disi) {
             this.disi = disi;
@@ -2526,6 +2584,248 @@ public abstract class AbstractTSDBDocValuesProducer extends DocValuesProducer {
         entry.termsIndexAddressesLength = meta.readLong();
     }
 
+    /**
+     * Resolves where each document of a batch sits among the documents that have a value. A dense column
+     * needs no read for it; a sparse one asks its {@link IndexedDISI}, which it owns so that the column's
+     * own iterator does not move.
+     */
+    private final class RankResolver {
+        private final IndexedDISI disi;
+        private final long docsWithFieldOffset;
+        private final long docsWithFieldLength;
+        /** The rank of each document of the last batch resolved, or {@code -1} for one without a value. */
+        long[] ranks = new long[0];
+
+        RankResolver(long docsWithFieldOffset, long docsWithFieldLength, short jumpTableEntryCount, byte denseRankPower, long cost)
+            throws IOException {
+            this.docsWithFieldOffset = docsWithFieldOffset;
+            this.docsWithFieldLength = docsWithFieldLength;
+            this.disi = docsWithFieldOffset == -1
+                ? null
+                : new IndexedDISI(data, docsWithFieldOffset, docsWithFieldLength, jumpTableEntryCount, denseRankPower, cost);
+        }
+
+        void prefetchPresence(IndexInput in) throws IOException {
+            if (disi != null) {
+                in.prefetch(docsWithFieldOffset, docsWithFieldLength);
+            }
+        }
+
+        void resolve(int[] docs, int from, int to) throws IOException {
+            ranks = ArrayUtil.growNoCopy(ranks, to - from);
+            for (int i = from; i < to; i++) {
+                if (disi == null) {
+                    ranks[i - from] = docs[i];
+                } else {
+                    ranks[i - from] = disi.advanceExact(docs[i]) ? disi.index() : -1;
+                }
+            }
+        }
+    }
+
+    /**
+     * Prefetches what a batch of documents reads from a numeric column. Stage {@code 0} asks for the block
+     * index and the presence, which the field's metadata locates; stage {@code 1} reads them to find the
+     * value blocks of the batch.
+     */
+    private final class NumericPrefetcher {
+        private final NumericEntry entry;
+        private final long maxOrd;
+        private final IndexInput in;
+        private final DirectMonotonicReader indexReader;
+        private final RankResolver ranks;
+        private final int blockShift;
+        private final long numBlocks;
+        private NumericValues values;
+
+        NumericPrefetcher(NumericEntry entry, long maxOrd) throws IOException {
+            this.entry = entry;
+            this.maxOrd = maxOrd;
+            this.in = data.clone();
+            this.indexReader = DirectMonotonicReader.getInstance(
+                entry.indexMeta,
+                data.randomAccessSlice(entry.indexOffset, entry.indexLength)
+            );
+            this.ranks = new RankResolver(
+                entry.docsWithFieldOffset,
+                entry.docsWithFieldLength,
+                entry.jumpTableEntryCount,
+                entry.denseRankPower,
+                entry.numValues
+            );
+            this.blockShift = Integer.numberOfTrailingZeros(entry.blockSize);
+            this.numBlocks = (entry.numValues + entry.blockSize - 1) >>> blockShift;
+        }
+
+        boolean prefetch(int stage, int[] docs, int from, int to) throws IOException {
+            if (stage == 0) {
+                if (entry.indexLength > 0) {
+                    in.prefetch(entry.indexOffset, entry.indexLength);
+                }
+                ranks.prefetchPresence(in);
+                return true;
+            }
+            if (stage == 1) {
+                ranks.resolve(docs, from, to);
+                long lastBlock = -1;
+                for (int i = 0; i < to - from; i++) {
+                    final long rank = ranks.ranks[i];
+                    if (rank < 0) {
+                        continue;
+                    }
+                    final long block = rank >>> blockShift;
+                    if (block != lastBlock) {
+                        lastBlock = block;
+                        final long start = indexReader.get(block);
+                        final long end = block + 1 < numBlocks ? indexReader.get(block + 1) : entry.valuesLength;
+                        in.prefetch(entry.valuesOffset + start, end - start);
+                    }
+                }
+            }
+            return false;
+        }
+
+        /** The rank of the {@code i}th document of the batch stage {@code 1} last ran over, or {@code -1}. */
+        long rank(int i) {
+            return ranks.ranks[i];
+        }
+
+        /** The value at {@code rank}, read from a block that stage {@code 1} asked for. */
+        long valueAt(long rank) throws IOException {
+            if (values == null) {
+                values = getValues(entry, maxOrd);
+            }
+            return values.advance(rank);
+        }
+    }
+
+    /**
+     * Prefetches what a batch of documents reads from a single-valued sorted column: its ordinals, as a
+     * numeric column, then in stage {@code 2} the dictionary blocks that hold the terms of those ordinals.
+     */
+    private final class SortedPrefetcher {
+        private final TermsDictEntry terms;
+        private final NumericPrefetcher ords;
+        private final IndexInput in;
+        private final LongValues blockAddresses;
+        private final int blockShift;
+        private long[] blocks = new long[0];
+
+        SortedPrefetcher(SortedEntry entry) throws IOException {
+            this.terms = entry.termsDictEntry;
+            final NumericEntry ordsEntry = entry.ordsEntry;
+            // A column of one term, or one whose ordinals are stored as ranges, reads no ordinal block.
+            this.ords = terms.termsDictSize == 1 || ordsEntry.sortedOrdinals != null
+                ? null
+                : new NumericPrefetcher(ordsEntry, terms.termsDictSize);
+            this.in = data.clone();
+            this.blockAddresses = DirectMonotonicReader.getInstance(
+                terms.termsAddressesMeta,
+                data.randomAccessSlice(terms.termsAddressesOffset, terms.termsAddressesLength)
+            );
+            this.blockShift = formatConfig.termsBlockLz4Shift();
+        }
+
+        boolean prefetch(int stage, int[] docs, int from, int to) throws IOException {
+            if (ords == null) {
+                return false;
+            }
+            if (stage == 0) {
+                ords.prefetch(0, docs, from, to);
+                in.prefetch(terms.termsAddressesOffset, terms.termsAddressesLength);
+                return true;
+            }
+            if (stage == 1) {
+                ords.prefetch(1, docs, from, to);
+                return true;
+            }
+            if (stage == 2) {
+                blocks = ArrayUtil.growNoCopy(blocks, to - from);
+                int count = 0;
+                for (int i = 0; i < to - from; i++) {
+                    final long rank = ords.rank(i);
+                    if (rank >= 0) {
+                        blocks[count++] = ords.valueAt(rank) >>> blockShift;
+                    }
+                }
+                Arrays.sort(blocks, 0, count);
+                final long lastDictBlock = (terms.termsDictSize - 1) >>> blockShift;
+                long lastBlock = -1;
+                for (int i = 0; i < count; i++) {
+                    final long block = blocks[i];
+                    if (block != lastBlock) {
+                        lastBlock = block;
+                        final long start = blockAddresses.get(block);
+                        final long end = block < lastDictBlock ? blockAddresses.get(block + 1) : terms.termsDataLength;
+                        in.prefetch(terms.termsDataOffset + start, end - start);
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Prefetches what a batch of documents reads from a compressed binary column. Stage {@code 0} asks for
+     * the two per-block tables and the presence; stage {@code 1} reads them to find the compressed blocks.
+     */
+    private final class CompressedBinaryPrefetcher {
+        private final BinaryEntry entry;
+        private final IndexInput in;
+        private final LongValues addresses;
+        private final DirectMonotonicReader docOffsets;
+        private final RankResolver ranks;
+        private long block = 0;
+        private long limitRankOfBlock = -1;
+
+        CompressedBinaryPrefetcher(BinaryEntry entry) throws IOException {
+            this.entry = entry;
+            this.in = data.clone();
+            this.addresses = DirectMonotonicReader.getInstance(
+                entry.addressesMeta,
+                data.randomAccessSlice(entry.addressesOffset, entry.addressesLength)
+            );
+            this.docOffsets = DirectMonotonicReader.getInstance(
+                entry.docOffsetMeta,
+                data.randomAccessSlice(entry.docOffsetsOffset, entry.docOffsetLength)
+            );
+            this.ranks = new RankResolver(
+                entry.docsWithFieldOffset,
+                entry.docsWithFieldLength,
+                entry.jumpTableEntryCount,
+                entry.denseRankPower,
+                entry.numDocsWithField
+            );
+        }
+
+        boolean prefetch(int stage, int[] docs, int from, int to) throws IOException {
+            if (stage == 0) {
+                in.prefetch(entry.addressesOffset, entry.addressesLength);
+                in.prefetch(entry.docOffsetsOffset, entry.docOffsetLength);
+                ranks.prefetchPresence(in);
+                return true;
+            }
+            if (stage == 1) {
+                ranks.resolve(docs, from, to);
+                for (int i = 0; i < to - from; i++) {
+                    final long rank = ranks.ranks[i];
+                    if (rank < 0 || rank < limitRankOfBlock) {
+                        continue;
+                    }
+                    long index = docOffsets.binarySearch(block, entry.numCompressedBlocks, rank);
+                    if (index < 0) {
+                        index = -2 - index;
+                    }
+                    block = index;
+                    limitRankOfBlock = docOffsets.get(block + 1);
+                    final long start = addresses.get(block);
+                    in.prefetch(start, addresses.get(block + 1) - start);
+                }
+            }
+            return false;
+        }
+    }
+
     private interface NumericValues {
         long advance(long index) throws IOException;
 
@@ -2658,6 +2958,17 @@ public abstract class AbstractTSDBDocValuesProducer extends DocValuesProducer {
                 private long currentBlockIndex = -1;
                 private final long[] currentBlock = new long[numericBlockSize];
                 private final FixedBitSet matches = new FixedBitSet(numericBlockSize);
+
+                private NumericPrefetcher prefetcher;
+
+                @Override
+                public boolean prefetch(int stage, int[] docs, int from, int to) throws IOException {
+                    if (prefetcher == null) {
+                        prefetcher = new NumericPrefetcher(entry, maxOrd);
+                    }
+                    return prefetcher.prefetch(stage, docs, from, to);
+                }
+
                 // Its own NumericValues, so random access does not evict the iterator's decoded block.
                 private RandomAccessNumericValues randomAccess;
 
@@ -2832,6 +3143,17 @@ public abstract class AbstractTSDBDocValuesProducer extends DocValuesProducer {
             return new BaseSparseNumericValues(disi) {
                 private final BlockDecoder decoder = blockDecoder(entry, maxOrd);
                 private IndexedDISI lookAheadDISI;
+
+                private NumericPrefetcher prefetcher;
+
+                @Override
+                public boolean prefetch(int stage, int[] docs, int from, int to) throws IOException {
+                    if (prefetcher == null) {
+                        prefetcher = new NumericPrefetcher(entry, maxOrd);
+                    }
+                    return prefetcher.prefetch(stage, docs, from, to);
+                }
+
                 private long currentBlockIndex = -1;
                 private final long[] currentBlock = new long[numericBlockSize];
                 private long prefetchedBlockIndex = -1;

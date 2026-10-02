@@ -23,7 +23,9 @@ import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.SortedNumericSortField;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.benchmark.index.mapper.MapperServiceFactory;
+import org.elasticsearch.blobcache.shared.SharedBlobCacheService;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.index.codec.DocValuesBatchPrefetcher;
 import org.elasticsearch.index.codec.Elasticsearch96Codec;
 import org.elasticsearch.index.codec.tsdb.AbstractTSDBDocValuesProducer;
 import org.elasticsearch.index.fieldvisitor.StoredFieldLoader;
@@ -108,17 +110,33 @@ public class DocValuesLoaderBenchmark extends AbstractStatelessQueryBenchmark {
     @Param({ "true", "false" })
     public boolean prefetch;
 
+    /**
+     * Document and column pairs one round of batch prefetch may ask for; {@code 0} leaves batch prefetch off.
+     */
+    @Param({ "0" })
+    public int prefetchBudget;
+
+    /** Cache range and region size, to scale the columns against the unit a download fetches; empty keeps the default. */
+    @Param({ "" })
+    public String rangeSize;
+
     private SourceLoader sourceLoader;
     private int[] docIdBatch;
 
     @Setup(Level.Trial)
     public void setupPrefetch() {
         AbstractTSDBDocValuesProducer.prefetchEnabled = prefetch;
+        DocValuesBatchPrefetcher.budget = prefetchBudget;
     }
 
     @Override
     protected Settings extraNodeSettings() {
-        return Settings.builder().putList("node.roles", "search").build();
+        Settings.Builder settings = Settings.builder().putList("node.roles", "search");
+        if (rangeSize.isEmpty() == false) {
+            settings.put(SharedBlobCacheService.SHARED_CACHE_RANGE_SIZE_SETTING.getKey(), rangeSize);
+            settings.put(SharedBlobCacheService.SHARED_CACHE_REGION_SIZE_SETTING.getKey(), rangeSize);
+        }
+        return settings.build();
     }
 
     @Override
@@ -216,13 +234,12 @@ public class DocValuesLoaderBenchmark extends AbstractStatelessQueryBenchmark {
         SourceLoader.Leaf leaf = sourceLoader.leaf(ctx, docIdBatch);
         var storedFieldLoader = StoredFieldLoader.empty().getLoader(ctx, null);
 
-        int loaded = 0;
+        int hash = 0;
         for (int docId : docIdBatch) {
             storedFieldLoader.advanceTo(docId);
-            leaf.source(storedFieldLoader, docId);
-            loaded++;
+            hash = 31 * hash + leaf.source(storedFieldLoader, docId).internalSourceRef().hashCode();
         }
-        return loaded;
+        return hash;
     }
 
     private String buildMappings() {

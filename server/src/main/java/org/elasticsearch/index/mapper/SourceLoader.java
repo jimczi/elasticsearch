@@ -9,13 +9,20 @@
 
 package org.elasticsearch.index.mapper;
 
+import org.apache.lucene.index.BinaryDocValues;
+import org.apache.lucene.index.FilterLeafReader;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.NumericDocValues;
+import org.apache.lucene.index.SortedDocValues;
+import org.apache.lucene.index.SortedNumericDocValues;
+import org.apache.lucene.index.SortedSetDocValues;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.xcontent.support.XContentMapValues;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.TimeValue;
+import org.elasticsearch.index.codec.DocValuesBatchPrefetcher;
 import org.elasticsearch.index.fielddata.MultiValuedSortableBinaryDocValues;
 import org.elasticsearch.index.fieldvisitor.LeafStoredFieldLoader;
 import org.elasticsearch.search.lookup.Source;
@@ -25,6 +32,8 @@ import org.elasticsearch.xcontent.json.JsonXContent;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -158,13 +167,25 @@ public interface SourceLoader {
         @Override
         public Leaf leaf(LeafReaderContext ctx, int[] docIdsInLeaf) throws IOException {
             SyntheticFieldLoader loader = syntheticFieldLoaderLeafSupplier.get();
-            var leaf = new SyntheticLeaf(
-                filter,
-                loader,
-                loader.docValuesLoader(ctx.reader(), docIdsInLeaf),
-                ignoredSourceFormat,
-                ctx.reader()
-            );
+            final int prefetchBudget = DocValuesBatchPrefetcher.budget;
+            final SyntheticLeaf leaf;
+            if (prefetchBudget > 0 && docIdsInLeaf != null) {
+                // Ask the loader which columns it reads, without reading any, then load a window at a time.
+                var recording = new DocValuesFieldRecorder(ctx.reader());
+                loader.docValuesLoader(recording, null);
+                var prefetcher = DocValuesBatchPrefetcher.open(ctx.reader(), recording.fields, prefetchBudget);
+                leaf = new SyntheticLeaf(filter, loader, null, ignoredSourceFormat, ctx.reader(), prefetcher, docIdsInLeaf);
+            } else {
+                leaf = new SyntheticLeaf(
+                    filter,
+                    loader,
+                    loader.docValuesLoader(ctx.reader(), docIdsInLeaf),
+                    ignoredSourceFormat,
+                    ctx.reader(),
+                    null,
+                    null
+                );
+            }
             if (metrics == SourceFieldMetrics.NOOP) {
                 return leaf;
             } else {
@@ -200,7 +221,13 @@ public interface SourceLoader {
         private static class SyntheticLeaf implements Leaf {
             private final SourceFilter filter;
             private final SyntheticFieldLoader loader;
-            private final SyntheticFieldLoader.DocValuesLoader docValuesLoader;
+            private SyntheticFieldLoader.DocValuesLoader docValuesLoader;
+            private final LeafReader leafReader;
+            /** Null unless the leaf loads its doc values a prefetched window at a time. */
+            private final DocValuesBatchPrefetcher prefetcher;
+            private final int[] docIdsInLeaf;
+            /** One past the last position of {@link #docIdsInLeaf} that the current window covers. */
+            private int windowEnd = 0;
             private final Map<String, SyntheticFieldLoader.StoredFieldLoader> storedFieldLoaders;
             private final IgnoredSourceFieldMapper.IgnoredSourceFormat ignoredSourceFormat;
             private final MultiValuedSortableBinaryDocValues ignoredSourcedocValues;
@@ -210,11 +237,16 @@ public interface SourceLoader {
                 SyntheticFieldLoader loader,
                 SyntheticFieldLoader.DocValuesLoader docValuesLoader,
                 IgnoredSourceFieldMapper.IgnoredSourceFormat ignoredSourceFormat,
-                LeafReader leafReader
+                LeafReader leafReader,
+                @Nullable DocValuesBatchPrefetcher prefetcher,
+                @Nullable int[] docIdsInLeaf
             ) throws IOException {
                 this.filter = filter;
                 this.loader = loader;
                 this.docValuesLoader = docValuesLoader;
+                this.leafReader = leafReader;
+                this.prefetcher = prefetcher;
+                this.docIdsInLeaf = docIdsInLeaf;
                 this.storedFieldLoaders = Map.copyOf(
                     loader.storedFieldLoaders().collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue))
                 );
@@ -256,6 +288,9 @@ public interface SourceLoader {
                 if (objectsWithIgnoredFields.isEmpty() == false) {
                     loader.setIgnoredValues(objectsWithIgnoredFields);
                 }
+                if (prefetcher != null) {
+                    moveWindowTo(docId);
+                }
                 if (docValuesLoader != null) {
                     docValuesLoader.advanceToDoc(docId);
                 }
@@ -268,6 +303,76 @@ public interface SourceLoader {
                 } else {
                     b.startObject().endObject();
                 }
+            }
+
+            /**
+             * Opens the window that holds {@code docId} if the current one ends before it: prefetches the
+             * window across every column, then builds the doc-values loader for just those documents.
+             */
+            private void moveWindowTo(int docId) throws IOException {
+                if (windowEnd > 0 && docId <= docIdsInLeaf[windowEnd - 1]) {
+                    return;
+                }
+                int from = windowEnd;
+                while (from < docIdsInLeaf.length && docIdsInLeaf[from] < docId) {
+                    from++;
+                }
+                if (from == docIdsInLeaf.length || docIdsInLeaf[from] != docId) {
+                    throw new IllegalArgumentException("doc [" + docId + "] is not one of the documents this leaf was opened for");
+                }
+                int to = Math.min(docIdsInLeaf.length, from + prefetcher.windowDocs());
+                prefetcher.prefetch(docIdsInLeaf, from, to);
+                docValuesLoader = loader.docValuesLoader(leafReader, Arrays.copyOfRange(docIdsInLeaf, from, to));
+                windowEnd = to;
+            }
+        }
+
+        /** Records the doc-values fields a loader opens, so they can be prefetched as a batch. */
+        private static final class DocValuesFieldRecorder extends FilterLeafReader {
+            final Set<String> fields = new LinkedHashSet<>();
+
+            DocValuesFieldRecorder(LeafReader in) {
+                super(in);
+            }
+
+            @Override
+            public NumericDocValues getNumericDocValues(String field) throws IOException {
+                fields.add(field);
+                return in.getNumericDocValues(field);
+            }
+
+            @Override
+            public BinaryDocValues getBinaryDocValues(String field) throws IOException {
+                fields.add(field);
+                return in.getBinaryDocValues(field);
+            }
+
+            @Override
+            public SortedDocValues getSortedDocValues(String field) throws IOException {
+                fields.add(field);
+                return in.getSortedDocValues(field);
+            }
+
+            @Override
+            public SortedNumericDocValues getSortedNumericDocValues(String field) throws IOException {
+                fields.add(field);
+                return in.getSortedNumericDocValues(field);
+            }
+
+            @Override
+            public SortedSetDocValues getSortedSetDocValues(String field) throws IOException {
+                fields.add(field);
+                return in.getSortedSetDocValues(field);
+            }
+
+            @Override
+            public CacheHelper getCoreCacheHelper() {
+                return in.getCoreCacheHelper();
+            }
+
+            @Override
+            public CacheHelper getReaderCacheHelper() {
+                return in.getReaderCacheHelper();
             }
         }
     }

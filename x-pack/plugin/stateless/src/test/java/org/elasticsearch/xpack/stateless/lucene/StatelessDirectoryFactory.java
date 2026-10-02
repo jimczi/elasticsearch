@@ -498,11 +498,17 @@ public final class StatelessDirectoryFactory {
             if (latencyMs <= 0) {
                 return;
             }
+            DOWNLOADS.incrementAndGet();
+            if (DOWNLOADS_IN_FLIGHT.getAndIncrement() == 0) {
+                DOWNLOAD_ROUNDS.incrementAndGet();
+            }
             try {
                 Thread.sleep(latencyMs);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new InterruptedIOException("interrupted while simulating blob-store latency");
+            } finally {
+                DOWNLOADS_IN_FLIGHT.decrementAndGet();
             }
         }
     }
@@ -533,6 +539,24 @@ public final class StatelessDirectoryFactory {
      * created by this factory, or {@code null} if the directory is not a SearchNodeDirectory.
      * Intended for benchmark callers that want to compute deltas around a query.
      */
+    private static final AtomicInteger DOWNLOADS_IN_FLIGHT = new AtomicInteger();
+    private static final AtomicInteger DOWNLOADS = new AtomicInteger();
+    private static final AtomicInteger DOWNLOAD_ROUNDS = new AtomicInteger();
+
+    /** How many simulated blob-store requests have paid the first-byte latency. */
+    public static int downloads() {
+        return DOWNLOADS.get();
+    }
+
+    /**
+     * How many times a simulated blob-store request started while no other was in flight. Requests that
+     * overlap share a round, so this counts the latencies a reader waited through one after another, and
+     * {@link #downloads()} over it is how many requests a round carried.
+     */
+    public static int downloadRounds() {
+        return DOWNLOAD_ROUNDS.get();
+    }
+
     public static SharedBlobCacheService.Stats statsFor(Directory dir) {
         return dir instanceof SearchNodeDirectory sd ? sd.infra.cacheService().getStats() : null;
     }
