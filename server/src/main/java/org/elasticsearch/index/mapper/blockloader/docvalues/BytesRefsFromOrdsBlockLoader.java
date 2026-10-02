@@ -24,6 +24,7 @@ import org.elasticsearch.index.mapper.blockloader.docvalues.tracking.TrackingSor
 import org.elasticsearch.index.mapper.blockloader.docvalues.tracking.TrackingSortedSetDocValues;
 
 import java.io.IOException;
+import java.util.function.Consumer;
 
 /**
  * Loads {@code keyword}-style fields stored as a sorted ordinal lookup table.
@@ -54,6 +55,11 @@ public class BytesRefsFromOrdsBlockLoader extends BlockDocValuesReader.DocValues
     @Override
     public BytesRefBuilder builder(BlockFactory factory, int expectedCount) {
         return factory.bytesRefs(expectedCount);
+    }
+
+    @Override
+    public void docValuesFields(Consumer<String> fields) {
+        fields.accept(fieldName);
     }
 
     @Override

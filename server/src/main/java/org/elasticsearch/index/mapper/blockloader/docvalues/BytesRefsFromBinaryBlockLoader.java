@@ -19,6 +19,7 @@ import org.elasticsearch.index.mapper.blockloader.ConstantNull;
 import org.elasticsearch.index.mapper.blockloader.docvalues.tracking.TrackingBinaryDocValues;
 
 import java.io.IOException;
+import java.util.function.Consumer;
 
 /**
  * This block loader should be used for fields that are directly encoded as binary values but are always single valued, such as the
@@ -27,9 +28,12 @@ import java.io.IOException;
  */
 public class BytesRefsFromBinaryBlockLoader extends BlockDocValuesReader.DocValuesBlockLoader {
     private final IOFunction<LeafReaderContext, BinaryDocValues> docValuesSupplier;
+    /** The field the doc values are read from, or null when they are composed from several sources. */
+    private final String fieldName;
 
     public BytesRefsFromBinaryBlockLoader(String fieldName) {
-        this(context -> context.reader().getBinaryDocValues(fieldName));
+        this.docValuesSupplier = context -> context.reader().getBinaryDocValues(fieldName);
+        this.fieldName = fieldName;
     }
 
     /**
@@ -39,6 +43,14 @@ public class BytesRefsFromBinaryBlockLoader extends BlockDocValuesReader.DocValu
      */
     public BytesRefsFromBinaryBlockLoader(IOFunction<LeafReaderContext, BinaryDocValues> docValuesSupplier) {
         this.docValuesSupplier = docValuesSupplier;
+        this.fieldName = null;
+    }
+
+    @Override
+    public void docValuesFields(Consumer<String> fields) {
+        if (fieldName != null) {
+            fields.accept(fieldName);
+        }
     }
 
     @Override

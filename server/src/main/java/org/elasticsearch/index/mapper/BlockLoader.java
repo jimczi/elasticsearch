@@ -33,6 +33,7 @@ import org.elasticsearch.search.lookup.Source;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * Loads values from a chunk of lucene documents into a "Block" for the compute engine.
@@ -172,6 +173,12 @@ import java.util.Map;
  * </p>
  */
 public interface BlockLoader {
+    /**
+     * Names the doc-values fields this loader reads for every document, so that a caller about to load a
+     * batch of documents can prefetch them. A loader that names none is loaded without prefetching.
+     */
+    default void docValuesFields(Consumer<String> fields) {}
+
     /**
      * @deprecated remove me once serverless migrates
      */

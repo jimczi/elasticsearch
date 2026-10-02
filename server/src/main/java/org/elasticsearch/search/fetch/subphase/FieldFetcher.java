@@ -12,6 +12,7 @@ package org.elasticsearch.search.fetch.subphase;
 import org.apache.lucene.index.LeafReaderContext;
 import org.elasticsearch.common.document.DocumentField;
 import org.elasticsearch.common.regex.Regex;
+import org.elasticsearch.index.mapper.DocValueFetcher;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.NestedValueFetcher;
 import org.elasticsearch.index.mapper.ValueFetcher;
@@ -29,6 +30,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * A helper class to {@link FetchFieldsPhase} that's initialized with a list of field patterns to fetch.
@@ -181,6 +183,15 @@ public class FieldFetcher {
         }
         unmappedFieldFetcher.collectUnmapped(documentFields, source);
         return documentFields;
+    }
+
+    /** Names the fields whose values are fetched from doc values. */
+    public void docValuesFields(Consumer<String> fields) {
+        for (FieldContext field : fieldContexts.values()) {
+            if (field.valueFetcher instanceof DocValueFetcher) {
+                fields.accept(field.fieldName);
+            }
+        }
     }
 
     public void setNextReader(LeafReaderContext readerContext) {

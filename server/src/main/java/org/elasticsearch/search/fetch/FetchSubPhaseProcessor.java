@@ -14,6 +14,7 @@ import org.elasticsearch.search.fetch.FetchSubPhase.HitContext;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * Executes the logic for a {@link FetchSubPhase} against a particular leaf reader and hit
@@ -24,6 +25,12 @@ public interface FetchSubPhaseProcessor {
      * Called when moving to the next {@link LeafReaderContext} for a set of hits
      */
     void setNextReader(LeafReaderContext readerContext) throws IOException;
+
+    /**
+     * Names the doc-values fields this processor reads for every hit, so that the fetch phase can prefetch
+     * them for all the hits before it reads the first.
+     */
+    default void docValuesFields(Consumer<String> fields) {}
 
     /**
      * Called in doc id order for each hit in a leaf reader

@@ -23,6 +23,7 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.concurrent.UncategorizedExecutionException;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Releasables;
+import org.elasticsearch.index.codec.DocValuesBatchPrefetcher;
 import org.elasticsearch.index.fieldvisitor.LeafStoredFieldLoader;
 import org.elasticsearch.index.fieldvisitor.StoredFieldLoader;
 import org.elasticsearch.index.mapper.IdLoader;
@@ -56,8 +57,10 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -391,10 +394,36 @@ public final class FetchPhase {
                 }
             }
 
+            /** Null unless doc values are prefetched; one for the fetch, shared by everything that reads doc values. */
+            DocValuesBatchPrefetcher prefetcher;
+            DocValuesBatchPrefetcher.Segment prefetchSegment;
+            int positionInSegment;
+
+            @Override
+            protected void announce(List<LeafReaderContext> leaves, List<int[]> docsInLeaves) throws IOException {
+                final int prefetchBudget = DocValuesBatchPrefetcher.budget;
+                if (prefetchBudget <= 0) {
+                    return;
+                }
+                prefetcher = new DocValuesBatchPrefetcher(prefetchBudget);
+                Set<String> subPhaseFields = new LinkedHashSet<>();
+                for (FetchSubPhaseProcessor processor : processors) {
+                    processor.docValuesFields(subPhaseFields::add);
+                }
+                for (int i = 0; i < leaves.size(); i++) {
+                    prefetcher.segment(leaves.get(i).reader(), docsInLeaves.get(i)).addFields(subPhaseFields);
+                }
+                sourceLoader.announce(prefetcher, leaves, docsInLeaves);
+            }
+
             @Override
             protected void setNextReader(LeafReaderContext ctx, int[] docsInLeaf) throws IOException {
                 Timer timer = profiler.startNextReader();
                 try {
+                    if (prefetcher != null) {
+                        prefetchSegment = prefetcher.segment(ctx.reader(), docsInLeaf);
+                        positionInSegment = 0;
+                    }
                     this.ctx = ctx;
                     this.leafNestedDocuments = nestedDocuments.getLeafNestedDocuments(ctx);
                     this.leafStoredFieldLoader = storedFieldLoader.getLoader(ctx, docsInLeaf);
@@ -416,6 +445,9 @@ public final class FetchPhase {
             protected SearchHit nextDoc(int doc) throws IOException {
                 if (context.isCancelled()) {
                     throw new TaskCancelledException("cancelled");
+                }
+                if (prefetcher != null) {
+                    prefetcher.cover(prefetchSegment, positionInSegment++);
                 }
 
                 HitContext hit = prepareHitContext(

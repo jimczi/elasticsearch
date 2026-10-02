@@ -22,6 +22,7 @@ import org.elasticsearch.search.fetch.StoredFieldsSpec;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * Fetch sub phase which pulls data from doc values.
@@ -52,7 +53,7 @@ public final class FetchDocValuesPhase implements FetchSubPhase {
                 ft.docValueFormat(fieldAndFormat.format, null),
                 searchExecutionContext.getForField(ft, MappedFieldType.FielddataOperation.SEARCH)
             );
-            fields.add(new DocValueField(fieldAndFormat.field, fetcher));
+            fields.add(new DocValueField(fieldAndFormat.field, ft.name(), fetcher));
         }
 
         return new FetchSubPhaseProcessor() {
@@ -60,6 +61,13 @@ public final class FetchDocValuesPhase implements FetchSubPhase {
             public void setNextReader(LeafReaderContext readerContext) {
                 for (DocValueField f : fields) {
                     f.fetcher.setNextReader(readerContext);
+                }
+            }
+
+            @Override
+            public void docValuesFields(Consumer<String> names) {
+                for (DocValueField f : fields) {
+                    names.accept(f.docValuesField);
                 }
             }
 
@@ -89,10 +97,12 @@ public final class FetchDocValuesPhase implements FetchSubPhase {
 
     private static class DocValueField {
         private final String field;
+        private final String docValuesField;
         private final ValueFetcher fetcher;
 
-        DocValueField(String field, ValueFetcher fetcher) {
+        DocValueField(String field, String docValuesField, ValueFetcher fetcher) {
             this.field = field;
+            this.docValuesField = docValuesField;
             this.fetcher = fetcher;
         }
     }

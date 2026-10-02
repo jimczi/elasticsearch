@@ -33,6 +33,7 @@ import org.elasticsearch.xcontent.json.JsonXContent;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -55,6 +56,15 @@ public interface SourceLoader {
      * Build the loader for some segment.
      */
     Leaf leaf(LeafReaderContext ctx, int[] docIdsInLeaf) throws IOException;
+
+    /**
+     * Announces every document the caller is about to load, before it asks for the first {@link #leaf}:
+     * the segments in the order they will be read, and for each the documents to read from it. A loader
+     * that reads from doc values adds the columns it reads to {@code prefetcher}, which the caller owns
+     * and may share with whatever else reads those documents. Calling it is optional.
+     */
+    default void announce(DocValuesBatchPrefetcher prefetcher, List<LeafReaderContext> leaves, List<int[]> docIdsInLeaves)
+        throws IOException {}
 
     /**
      * Stream containing all non-{@code _source} stored fields required
@@ -131,6 +141,12 @@ public interface SourceLoader {
         private final Set<String> requiredStoredFields;
         private final SourceFieldMetrics metrics;
         private final IgnoredSourceFieldMapper.IgnoredSourceFormat ignoredSourceFormat;
+        /** The segments announced to this loader and what was opened for each; null until something is announced. */
+        private DocValuesBatchPrefetcher prefetcher;
+        private final Map<LeafReaderContext, AnnouncedLeaf> announced = new IdentityHashMap<>();
+
+        /** What {@link #announce} prepared for a segment: its field loader and its place in the prefetcher. */
+        private record AnnouncedLeaf(SyntheticFieldLoader loader, DocValuesBatchPrefetcher.Segment segment) {}
 
         /**
          * Creates a {@link SourceLoader} to reconstruct {@code _source} from doc values anf stored fields.
@@ -165,17 +181,38 @@ public interface SourceLoader {
         }
 
         @Override
-        public Leaf leaf(LeafReaderContext ctx, int[] docIdsInLeaf) throws IOException {
-            SyntheticFieldLoader loader = syntheticFieldLoaderLeafSupplier.get();
-            final int prefetchBudget = DocValuesBatchPrefetcher.budget;
-            final SyntheticLeaf leaf;
-            if (prefetchBudget > 0 && docIdsInLeaf != null) {
-                // Ask the loader which columns it reads, without reading any, then load a window at a time.
+        public void announce(DocValuesBatchPrefetcher prefetcher, List<LeafReaderContext> leaves, List<int[]> docIdsInLeaves)
+            throws IOException {
+            this.prefetcher = prefetcher;
+            announced.clear();
+            for (int i = 0; i < leaves.size(); i++) {
+                LeafReaderContext ctx = leaves.get(i);
+                // Ask the loader which columns it reads, without reading any.
+                SyntheticFieldLoader loader = syntheticFieldLoaderLeafSupplier.get();
                 var recording = new DocValuesFieldRecorder(ctx.reader());
                 loader.docValuesLoader(recording, null);
-                var prefetcher = DocValuesBatchPrefetcher.open(ctx.reader(), recording.fields, prefetchBudget);
-                leaf = new SyntheticLeaf(filter, loader, null, ignoredSourceFormat, ctx.reader(), prefetcher, docIdsInLeaf);
+                DocValuesBatchPrefetcher.Segment segment = prefetcher.segment(ctx.reader(), docIdsInLeaves.get(i));
+                segment.addFields(recording.fields);
+                announced.put(ctx, new AnnouncedLeaf(loader, segment));
+            }
+        }
+
+        @Override
+        public Leaf leaf(LeafReaderContext ctx, int[] docIdsInLeaf) throws IOException {
+            final int prefetchBudget = DocValuesBatchPrefetcher.budget;
+            if (prefetchBudget > 0 && docIdsInLeaf != null) {
+                AnnouncedLeaf known = announced.get(ctx);
+                if (known == null || Arrays.equals(known.segment().docs(), docIdsInLeaf) == false) {
+                    // Nothing announced this read: the segment is prefetched on its own.
+                    announce(new DocValuesBatchPrefetcher(prefetchBudget), List.of(ctx), List.of(docIdsInLeaf));
+                }
+            }
+            final AnnouncedLeaf known = docIdsInLeaf == null ? null : announced.get(ctx);
+            final SyntheticLeaf leaf;
+            if (known != null) {
+                leaf = new SyntheticLeaf(filter, known.loader(), null, ignoredSourceFormat, ctx.reader(), prefetcher, known.segment());
             } else {
+                SyntheticFieldLoader loader = syntheticFieldLoaderLeafSupplier.get();
                 leaf = new SyntheticLeaf(
                     filter,
                     loader,
@@ -225,6 +262,7 @@ public interface SourceLoader {
             private final LeafReader leafReader;
             /** Null unless the leaf loads its doc values a prefetched window at a time. */
             private final DocValuesBatchPrefetcher prefetcher;
+            private final DocValuesBatchPrefetcher.Segment segment;
             private final int[] docIdsInLeaf;
             /** One past the last position of {@link #docIdsInLeaf} that the current window covers. */
             private int windowEnd = 0;
@@ -239,14 +277,15 @@ public interface SourceLoader {
                 IgnoredSourceFieldMapper.IgnoredSourceFormat ignoredSourceFormat,
                 LeafReader leafReader,
                 @Nullable DocValuesBatchPrefetcher prefetcher,
-                @Nullable int[] docIdsInLeaf
+                @Nullable DocValuesBatchPrefetcher.Segment segment
             ) throws IOException {
                 this.filter = filter;
                 this.loader = loader;
                 this.docValuesLoader = docValuesLoader;
                 this.leafReader = leafReader;
                 this.prefetcher = prefetcher;
-                this.docIdsInLeaf = docIdsInLeaf;
+                this.segment = segment;
+                this.docIdsInLeaf = segment == null ? null : segment.docs();
                 this.storedFieldLoaders = Map.copyOf(
                     loader.storedFieldLoaders().collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue))
                 );
@@ -306,8 +345,9 @@ public interface SourceLoader {
             }
 
             /**
-             * Opens the window that holds {@code docId} if the current one ends before it: prefetches the
-             * window across every column, then builds the doc-values loader for just those documents.
+             * Moves to the documents that hold {@code docId} if the current ones end before it: makes sure a
+             * window has prefetched them, across every column and on into the next segments, then builds the
+             * doc-values loader for the part of that window that is in this segment.
              */
             private void moveWindowTo(int docId) throws IOException {
                 if (windowEnd > 0 && docId <= docIdsInLeaf[windowEnd - 1]) {
@@ -320,8 +360,7 @@ public interface SourceLoader {
                 if (from == docIdsInLeaf.length || docIdsInLeaf[from] != docId) {
                     throw new IllegalArgumentException("doc [" + docId + "] is not one of the documents this leaf was opened for");
                 }
-                int to = Math.min(docIdsInLeaf.length, from + prefetcher.windowDocs());
-                prefetcher.prefetch(docIdsInLeaf, from, to);
+                int to = prefetcher.cover(segment, from);
                 docValuesLoader = loader.docValuesLoader(leafReader, Arrays.copyOfRange(docIdsInLeaf, from, to));
                 windowEnd = to;
             }
@@ -563,6 +602,12 @@ public interface SourceLoader {
         @Override
         public Set<String> requiredStoredFields() {
             return sourceLoader.requiredStoredFields();
+        }
+
+        @Override
+        public void announce(DocValuesBatchPrefetcher prefetcher, List<LeafReaderContext> leaves, List<int[]> docIdsInLeaves)
+            throws IOException {
+            sourceLoader.announce(prefetcher, leaves, docIdsInLeaves);
         }
 
         @Override

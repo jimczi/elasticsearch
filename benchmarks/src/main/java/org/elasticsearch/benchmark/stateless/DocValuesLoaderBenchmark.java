@@ -17,6 +17,7 @@ import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.NoMergePolicy;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.SortField;
@@ -38,8 +39,10 @@ import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Setup;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Random;
 
 /**
@@ -116,6 +119,17 @@ public class DocValuesLoaderBenchmark extends AbstractStatelessQueryBenchmark {
     @Param({ "0" })
     public int prefetchBudget;
 
+    /** How many segments the index is left with; documents are spread evenly and the batch is drawn across all of them. */
+    @Param({ "1" })
+    public int segments;
+
+    /**
+     * Whether the whole batch is announced before the first segment is read, so that a prefetch window
+     * spans segments, or each segment is prefetched on its own as it is opened.
+     */
+    @Param({ "true" })
+    public boolean acrossSegments;
+
     /** Cache range and region size, to scale the columns against the unit a download fetches; empty keeps the default. */
     @Param({ "" })
     public String rangeSize;
@@ -149,6 +163,11 @@ public class DocValuesLoaderBenchmark extends AbstractStatelessQueryBenchmark {
             }
         });
         iwc.setUseCompoundFile(false);
+        if (segments > 1) {
+            iwc.setMergePolicy(NoMergePolicy.INSTANCE);
+            iwc.setMaxBufferedDocs(IndexWriterConfig.DISABLE_AUTO_FLUSH);
+            iwc.setRAMBufferSizeMB(2000);
+        }
         iwc.setIndexSort(new Sort(new SortedNumericSortField(TIMESTAMP_FIELD, SortField.Type.LONG, true)));
         return iwc;
     }
@@ -170,7 +189,8 @@ public class DocValuesLoaderBenchmark extends AbstractStatelessQueryBenchmark {
             + "-d"
             + numDocs
             + "-s"
-            + sparsity;
+            + sparsity
+            + (segments > 1 ? "-seg" + segments : "");
     }
 
     @Override
@@ -209,8 +229,13 @@ public class DocValuesLoaderBenchmark extends AbstractStatelessQueryBenchmark {
             }
 
             writer.addDocument(doc);
+            if (segments > 1 && (i + 1) % (numDocs / segments) == 0) {
+                writer.flush();
+            }
         }
-        writer.forceMerge(1);
+        if (segments == 1) {
+            writer.forceMerge(1);
+        }
     }
 
     @Override
@@ -230,14 +255,34 @@ public class DocValuesLoaderBenchmark extends AbstractStatelessQueryBenchmark {
 
     @Override
     protected Object runQuery(IndexSearcher searcher) throws IOException {
-        LeafReaderContext ctx = searcher.getIndexReader().leaves().get(0);
-        SourceLoader.Leaf leaf = sourceLoader.leaf(ctx, docIdBatch);
-        var storedFieldLoader = StoredFieldLoader.empty().getLoader(ctx, null);
-
+        List<LeafReaderContext> leaves = new ArrayList<>();
+        List<int[]> docsInLeaves = new ArrayList<>();
+        for (LeafReaderContext ctx : searcher.getIndexReader().leaves()) {
+            int from = Arrays.binarySearch(docIdBatch, ctx.docBase);
+            from = from < 0 ? -1 - from : from;
+            int to = Arrays.binarySearch(docIdBatch, ctx.docBase + ctx.reader().maxDoc());
+            to = to < 0 ? -1 - to : to;
+            if (from < to) {
+                int[] docs = new int[to - from];
+                for (int i = from; i < to; i++) {
+                    docs[i - from] = docIdBatch[i] - ctx.docBase;
+                }
+                leaves.add(ctx);
+                docsInLeaves.add(docs);
+            }
+        }
+        if (prefetchBudget > 0 && acrossSegments) {
+            sourceLoader.announce(new DocValuesBatchPrefetcher(prefetchBudget), leaves, docsInLeaves);
+        }
         int hash = 0;
-        for (int docId : docIdBatch) {
-            storedFieldLoader.advanceTo(docId);
-            hash = 31 * hash + leaf.source(storedFieldLoader, docId).internalSourceRef().hashCode();
+        for (int l = 0; l < leaves.size(); l++) {
+            LeafReaderContext ctx = leaves.get(l);
+            SourceLoader.Leaf leaf = sourceLoader.leaf(ctx, docsInLeaves.get(l));
+            var storedFieldLoader = StoredFieldLoader.empty().getLoader(ctx, null);
+            for (int docId : docsInLeaves.get(l)) {
+                storedFieldLoader.advanceTo(docId);
+                hash = 31 * hash + leaf.source(storedFieldLoader, docId).internalSourceRef().hashCode();
+            }
         }
         return hash;
     }

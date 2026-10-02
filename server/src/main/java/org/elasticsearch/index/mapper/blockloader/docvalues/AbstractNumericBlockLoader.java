@@ -23,6 +23,7 @@ import org.elasticsearch.index.mapper.blockloader.docvalues.tracking.TrackingSor
 import org.elasticsearch.index.mapper.blockloader.docvalues.tracking.TrackingSortedNumericDocValues;
 
 import java.io.IOException;
+import java.util.function.Consumer;
 
 /**
  * Shared base for the numeric-family block loaders.
@@ -50,6 +51,11 @@ public abstract class AbstractNumericBlockLoader extends BlockDocValuesReader.Do
         this.fieldName = fieldName;
         this.readerName = readerName;
         this.readInArrayOrder = readInArrayOrder;
+    }
+
+    @Override
+    public void docValuesFields(Consumer<String> fields) {
+        fields.accept(fieldName);
     }
 
     @Override

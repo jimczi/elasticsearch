@@ -23,7 +23,9 @@ import org.elasticsearch.search.query.QuerySearchResult;
 import org.elasticsearch.search.query.SearchTimeoutException;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -79,6 +81,13 @@ abstract class FetchPhaseDocsIterator {
     protected abstract void setNextReader(LeafReaderContext ctx, int[] docsInLeaf) throws IOException;
 
     /**
+     * Called once before the first {@link #setNextReader}, with every segment that holds a document to
+     * fetch, in the order they will be read, and the documents to fetch from each. An implementation that
+     * can prepare its reads across segments does it here.
+     */
+    protected void announce(List<LeafReaderContext> leaves, List<int[]> docsInLeaves) throws IOException {}
+
+    /**
      * Called for each document within a leaf reader.
      *
      * @param doc the global doc id
@@ -131,6 +140,17 @@ abstract class FetchPhaseDocsIterator {
             if (docs.length == 0) {
                 return new IterateResult(searchHits);
             }
+
+            List<LeafReaderContext> leaves = new ArrayList<>();
+            List<int[]> docsInLeaves = new ArrayList<>();
+            for (int i = 0; i < docs.length;) {
+                LeafReaderContext leaf = indexReader.leaves().get(ReaderUtil.subIndex(docs[i].docId, indexReader.leaves()));
+                int end = endReaderIdx(leaf, i, docs);
+                leaves.add(leaf);
+                docsInLeaves.add(docIdsInLeaf(i, end, docs, leaf.docBase));
+                i = end;
+            }
+            announce(leaves, docsInLeaves);
 
             int leafOrd = ReaderUtil.subIndex(docs[0].docId, indexReader.leaves());
             LeafReaderContext ctx = indexReader.leaves().get(leafOrd);

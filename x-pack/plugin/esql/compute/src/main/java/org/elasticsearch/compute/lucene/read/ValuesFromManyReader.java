@@ -10,10 +10,15 @@ package org.elasticsearch.compute.lucene.read;
 import org.apache.lucene.index.LeafReaderContext;
 import org.elasticsearch.compute.data.Block;
 import org.elasticsearch.compute.data.DocVector;
+import org.elasticsearch.index.codec.DocValuesBatchPrefetcher;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 
 /**
  * Loads values from a many leaves. Much less efficient than {@link ValuesFromSingleReader}.
@@ -125,8 +130,53 @@ class ValuesFromManyReader extends ValuesReader {
          * General path that iterates in forwards (shard/segment/doc sorted) order, handling
          * multiple shards/segments and column-at-a-time readers. Always loads the full page.
          */
+        /** Null unless doc values are prefetched; holds every segment of the page, in the order they are read. */
+        private DocValuesBatchPrefetcher prefetcher;
+        private final List<DocValuesBatchPrefetcher.Segment> prefetchSegments = new ArrayList<>();
+        private int nextPrefetchSegment = 0;
+
+        /**
+         * Announces the whole page to a prefetcher: every segment in the order it is read, the documents
+         * read from it, and the doc-values fields the loaders of its shard read. A window then spans segments.
+         */
+        private void announce(int offset) throws IOException {
+            final int budget = DocValuesBatchPrefetcher.budget;
+            if (budget <= 0) {
+                return;
+            }
+            prefetcher = new DocValuesBatchPrefetcher(budget);
+            int fieldsShard = -1;
+            Set<String> fields = new LinkedHashSet<>();
+            for (int start = offset; start < forwards.length;) {
+                int shard = docs.shards().getInt(forwards[start]);
+                int segment = docs.segments().getInt(forwards[start]);
+                int end = start + 1;
+                while (end < forwards.length
+                    && docs.shards().getInt(forwards[end]) == shard
+                    && docs.segments().getInt(forwards[end]) == segment) {
+                    end++;
+                }
+                int[] docIds = new int[end - start];
+                for (int i = start; i < end; i++) {
+                    docIds[i - start] = docs.docs().getInt(forwards[i]);
+                }
+                if (shard != fieldsShard) {
+                    fieldsShard = shard;
+                    fields.clear();
+                    for (ValuesSourceReaderOperator.FieldWork field : operator.fields) {
+                        field.loaderOn(shard).docValuesFields(fields::add);
+                    }
+                }
+                DocValuesBatchPrefetcher.Segment prefetchSegment = prefetcher.segment(operator.ctx(shard, segment).reader(), docIds);
+                prefetchSegment.addFields(fields);
+                prefetchSegments.add(prefetchSegment);
+                start = end;
+            }
+        }
+
         private void loadForwardSequence(int offset) throws IOException {
             assert offset == 0; // TODO allow non-0 offset to support splitting pages
+            announce(offset);
             int p = forwards[offset];
             int shard = docs.shards().getInt(p);
             int segment = docs.segments().getInt(p);
@@ -192,6 +242,12 @@ class ValuesFromManyReader extends ValuesReader {
         }
 
         private void readColumnAtATime(int segmentStart, int segmentEnd) throws IOException {
+            if (prefetcher != null) {
+                DocValuesBatchPrefetcher.Segment prefetchSegment = prefetchSegments.get(nextPrefetchSegment++);
+                for (int covered = 0; covered < prefetchSegment.docs().length;) {
+                    covered = prefetcher.cover(prefetchSegment, covered);
+                }
+            }
             ValuesReaderDocs readerDocs = new ValuesReaderDocs(docs).mapped(forwards, segmentStart, segmentEnd);
             readerDocs.setCount(segmentEnd);
             for (CurrentWork c : columnAtATime) {

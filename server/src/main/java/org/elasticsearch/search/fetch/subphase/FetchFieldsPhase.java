@@ -32,6 +32,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * A fetch sub-phase for high-level field retrieval. Given a list of fields, it
@@ -165,6 +166,14 @@ public final class FetchFieldsPhase implements FetchSubPhase {
                     fieldFetcher.setNextReader(readerContext);
                 }
                 metadataFieldFetcher.setNextReader(readerContext);
+            }
+
+            @Override
+            public void docValuesFields(Consumer<String> fields) {
+                if (fieldFetcher != null) {
+                    fieldFetcher.docValuesFields(fields);
+                }
+                metadataFieldFetcher.docValuesFields(fields);
             }
 
             @Override

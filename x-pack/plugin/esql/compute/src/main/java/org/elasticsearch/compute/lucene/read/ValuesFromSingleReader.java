@@ -13,6 +13,7 @@ import org.elasticsearch.compute.data.DocVector;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.Releasables;
+import org.elasticsearch.index.codec.DocValuesBatchPrefetcher;
 import org.elasticsearch.index.fieldvisitor.StoredFieldLoader;
 import org.elasticsearch.index.mapper.BlockLoader;
 import org.elasticsearch.index.mapper.BlockLoaderStoredFieldsFromLeafLoader;
@@ -23,7 +24,9 @@ import org.elasticsearch.search.fetch.StoredFieldsSpec;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Loads values from a single shard. Much more efficient than {@link ValuesFromManyReader}.
@@ -126,7 +129,7 @@ class ValuesFromSingleReader extends ValuesReader {
     @Override
     protected void load(Block[] target, int offset) throws IOException {
         if (docs.singleSegmentNonDecreasing()) {
-            loadFromSingleLeaf(operator.jumboBytes, target, new ValuesReaderDocs(docs), offset);
+            loadFromSingleLeaf(operator.jumboBytes, target, new ValuesReaderDocs(docs), offset, true);
             return;
         }
         if (offset != 0) {
@@ -139,7 +142,8 @@ class ValuesFromSingleReader extends ValuesReader {
                 Long.MAX_VALUE, // Effectively disable splitting pages when we're not loading in order
                 unshuffled,
                 new ValuesReaderDocs(docs).mapped(forwards, 0, docs.getPositionCount()),
-                0
+                0,
+                false
             );
             final int[] backwards = docs.shardSegmentDocMapBackwards();
             for (int i = 0; i < unshuffled.length; i++) {
@@ -152,7 +156,8 @@ class ValuesFromSingleReader extends ValuesReader {
         }
     }
 
-    private void loadFromSingleLeaf(long jumboBytes, Block[] target, ValuesReaderDocs docs, int offset) throws IOException {
+    private void loadFromSingleLeaf(long jumboBytes, Block[] target, ValuesReaderDocs docs, int offset, boolean mayLoadPartially)
+        throws IOException {
         int firstDoc = docs.get(offset);
         operator.positionFieldWork(shard, segment, firstDoc);
         StoredFieldsSpec storedFieldsSpec = StoredFieldsSpec.NO_REQUIREMENTS;
@@ -183,6 +188,7 @@ class ValuesFromSingleReader extends ValuesReader {
             if (rowStrideReaders.isEmpty() == false) {
                 loadFromRowStrideReaders(jumboBytes, target, storedFieldsSpec, rowStrideReaders, ctx, docs, offset);
             }
+            prefetch(ctx, columnAtATimeReaders, docs, offset, mayLoadPartially);
             for (ColumnAtATimeWork r : columnAtATimeReaders) {
                 target[r.idx] = r.convert(
                     (Block) r.reader.read(loaderBlockFactory, docs, offset, operator.fields[r.idx].info.nullsFiltered())
@@ -198,6 +204,46 @@ class ValuesFromSingleReader extends ValuesReader {
             }
         } finally {
             Releasables.close(rowStrideReaders);
+        }
+    }
+
+    /**
+     * Prefetches the documents about to be read across every column read from doc values. One window is
+     * prefetched and, when the page may be loaded in parts, only that window is read now; otherwise every
+     * window is prefetched before the page is read.
+     */
+    private void prefetch(
+        LeafReaderContext ctx,
+        List<ColumnAtATimeWork> columnAtATimeReaders,
+        ValuesReaderDocs docs,
+        int offset,
+        boolean mayLoadPartially
+    ) throws IOException {
+        final int budget = DocValuesBatchPrefetcher.budget;
+        if (budget <= 0 || columnAtATimeReaders.isEmpty() || docs.count() <= offset) {
+            return;
+        }
+        Set<String> fields = new LinkedHashSet<>();
+        for (ColumnAtATimeWork r : columnAtATimeReaders) {
+            operator.fields[r.idx].loader.docValuesFields(fields::add);
+        }
+        if (fields.isEmpty()) {
+            return;
+        }
+        int[] docIds = new int[docs.count() - offset];
+        for (int i = 0; i < docIds.length; i++) {
+            docIds[i] = docs.get(offset + i);
+        }
+        DocValuesBatchPrefetcher prefetcher = new DocValuesBatchPrefetcher(budget);
+        DocValuesBatchPrefetcher.Segment segment = prefetcher.segment(ctx.reader(), docIds);
+        segment.addFields(fields);
+        int covered = prefetcher.cover(segment, 0);
+        if (mayLoadPartially) {
+            docs.setCount(offset + covered);
+        } else {
+            while (covered < docIds.length) {
+                covered = prefetcher.cover(segment, covered);
+            }
         }
     }
 

@@ -586,6 +586,11 @@ public class ValuesSourceReaderOperator extends AbstractPageMappingToIteratorOpe
             sameShardNewSegment();
         }
 
+        /** The loader this field uses on {@code shard}, without moving the field to it. */
+        BlockLoader loaderOn(int shard) {
+            return info.buildLoader.build(driverContext, shard).loader();
+        }
+
         BlockLoader.ColumnAtATimeReader columnAtATime(LeafReaderContext ctx) throws IOException {
             if (columnAtATime == null) {
                 IOFunction<CircuitBreaker, BlockLoader.ColumnAtATimeReader> fn = loader.columnAtATimeReader(ctx);
