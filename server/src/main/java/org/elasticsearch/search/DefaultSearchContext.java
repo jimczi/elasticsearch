@@ -34,6 +34,7 @@ import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.IndexService;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.SliceIndexing;
+import org.elasticsearch.index.SliceTermsVerifier;
 import org.elasticsearch.index.cache.bitset.BitsetFilterCache;
 import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.fielddata.FieldDataContext;
@@ -208,9 +209,17 @@ final class DefaultSearchContext extends SearchContext {
                 field -> getFieldCardinality(field, readerContext.indexService(), engineSearcher.getDirectoryReader())
             );
             boolean searcherRequiresExecutor = executor != null && maximumNumberOfSlices > 1;
+            // On a slice index the terms carry the slice, and field types put it there (see SliceTermQueries). When
+            // assertions are on, a reader that fails anything reaching the dictionary without it is interposed, so the
+            // test suite reports a query built around a field type instead of silently matching nothing.
+            final IndexReader reader = SliceTermsVerifier.verifying(
+                engineSearcher.getDirectoryReader(),
+                indexShard.indexSettings(),
+                request.sliceRouting()
+            );
             if (searcherRequiresExecutor == false) {
                 this.searcher = new ContextIndexSearcher(
-                    engineSearcher.getIndexReader(),
+                    reader,
                     engineSearcher.getSimilarity(),
                     engineSearcher.getQueryCache(),
                     engineSearcher.getQueryCachingPolicy(),
@@ -222,7 +231,7 @@ final class DefaultSearchContext extends SearchContext {
                 executor = this.metricsAwareExecutor;
 
                 this.searcher = new ContextIndexSearcher(
-                    engineSearcher.getIndexReader(),
+                    reader,
                     engineSearcher.getSimilarity(),
                     engineSearcher.getQueryCache(),
                     engineSearcher.getQueryCachingPolicy(),
