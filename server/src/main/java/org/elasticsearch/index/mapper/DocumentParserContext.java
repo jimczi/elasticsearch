@@ -1077,6 +1077,29 @@ public abstract class DocumentParserContext {
         return currentScope == Scope.ARRAY;
     }
 
+    /**
+     * The root {@link LuceneDocument} of a parse. On a slice index the terms of its fields carry the slice they belong to, so
+     * that a slice's postings are contiguous on disk; see {@link SliceTermPrefix}.
+     */
+    static LuceneDocument newRootDocument(IndexSettings indexSettings, SourceToParse source) {
+        if (indexSettings.isSliceEnabled() == false || SliceIndexing.SLICE_FEATURE_FLAG.isEnabled() == false) {
+            return new LuceneDocument();
+        }
+        final String slice = source.routing();
+        if (slice == null) {
+            throw new IllegalArgumentException(
+                "["
+                    + SliceIndexing.PARAM_NAME
+                    + "] is required when ["
+                    + IndexSettings.SLICE_ENABLED.getKey()
+                    + "] is true for index ["
+                    + indexSettings.getIndex().getName()
+                    + "]"
+            );
+        }
+        return new LuceneDocument(new SliceTermPrefix(slice));
+    }
+
     public final DocumentParserContext createChildContext(ObjectMapper parent) {
         return new Wrapper(parent, this);
     }
