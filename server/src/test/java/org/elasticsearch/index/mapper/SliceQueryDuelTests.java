@@ -99,12 +99,25 @@ public class SliceQueryDuelTests extends MapperServiceTestCase {
         return names;
     }
 
+    /** The same query over several slices at once, against a plain index holding exactly those slices. */
+    private void duelAcross(String description, List<String> slices, CheckedFunction<SearchExecutionContext, Query, IOException> query)
+        throws IOException {
+        final List<String> sliced = searchSliced(String.join(",", slices), query);
+        final List<String> plain = searchPlain(slices, query);
+        assertThat(description + " across " + slices, sliced, equalTo(plain));
+    }
+
     private List<String> searchPlain(String slice, CheckedFunction<SearchExecutionContext, Query, IOException> query) throws IOException {
+        return searchPlain(List.of(slice), query);
+    }
+
+    private List<String> searchPlain(List<String> slices, CheckedFunction<SearchExecutionContext, Query, IOException> query)
+        throws IOException {
         final MapperService mapperService = mapperService(false);
         final List<String> names = new ArrayList<>();
         withLuceneIndex(mapperService, writer -> {
             for (var entry : CORPUS.entrySet()) {
-                if (entry.getValue()[0].equals(slice)) {
+                if (slices.contains(entry.getValue()[0])) {
                     writer.addDocument(parse(mapperService, entry).rootDoc());
                 }
             }
@@ -212,6 +225,48 @@ public class SliceQueryDuelTests extends MapperServiceTestCase {
 
     private static Query intervalQuery(org.apache.lucene.queries.intervals.IntervalsSource source) {
         return new org.apache.lucene.queries.intervals.IntervalQuery("body", source);
+    }
+
+    public void testSeveralSlicesAtOnce() throws IOException {
+        final List<String> two = List.of("tenant-a", "tenant-b");
+        duelAcross("term", two, context -> context.getFieldType("kw").termQuery("alpha", context));
+        duelAcross("terms", two, context -> context.getFieldType("kw").termsQuery(List.of("alpha", "beta"), context));
+        duelAcross("prefix", two, context -> context.getFieldType("kw").prefixQuery("al", null, context));
+        duelAcross("wildcard", two, context -> context.getFieldType("kw").wildcardQuery("*et*", null, context));
+        duelAcross("regexp", two, context -> context.getFieldType("kw").regexpQuery("a.pha", 0, 0, 10000, null, context));
+        duelAcross("range", two, context -> context.getFieldType("kw").rangeQuery("a", "c", true, true, null, null, null, context));
+        duelAcross("range open", two, context -> context.getFieldType("kw").rangeQuery("a", null, true, true, null, null, null, context));
+        duelAcross(
+            "fuzzy",
+            two,
+            context -> context.getFieldType("kw")
+                .fuzzyQuery("alpho", org.elasticsearch.common.unit.Fuzziness.ONE, 0, 50, true, context, null)
+        );
+        duelAcross("term ci", two, context -> context.getFieldType("kw").termQueryCaseInsensitive("ALPHA", context));
+        duelAcross("text term", two, context -> context.getFieldType("body").termQuery("brown", context));
+    }
+
+    public void testSeveralSlicesAtOnceForIntervals() throws IOException {
+        final List<String> two = List.of("tenant-a", "tenant-c");
+        duelAcross("term intervals", two, context -> intervalQuery(body(context).termIntervals(new BytesRef("brown"), context)));
+        duelAcross("prefix intervals", two, context -> intervalQuery(body(context).prefixIntervals(new BytesRef("br"), context)));
+        duelAcross("wildcard intervals", two, context -> intervalQuery(body(context).wildcardIntervals(new BytesRef("bro*"), context)));
+        duelAcross("fuzzy intervals", two, context -> intervalQuery(body(context).fuzzyIntervals("brwon", 1, 0, true, context)));
+        duelAcross(
+            "range intervals",
+            two,
+            context -> intervalQuery(body(context).rangeIntervals(new BytesRef("b"), new BytesRef("d"), true, true, context))
+        );
+        duelAcross(
+            "phrase intervals",
+            two,
+            context -> intervalQuery(
+                org.apache.lucene.queries.intervals.Intervals.ordered(
+                    body(context).termIntervals(new BytesRef("quick"), context),
+                    body(context).termIntervals(new BytesRef("brown"), context)
+                )
+            )
+        );
     }
 
     public void testTermIntervals() throws IOException {
