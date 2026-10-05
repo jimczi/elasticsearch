@@ -9,12 +9,14 @@
 
 package org.elasticsearch.index;
 
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.TransportVersion;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.util.FeatureFlag;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.rest.RestRequest;
 
+import java.nio.charset.StandardCharsets;
 import java.util.regex.Pattern;
 
 /**
@@ -81,6 +83,65 @@ public final class SliceIndexing {
     @Nullable
     public static String sliceToRouting(String slice) {
         return SLICE_ALL.equals(slice) ? null : slice;
+    }
+
+    /**
+     * Separator between a slice value and the term it prefixes in the inverted index. Chosen outside
+     * {@link #VALID_SLICE_VALUE_PATTERN}, so the first occurrence always ends the slice value even when the term itself
+     * contains one.
+     */
+    public static final byte SLICE_TERM_SEPARATOR = '|';
+
+    /**
+     * Whether the terms of {@code fieldName} carry a slice prefix. The index and the query side both go through here, so a
+     * field this returns {@code false} for keeps its terms interleaved across slices but stays correct. Names starting with
+     * {@code _} are left out: the engine looks those up without a slice, for instance {@code _id} on a get or an update.
+     */
+    public static boolean prefixesTerms(String fieldName) {
+        return fieldName.isEmpty() == false && fieldName.charAt(0) != '_';
+    }
+
+    /**
+     * Returns the bytes every indexed term of {@code slice} starts with, that is the slice value followed by
+     * {@link #SLICE_TERM_SEPARATOR}.
+     */
+    public static byte[] termPrefix(String slice) {
+        final byte[] value = slice.getBytes(StandardCharsets.UTF_8);
+        final byte[] prefix = new byte[value.length + 1];
+        System.arraycopy(value, 0, prefix, 0, value.length);
+        prefix[value.length] = SLICE_TERM_SEPARATOR;
+        return prefix;
+    }
+
+    /**
+     * Prefixes an indexed term with the slice it belongs to, so that a slice's terms sort together and its postings are
+     * contiguous. Applies to indexed terms only: doc values, points and stored values keep the plain value.
+     */
+    public static BytesRef prefixTerm(byte[] termPrefix, BytesRef term) {
+        final byte[] out = new byte[termPrefix.length + term.length];
+        System.arraycopy(termPrefix, 0, out, 0, termPrefix.length);
+        System.arraycopy(term.bytes, term.offset, out, termPrefix.length, term.length);
+        return new BytesRef(out, 0, out.length);
+    }
+
+    /**
+     * Prefixes a term for a slice given by name; see {@link #prefixTerm(byte[], BytesRef)}.
+     */
+    public static BytesRef prefixTerm(String slice, BytesRef term) {
+        return prefixTerm(termPrefix(slice), term);
+    }
+
+    /**
+     * Removes the slice prefix written by {@link #prefixTerm}, for the paths that hand a term back to the user such as
+     * highlighting and term vectors. Returns the term unchanged when it carries no separator.
+     */
+    public static BytesRef stripTermPrefix(BytesRef term) {
+        for (int i = 0; i < term.length; i++) {
+            if (term.bytes[term.offset + i] == SLICE_TERM_SEPARATOR) {
+                return new BytesRef(term.bytes, term.offset + i + 1, term.length - i - 1);
+            }
+        }
+        return term;
     }
 
     /**
