@@ -106,6 +106,10 @@ public class TermVectorsService {
             else if (docIdAndVersion != null) {
                 // fields with stored term vectors
                 termVectorsByField = docIdAndVersion.reader.termVectors().get(docIdAndVersion.docId);
+                if (indexShard.indexSettings().isSliceEnabled()) {
+                    // What was indexed carries the slice; what the user asked for does not.
+                    termVectorsByField = org.elasticsearch.index.SliceTermVectors.withoutSlice(termVectorsByField);
+                }
                 Set<String> selectedFields = request.selectedFields();
                 // generate tvs for fields where analyzer is overridden
                 if (selectedFields == null && request.perFieldAnalyzer() != null) {
