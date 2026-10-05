@@ -12,6 +12,7 @@ package org.elasticsearch.index.mapper;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.AutomatonQuery;
+import org.apache.lucene.search.FuzzyQuery;
 import org.apache.lucene.search.MultiTermQuery;
 import org.apache.lucene.search.PrefixQuery;
 import org.apache.lucene.search.Query;
@@ -20,8 +21,11 @@ import org.apache.lucene.search.TermRangeQuery;
 import org.apache.lucene.search.WildcardQuery;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.BytesRefBuilder;
+import org.apache.lucene.util.automaton.Automata;
 import org.apache.lucene.util.automaton.Automaton;
 import org.apache.lucene.util.automaton.Operations;
+import org.apache.lucene.util.automaton.RegExp;
+import org.apache.lucene.util.automaton.UTF32ToUTF8;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.common.breaker.ChildMemoryCircuitBreaker;
 import org.elasticsearch.common.breaker.CircuitBreaker;
@@ -87,8 +91,45 @@ public abstract class StringFieldType extends TermBasedFieldType {
             );
         }
         failIfNotIndexed();
+        final BytesRef plain = indexedValueForSearch(value);
+        return SliceTermQueries.shape(
+            name(),
+            context,
+            () -> fuzzyQueryOnPlainIndex(plain, value, fuzziness, prefixLength, maxExpansions, transpositions, context, rewriteMethod),
+            // Pinning the slice with the prefix length is the same mechanism a confining automaton uses, expressed the
+            // way FuzzyQuery already understands, so it keeps its own term enumeration and scoring.
+            slice -> {
+                final BytesRef prefixed = SliceTermQueries.term(slice, plain);
+                return fuzzyQueryOnPlainIndex(
+                    prefixed,
+                    value,
+                    fuzziness,
+                    prefixLength + (prefixed.length - plain.length),
+                    maxExpansions,
+                    transpositions,
+                    context,
+                    rewriteMethod
+                );
+            },
+            () -> fuzzyQueryOnPlainIndex(plain, value, fuzziness, prefixLength, maxExpansions, transpositions, context, rewriteMethod)
+                .getAutomata().automaton,
+            rewriteMethod
+        );
+    }
+
+    private FuzzyQuery fuzzyQueryOnPlainIndex(
+        BytesRef term,
+        Object value,
+        Fuzziness fuzziness,
+        int prefixLength,
+        int maxExpansions,
+        boolean transpositions,
+        SearchExecutionContext context,
+        @Nullable MultiTermQuery.RewriteMethod rewriteMethod
+    ) {
         return FuzzyQueries.create(
-            new Term(name(), indexedValueForSearch(value)),
+            new Term(name(), term),
+            // the distance comes from the value the user asked for, never from the slice in front of it
             fuzziness.asDistance(BytesRefs.toString(value)),
             prefixLength,
             maxExpansions,
@@ -110,7 +151,20 @@ public abstract class StringFieldType extends TermBasedFieldType {
             );
         }
         failIfNotIndexed();
-        Term prefix = new Term(name(), indexedValueForSearch(value));
+        return SliceTermQueries.shape(
+            name(),
+            context,
+            () -> prefixQueryOnPlainIndex(indexedValueForSearch(value), method, caseInsensitive),
+            caseInsensitive
+                ? null
+                : slice -> prefixQueryOnPlainIndex(SliceTermQueries.term(slice, indexedValueForSearch(value)), method, false),
+            () -> caseInsensitive ? AutomatonQueries.caseInsensitivePrefix(value) : PrefixQuery.toAutomaton(indexedValueForSearch(value)),
+            method
+        );
+    }
+
+    private Query prefixQueryOnPlainIndex(BytesRef value, MultiTermQuery.RewriteMethod method, boolean caseInsensitive) {
+        Term prefix = new Term(name(), value);
         AutomatonQuery query;
         if (caseInsensitive) {
             query = method == null ? new CaseInsensitivePrefixQuery(prefix, false) : new CaseInsensitivePrefixQuery(prefix, false, method);
@@ -208,13 +262,47 @@ public abstract class StringFieldType extends TermBasedFieldType {
             );
         }
 
-        Term term;
         if (getTextSearchInfo().searchAnalyzer() != null && shouldNormalize) {
             value = normalizeWildcardPattern(name(), value, getTextSearchInfo().searchAnalyzer());
-            term = new Term(name(), value);
-        } else {
-            term = new Term(name(), indexedValueForSearch(value));
         }
+        final SliceTermQueries.Scope scope = SliceTermQueries.scope(name(), context);
+        if (scope != SliceTermQueries.Scope.PLAIN && caseInsensitive) {
+            // Folding case over the slice could reach a slice whose name differs only in case, so the pattern is
+            // confined by composition instead of by text.
+            return SliceTermQueries.automatonQuery(
+                name(),
+                AutomatonQueries.toCaseInsensitiveWildcardAutomaton(new Term(name(), value)),
+                method,
+                context
+            );
+        }
+        final String pattern = value;
+        return SliceTermQueries.shape(
+            name(),
+            context,
+            () -> wildcardQueryOnPlainIndex(pattern, method, caseInsensitive, context),
+            caseInsensitive
+                ? null
+                : slice -> wildcardQueryOnPlainIndex(
+                    SliceTermQueries.term(slice, new BytesRef(pattern)).utf8ToString(),
+                    method,
+                    false,
+                    context
+                ),
+            () -> caseInsensitive
+                ? AutomatonQueries.toCaseInsensitiveWildcardAutomaton(new Term(name(), pattern))
+                : WildcardQuery.toAutomaton(new Term(name(), pattern), Operations.DEFAULT_DETERMINIZE_WORK_LIMIT),
+            method
+        );
+    }
+
+    private Query wildcardQueryOnPlainIndex(
+        String value,
+        MultiTermQuery.RewriteMethod method,
+        boolean caseInsensitive,
+        SearchExecutionContext context
+    ) {
+        final Term term = new Term(name(), indexedValueForSearch(value));
 
         CircuitBreaker circuitBreaker = context.getCircuitBreaker();
         AutomatonQuery query;
@@ -268,6 +356,17 @@ public abstract class StringFieldType extends TermBasedFieldType {
         value = AutomatonQueries.collapseConsecutiveQuantifiers(value);
         AutomatonQuery query;
         Term term = new Term(name(), indexedValueForSearch(value));
+        if (SliceTermQueries.scope(name(), context) != SliceTermQueries.Scope.PLAIN) {
+            // A slice value is not expressible inside the pattern, where '|' means alternation, so it is composed on.
+            return SliceTermQueries.automatonQuery(
+                name(),
+                new UTF32ToUTF8().convert(
+                    Operations.determinize(new RegExp(term.text(), syntaxFlags, matchFlags).toAutomaton(), maxDeterminizedStates)
+                ),
+                method,
+                context
+            );
+        }
         CircuitBreaker circuitBreaker = context.getCircuitBreaker();
         long reservation = 0;
         if (circuitBreaker != null) {
@@ -303,13 +402,39 @@ public abstract class StringFieldType extends TermBasedFieldType {
             );
         }
         failIfNotIndexed();
-        AutomatonQuery query = new TermRangeQuery(
+        if (SliceTermQueries.scope(name(), context) == SliceTermQueries.Scope.PLAIN) {
+            return new TermRangeQuery(
+                name(),
+                lowerTerm == null ? null : indexedValueForSearch(lowerTerm),
+                upperTerm == null ? null : indexedValueForSearch(upperTerm),
+                includeLower,
+                includeUpper
+            );
+        }
+        return SliceTermQueries.shape(
             name(),
-            lowerTerm == null ? null : indexedValueForSearch(lowerTerm),
-            upperTerm == null ? null : indexedValueForSearch(upperTerm),
-            includeLower,
-            includeUpper
+            context,
+            () -> new TermRangeQuery(
+                name(),
+                lowerTerm == null ? null : indexedValueForSearch(lowerTerm),
+                upperTerm == null ? null : indexedValueForSearch(upperTerm),
+                includeLower,
+                includeUpper
+            ),
+            slice -> new TermRangeQuery(
+                name(),
+                SliceTermQueries.term(slice, lowerTerm == null ? new BytesRef() : indexedValueForSearch(lowerTerm)),
+                upperTerm == null ? SliceTermQueries.sliceEnd(slice) : SliceTermQueries.term(slice, indexedValueForSearch(upperTerm)),
+                lowerTerm == null || includeLower,
+                upperTerm != null && includeUpper
+            ),
+            () -> Automata.makeBinaryInterval(
+                lowerTerm == null ? null : indexedValueForSearch(lowerTerm),
+                includeLower,
+                upperTerm == null ? null : indexedValueForSearch(upperTerm),
+                includeUpper
+            ),
+            null
         );
-        return query;
     }
 }
