@@ -58,6 +58,8 @@ import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.automaton.Automata;
 import org.apache.lucene.util.automaton.Automaton;
 import org.apache.lucene.util.automaton.Operations;
+import org.apache.lucene.util.automaton.RegExp;
+import org.apache.lucene.util.automaton.UTF32ToUTF8;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.columnar.string.DictionaryPolicy;
 import org.elasticsearch.columnar.string.StringBinaryPayload;
@@ -1160,7 +1162,14 @@ public final class TextFieldMapper extends FieldMapper {
             if (getTextSearchInfo().hasPositions() == false) {
                 throw new IllegalArgumentException("Cannot create intervals over field [" + name() + "] with no positions indexed");
             }
-            return Intervals.term(term);
+            return SliceTermQueries.intervals(
+                name(),
+                context,
+                () -> Intervals.term(term),
+                slice -> Intervals.term(SliceTermQueries.term(slice, term)),
+                () -> Automata.makeBinary(term),
+                term.utf8ToString()
+            );
         }
 
         @Override
@@ -1168,10 +1177,19 @@ public final class TextFieldMapper extends FieldMapper {
             if (getTextSearchInfo().hasPositions() == false) {
                 throw new IllegalArgumentException("Cannot create intervals over field [" + name() + "] with no positions indexed");
             }
-            if (prefixFieldType != null) {
+            if (prefixFieldType != null && SliceTermQueries.scope(name(), context) == SliceTermQueries.Scope.PLAIN) {
+                // The prefix sub-field holds its own terms, which carry the slice too, so it is only a shortcut when
+                // there is no slice to apply.
                 return prefixFieldType.intervals(term);
             }
-            return Intervals.prefix(term, IndexSearcher.getMaxClauseCount());
+            return SliceTermQueries.intervals(
+                name(),
+                context,
+                () -> Intervals.prefix(term, IndexSearcher.getMaxClauseCount()),
+                slice -> Intervals.prefix(SliceTermQueries.term(slice, term), IndexSearcher.getMaxClauseCount()),
+                () -> PrefixQuery.toAutomaton(term),
+                term.utf8ToString()
+            );
         }
 
         @Override
@@ -1185,15 +1203,61 @@ public final class TextFieldMapper extends FieldMapper {
             if (getTextSearchInfo().hasPositions() == false) {
                 throw new IllegalArgumentException("Cannot create intervals over field [" + name() + "] with no positions indexed");
             }
-            FuzzyQuery fq = FuzzyQueries.create(
-                new Term(name(), term),
+            // The confining automaton matches the slice exactly, so the edits only ever apply to the plain term.
+            return SliceTermQueries.intervals(
+                name(),
+                context,
+                () -> fuzzyIntervals(term, maxDistance, prefixLength, transpositions, name(), context),
+                slice -> fuzzyIntervals(
+                    slice + (char) org.elasticsearch.index.SliceIndexing.SLICE_TERM_SEPARATOR + term,
+                    maxDistance,
+                    prefixLength + slice.length() + 1,
+                    transpositions,
+                    name(),
+                    context
+                ),
+                () -> fuzzyAutomaton(term, maxDistance, prefixLength, transpositions, name(), context),
+                term
+            );
+        }
+
+        private static Automaton fuzzyAutomaton(
+            String term,
+            int maxDistance,
+            int prefixLength,
+            boolean transpositions,
+            String field,
+            SearchExecutionContext context
+        ) {
+            return FuzzyQueries.create(
+                new Term(field, term),
                 maxDistance,
                 prefixLength,
                 IndexSearcher.getMaxClauseCount(),
                 transpositions,
                 null,
                 context,
-                name()
+                field
+            ).getAutomata().automaton;
+        }
+
+        private static IntervalsSource fuzzyIntervals(
+            String term,
+            int maxDistance,
+            int prefixLength,
+            boolean transpositions,
+            String field,
+            SearchExecutionContext context
+        ) {
+            FuzzyQuery fq = FuzzyQueries.create(
+                new Term(field, term),
+                maxDistance,
+                prefixLength,
+                IndexSearcher.getMaxClauseCount(),
+                transpositions,
+                null,
+                context,
+                field
             );
             return Intervals.multiterm(fq.getAutomata(), IndexSearcher.getMaxClauseCount(), term);
         }
@@ -1203,7 +1267,14 @@ public final class TextFieldMapper extends FieldMapper {
             if (getTextSearchInfo().hasPositions() == false) {
                 throw new IllegalArgumentException("Cannot create intervals over field [" + name() + "] with no positions indexed");
             }
-            return Intervals.wildcard(pattern, IndexSearcher.getMaxClauseCount());
+            return SliceTermQueries.intervals(
+                name(),
+                context,
+                () -> Intervals.wildcard(pattern, IndexSearcher.getMaxClauseCount()),
+                slice -> Intervals.wildcard(SliceTermQueries.term(slice, pattern), IndexSearcher.getMaxClauseCount()),
+                () -> WildcardQuery.toAutomaton(new Term(name(), pattern), Operations.DEFAULT_DETERMINIZE_WORK_LIMIT),
+                pattern.utf8ToString()
+            );
         }
 
         @Override
@@ -1211,7 +1282,13 @@ public final class TextFieldMapper extends FieldMapper {
             if (getTextSearchInfo().hasPositions() == false) {
                 throw new IllegalArgumentException("Cannot create intervals over field [" + name() + "] with no positions indexed");
             }
-            return Intervals.regexp(pattern, IndexSearcher.getMaxClauseCount());
+            return SliceTermQueries.intervals(
+                name(),
+                context,
+                () -> Intervals.regexp(pattern, IndexSearcher.getMaxClauseCount()),
+                () -> new UTF32ToUTF8().convert(new RegExp(pattern.utf8ToString()).toAutomaton()),
+                pattern.utf8ToString()
+            );
         }
 
         @Override
@@ -1225,7 +1302,20 @@ public final class TextFieldMapper extends FieldMapper {
             if (getTextSearchInfo().hasPositions() == false) {
                 throw new IllegalArgumentException("Cannot create intervals over field [" + name() + "] with no positions indexed");
             }
-            return Intervals.range(lowerTerm, upperTerm, includeLower, includeUpper, IndexSearcher.getMaxClauseCount());
+            return SliceTermQueries.intervals(
+                name(),
+                context,
+                () -> Intervals.range(lowerTerm, upperTerm, includeLower, includeUpper, IndexSearcher.getMaxClauseCount()),
+                slice -> Intervals.range(
+                    SliceTermQueries.term(slice, lowerTerm == null ? new BytesRef() : lowerTerm),
+                    upperTerm == null ? SliceTermQueries.sliceEnd(slice) : SliceTermQueries.term(slice, upperTerm),
+                    lowerTerm == null || includeLower,
+                    upperTerm != null && includeUpper,
+                    IndexSearcher.getMaxClauseCount()
+                ),
+                () -> Automata.makeBinaryInterval(lowerTerm, includeLower, upperTerm, includeUpper),
+                (lowerTerm == null ? "*" : lowerTerm.utf8ToString()) + ".." + (upperTerm == null ? "*" : upperTerm.utf8ToString())
+            );
         }
 
         private void checkForPositions(boolean multi) {
