@@ -10,20 +10,26 @@
 package org.elasticsearch.index;
 
 import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.action.search.SearchPhaseExecutionException;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.fetch.subphase.highlight.HighlightBuilder;
+import org.elasticsearch.search.suggest.SuggestBuilder;
+import org.elasticsearch.search.suggest.term.TermSuggestionBuilder;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.junit.Before;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertAcked;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.not;
 
 /**
  * Drives the search paths that build their own terms rather than going through a field type: highlighting and the term
@@ -111,11 +117,25 @@ public class SliceSearchPathsIT extends ESIntegTestCase {
         final var terms = response.getFields().terms("body");
         assertNotNull(terms);
         final var iterator = terms.iterator();
-        boolean sawPlainTerm = false;
+        final List<String> returned = new ArrayList<>();
         for (var term = iterator.next(); term != null; term = iterator.next()) {
-            assertThat("term vectors leaked the slice: " + term.utf8ToString(), term.utf8ToString(), not(containsString("|")));
-            sawPlainTerm = true;
+            returned.add(term.utf8ToString());
         }
-        assertTrue("no term vectors were returned", sawPlainTerm);
+        // The terms of the document, as indexed, carry the slice; what comes back must be the plain ones.
+        assertThat(returned, containsInAnyOrder("the", "quick", "brown", "fox", "jumps"));
+    }
+
+    /**
+     * The suggesters query the terms dictionary themselves, so they see neither the slice filter nor the slice on the terms.
+     * A slice index declines them rather than suggest out of another tenant's terms.
+     */
+    public void testSuggestIsDeclinedOnASliceIndex() {
+        final var builder = prepareSearch(INDEX).setSource(
+            new SearchSourceBuilder().suggest(new SuggestBuilder().addSuggestion("s", new TermSuggestionBuilder("body").text("quik")))
+        );
+        builder.request().searchSlice("a");
+        final var failure = expectThrows(SearchPhaseExecutionException.class, builder::get);
+        assertThat(failure.status(), equalTo(RestStatus.BAD_REQUEST));
+        assertThat(failure.guessRootCauses()[0].getMessage(), containsString("[suggest] is not supported on an index that uses [slice]"));
     }
 }
