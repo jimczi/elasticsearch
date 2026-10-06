@@ -169,12 +169,12 @@ public final class SliceIndexing {
     }
 
     /**
-     * Mapped field types whose terms a slice index leaves plain because the field lays out its own term structure:
-     * {@code sparse_vector} and {@code rank_features} put the feature name in the term, and {@code completion} encodes a
-     * surface form for its transducer. {@code SliceTermPrefix} recognises the same fields on the way in, by the class of the
-     * Lucene field they add, so a field named here is one whose terms never carry a prefix.
+     * Mapped field types whose terms a slice index leaves plain because no query asks for them by value: {@code completion}
+     * encodes a surface form for its transducer and is suggested over rather than searched. {@code SliceTermPrefix}
+     * recognises the same fields on the way in, by the class of the Lucene field they add, so a field named here is one
+     * whose terms never carry a prefix.
      */
-    private static final Set<String> SELF_ENCODED_TERM_TYPES = Set.of("sparse_vector", "rank_features", "completion");
+    private static final Set<String> SELF_ENCODED_TERM_TYPES = Set.of("completion");
 
     /** Whether a field of this mapped type keeps plain terms on a slice index. See {@link #SELF_ENCODED_TERM_TYPES}. */
     public static boolean keepsPlainTerms(String typeName) {

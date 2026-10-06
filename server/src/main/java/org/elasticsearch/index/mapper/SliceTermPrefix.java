@@ -92,14 +92,13 @@ public final class SliceTermPrefix {
     }
 
     /**
-     * Whether the field lays out its own terms rather than deriving them from a value the mapped field type also uses to build
-     * queries. {@code sparse_vector} and {@code rank_features} put the feature name in the term and its weight in the term
-     * frequency, and {@code completion} encodes the surface form for a finite state transducer; queries for both are built from
-     * that same encoding instead of through the field type, so prefixing would move the terms and leave the lookups behind.
-     * Such a field keeps plain terms, and so keeps no slice locality.
+     * Whether the field lays out terms a query can never ask for by value. {@code completion} encodes a surface form for a
+     * finite state transducer and is suggested over rather than searched, so its terms stay plain and keep no slice locality.
+     * A {@link FeatureField} is prefixed: its term is the feature name, and the queries that score it are built through the
+     * field type, which puts the same prefix on (see {@link SliceTermQueries#singleTermShape}).
      */
     private static boolean encodesItsOwnTerms(IndexableField field) {
-        return field instanceof FeatureField || field instanceof SuggestField;
+        return field instanceof SuggestField;
     }
 
     /**

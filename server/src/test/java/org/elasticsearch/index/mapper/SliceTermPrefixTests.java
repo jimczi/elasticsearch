@@ -49,6 +49,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.sameInstance;
 
 /**
@@ -76,6 +77,19 @@ public class SliceTermPrefixTests extends MapperServiceTestCase {
             document.add(field);
         }
         return document.getFields();
+    }
+
+    private static List<String> tokensOf(IndexableField field) throws IOException {
+        final List<String> tokens = new ArrayList<>();
+        try (TokenStream stream = field.tokenStream(Lucene.STANDARD_ANALYZER, null)) {
+            final CharTermAttribute term = stream.addAttribute(CharTermAttribute.class);
+            stream.reset();
+            while (stream.incrementToken()) {
+                tokens.add(term.toString());
+            }
+            stream.end();
+        }
+        return tokens;
     }
 
     private static FieldType indexedType(boolean docValues, boolean stored) {
@@ -164,13 +178,19 @@ public class SliceTermPrefixTests extends MapperServiceTestCase {
     }
 
     /**
-     * {@code sparse_vector} and {@code rank_features} index the feature name as the term and build their queries with
-     * {@link FeatureField}, bypassing the field type, so prefixing would move the terms away from the lookups. Same for the
-     * surface forms {@code completion} encodes for its finite state transducer.
+     * A {@link FeatureField}, which is how {@code sparse_vector} and {@code rank_features} index a feature, is prefixed like any
+     * other term: its queries are built through the field type, which puts the same prefix on. See
+     * {@link SliceFeatureFieldTests} for the weight it keeps in the term frequency.
      */
-    public void testFieldsThatLayOutTheirOwnTermsKeepPlainTerms() {
+    public void testAFeatureFieldIsPrefixed() throws IOException {
         IndexableField feature = new FeatureField("sparse", "mytoken", 3.0f);
-        assertThat(rewrite(feature).get(0), sameInstance(feature));
+        IndexableField rewritten = rewrite(feature).get(0);
+        assertThat(rewritten, not(sameInstance(feature)));
+        assertThat(tokensOf(rewritten), contains(PREFIX + "mytoken"));
+    }
+
+    /** {@code completion} encodes a surface form for a transducer and is suggested over, never asked for by value. */
+    public void testACompletionFieldKeepsPlainTerms() {
         IndexableField suggest = new SuggestField("suggest", "surfaceform", 5);
         assertThat(rewrite(suggest).get(0), sameInstance(suggest));
     }

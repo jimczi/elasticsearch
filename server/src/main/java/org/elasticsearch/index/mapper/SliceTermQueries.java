@@ -224,6 +224,72 @@ public final class SliceTermQueries {
     }
 
     /**
+     * Shapes a query that can only ever name one term, such as the ones {@link org.apache.lucene.document.FeatureField}
+     * builds for {@code sparse_vector} and {@code rank_features}: {@code build} is handed the term to look up, once for
+     * each targeted slice, and the results are combined into a disjunction. A document belongs to one slice, so at most
+     * one clause can match it and its score is the one that clause gives it.
+     *
+     * <p>A search spanning every slice is declined. These shapes carry their own scoring and have no multi-term form to
+     * confine with an automaton, and the slices of an index cannot be enumerated to disjoin over.
+     */
+    public static Query singleTermShape(
+        String field,
+        String term,
+        @Nullable SearchExecutionContext context,
+        Function<String, Query> build
+    ) {
+        return switch (scope(field, context)) {
+            case PLAIN -> build.apply(term);
+            case SLICES -> {
+                final String[] slices = slices(context);
+                if (slices.length == 1) {
+                    yield build.apply(SliceIndexing.termPrefix(slices[0]) + term);
+                }
+                final BooleanQuery.Builder builder = new BooleanQuery.Builder();
+                for (String slice : slices) {
+                    builder.add(build.apply(SliceIndexing.termPrefix(slice) + term), BooleanClause.Occur.SHOULD);
+                }
+                yield builder.build();
+            }
+            case ALL_SLICES -> throw new IllegalArgumentException(
+                "["
+                    + SliceIndexing.PARAM_NAME
+                    + "="
+                    + SliceIndexing.SLICE_ALL
+                    + "] is not supported for this query on field ["
+                    + field
+                    + "]; it scores one term at a time, so a single slice must be named"
+            );
+        };
+    }
+
+    /**
+     * The term {@code value} is looked up under in each targeted slice, for a statistic a query gathers itself rather
+     * than through a shape. Fails for a search spanning every slice, as {@link #searchTerms} does.
+     */
+    public static List<String> statisticTerms(String field, String value, @Nullable SearchExecutionContext context) {
+        return switch (scope(field, context)) {
+            case PLAIN -> List.of(value);
+            case SLICES -> {
+                final List<String> terms = new ArrayList<>();
+                for (String slice : slices(context)) {
+                    terms.add(SliceIndexing.termPrefix(slice) + value);
+                }
+                yield terms;
+            }
+            case ALL_SLICES -> throw new IllegalArgumentException(
+                "["
+                    + SliceIndexing.PARAM_NAME
+                    + "="
+                    + SliceIndexing.SLICE_ALL
+                    + "] is not supported for this query on field ["
+                    + field
+                    + "]; it reads a statistic one term at a time, so a single slice must be named"
+            );
+        };
+    }
+
+    /**
      * Confines an automaton built over plain terms to the slices a search targets. Every multi-term shape goes through
      * here when it cannot express itself as a single term.
      */
