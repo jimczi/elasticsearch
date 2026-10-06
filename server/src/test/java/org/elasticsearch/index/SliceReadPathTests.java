@@ -10,8 +10,10 @@
 package org.elasticsearch.index;
 
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.PrefixQuery;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.settings.Settings;
@@ -25,6 +27,7 @@ import java.util.List;
 
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.startsWith;
 
 /**
  * The read paths that do not go through a field type: the term vectors handed back by the term vectors API, and the
@@ -84,6 +87,38 @@ public class SliceReadPathTests extends MapperServiceTestCase {
         }, reader -> {
             // _id carries no slice, so the stripping view must leave it alone; it has no vector, hence null.
             assertNull(SliceTermVectors.withoutSlice(reader.termVectors().get(0)).terms("_id"));
+        });
+    }
+
+    /**
+     * A composite aggregation on a keyword source can walk the terms dictionary directly rather than going through the
+     * field type. On a slice index those terms carry the slice, so the walk is declined and the aggregation collects
+     * from doc values, which hold the plain value. Searching every slice is the case that reaches it: a named slice is
+     * already declined by the routing filter leaving the query a boolean.
+     */
+    public void testCompositeAggregationOverEverySliceReportsPlainTerms() throws IOException {
+        final MapperService mapperService = sliceMapperService("no");
+        withLuceneIndex(mapperService, writer -> {
+            for (String slice : List.of("tenant-a", "tenant-b")) {
+                writer.addDocument(
+                    mapperService.documentMapper().parse(source(slice, b -> b.field("kw", "alpha-" + slice), slice)).rootDoc()
+                );
+            }
+            writer.forceMerge(1);
+        }, reader -> {
+            // The indexed terms carry the slice, so a dictionary walk would hand these back as bucket keys.
+            for (String term : terms(reader.leaves().get(0).reader().terms("kw").iterator())) {
+                assertThat(term, startsWith(SliceIndexing.termPrefix(term.endsWith("tenant-a") ? "tenant-a" : "tenant-b")));
+            }
+            // The doc values the aggregation collects from do not.
+            final SortedSetDocValues values = reader.leaves().get(0).reader().getSortedSetDocValues("kw");
+            final List<String> plain = new ArrayList<>();
+            for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
+                for (int i = 0; i < values.docValueCount(); i++) {
+                    plain.add(values.lookupOrd(values.nextOrd()).utf8ToString());
+                }
+            }
+            assertThat(plain, contains("alpha-tenant-a", "alpha-tenant-b"));
         });
     }
 
