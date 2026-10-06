@@ -20,6 +20,7 @@ import org.elasticsearch.rest.RestRequest;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -165,6 +166,19 @@ public final class SliceIndexing {
      */
     public static boolean prefixesTerms(String fieldName) {
         return fieldName.isEmpty() == false && fieldName.charAt(0) != '_';
+    }
+
+    /**
+     * Mapped field types whose terms a slice index leaves plain because the field lays out its own term structure:
+     * {@code sparse_vector} and {@code rank_features} put the feature name in the term, and {@code completion} encodes a
+     * surface form for its transducer. {@code SliceTermPrefix} recognises the same fields on the way in, by the class of the
+     * Lucene field they add, so a field named here is one whose terms never carry a prefix.
+     */
+    private static final Set<String> SELF_ENCODED_TERM_TYPES = Set.of("sparse_vector", "rank_features", "completion");
+
+    /** Whether a field of this mapped type keeps plain terms on a slice index. See {@link #SELF_ENCODED_TERM_TYPES}. */
+    public static boolean keepsPlainTerms(String typeName) {
+        return SELF_ENCODED_TERM_TYPES.contains(typeName);
     }
 
     /**

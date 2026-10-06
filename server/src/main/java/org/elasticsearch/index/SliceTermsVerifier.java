@@ -34,6 +34,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.Predicate;
 
 /**
  * Fails a search that asks a slice index for a term without the slice.
@@ -56,33 +57,49 @@ public final class SliceTermsVerifier extends FilterDirectoryReader {
      * without the slice. Only interposed on a slice index and only when assertions are on, so production pays nothing
      * and the test suite audits every query path for a shape that went around the field types.
      */
-    public static IndexReader verifying(DirectoryReader in, IndexSettings settings, @Nullable String sliceRouting) throws IOException {
+    public static IndexReader verifying(
+        DirectoryReader in,
+        IndexSettings settings,
+        @Nullable String sliceRouting,
+        Predicate<String> keepsPlainTerms
+    ) throws IOException {
         if (Assertions.ENABLED == false || settings.isSliceEnabled() == false) {
             return in;
         }
-        return wrap(in, SliceIndexing.SLICE_ALL.equals(sliceRouting) ? null : sliceRouting);
+        return wrap(in, SliceIndexing.SLICE_ALL.equals(sliceRouting) ? null : sliceRouting, keepsPlainTerms);
     }
 
     /** Wraps {@code in} so that a query missing the slice prefix fails. {@code sliceRouting} is null for all slices. */
     public static DirectoryReader wrap(DirectoryReader in, @Nullable String sliceRouting) throws IOException {
-        return new SliceTermsVerifier(in, sliceRouting);
+        return wrap(in, sliceRouting, field -> false);
+    }
+
+    /**
+     * Wraps {@code in} so that a query missing the slice prefix fails, skipping the fields {@code keepsPlainTerms} accepts,
+     * which are the ones a slice index indexes without a prefix (see {@link SliceIndexing#keepsPlainTerms}).
+     */
+    public static DirectoryReader wrap(DirectoryReader in, @Nullable String sliceRouting, Predicate<String> keepsPlainTerms)
+        throws IOException {
+        return new SliceTermsVerifier(in, sliceRouting, keepsPlainTerms);
     }
 
     private final String sliceRouting;
+    private final Predicate<String> keepsPlainTerms;
 
-    private SliceTermsVerifier(DirectoryReader in, @Nullable String sliceRouting) throws IOException {
+    private SliceTermsVerifier(DirectoryReader in, @Nullable String sliceRouting, Predicate<String> keepsPlainTerms) throws IOException {
         super(in, new SubReaderWrapper() {
             @Override
             public LeafReader wrap(LeafReader reader) {
-                return new VerifyingLeafReader(reader, sliceRouting);
+                return new VerifyingLeafReader(reader, sliceRouting, keepsPlainTerms);
             }
         });
         this.sliceRouting = sliceRouting;
+        this.keepsPlainTerms = keepsPlainTerms;
     }
 
     @Override
     protected DirectoryReader doWrapDirectoryReader(DirectoryReader in) throws IOException {
-        return new SliceTermsVerifier(in, sliceRouting);
+        return new SliceTermsVerifier(in, sliceRouting, keepsPlainTerms);
     }
 
     /** Unchanged: this reader reports exactly what the one below it reports. */
@@ -94,9 +111,11 @@ public final class SliceTermsVerifier extends FilterDirectoryReader {
     static final class VerifyingLeafReader extends FilterLeafReader {
 
         private final byte[][] prefixes;
+        private final Predicate<String> keepsPlainTerms;
 
-        VerifyingLeafReader(LeafReader in, @Nullable String sliceRouting) {
+        VerifyingLeafReader(LeafReader in, @Nullable String sliceRouting, Predicate<String> keepsPlainTerms) {
             super(in);
+            this.keepsPlainTerms = keepsPlainTerms;
             if (sliceRouting == null) {
                 this.prefixes = null;
             } else {
@@ -111,7 +130,7 @@ public final class SliceTermsVerifier extends FilterDirectoryReader {
         @Override
         public Terms terms(String field) throws IOException {
             final Terms terms = in.terms(field);
-            if (terms == null || SliceIndexing.prefixesTerms(field) == false) {
+            if (terms == null || SliceIndexing.prefixesTerms(field) == false || keepsPlainTerms.test(field)) {
                 return terms;
             }
             return new VerifyingTerms(terms, field, prefixes);

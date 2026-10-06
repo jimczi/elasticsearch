@@ -212,10 +212,15 @@ final class DefaultSearchContext extends SearchContext {
             // On a slice index the terms carry the slice, and field types put it there (see SliceTermQueries). When
             // assertions are on, a reader that fails anything reaching the dictionary without it is interposed, so the
             // test suite reports a query built around a field type instead of silently matching nothing.
+            final MapperService verifierMapperService = indexShard.mapperService();
             final IndexReader reader = SliceTermsVerifier.verifying(
                 engineSearcher.getDirectoryReader(),
                 indexShard.indexSettings(),
-                request.sliceRouting()
+                request.sliceRouting(),
+                field -> {
+                    final MappedFieldType fieldType = verifierMapperService == null ? null : verifierMapperService.fieldType(field);
+                    return fieldType != null && SliceIndexing.keepsPlainTerms(fieldType.typeName());
+                }
             );
             if (searcherRequiresExecutor == false) {
                 this.searcher = new ContextIndexSearcher(
