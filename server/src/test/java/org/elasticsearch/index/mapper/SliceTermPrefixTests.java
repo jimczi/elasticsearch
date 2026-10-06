@@ -12,6 +12,7 @@ package org.elasticsearch.index.mapper;
 import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
 import org.apache.lucene.analysis.tokenattributes.PositionIncrementAttribute;
+import org.apache.lucene.document.FeatureField;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.InvertableType;
@@ -26,6 +27,7 @@ import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.search.suggest.document.SuggestField;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.StringHelper;
 import org.elasticsearch.common.lucene.Lucene;
@@ -159,6 +161,18 @@ public class SliceTermPrefixTests extends MapperServiceTestCase {
         List<IndexableField> fields = rewrite(docValues, point);
         assertThat(fields.get(0), sameInstance(docValues));
         assertThat(fields.get(1), sameInstance(point));
+    }
+
+    /**
+     * {@code sparse_vector} and {@code rank_features} index the feature name as the term and build their queries with
+     * {@link FeatureField}, bypassing the field type, so prefixing would move the terms away from the lookups. Same for the
+     * surface forms {@code completion} encodes for its finite state transducer.
+     */
+    public void testFieldsThatLayOutTheirOwnTermsKeepPlainTerms() {
+        IndexableField feature = new FeatureField("sparse", "mytoken", 3.0f);
+        assertThat(rewrite(feature).get(0), sameInstance(feature));
+        IndexableField suggest = new SuggestField("suggest", "surfaceform", 5);
+        assertThat(rewrite(suggest).get(0), sameInstance(suggest));
     }
 
     public void testReservedFieldNamesKeepPlainTerms() {

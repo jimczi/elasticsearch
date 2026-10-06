@@ -13,6 +13,7 @@ import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.TokenFilter;
 import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
+import org.apache.lucene.document.FeatureField;
 import org.apache.lucene.document.InvertableType;
 import org.apache.lucene.document.StoredValue;
 import org.apache.lucene.index.DocValuesSkipIndexType;
@@ -22,6 +23,7 @@ import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.search.suggest.document.SuggestField;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.index.SliceIndexing;
 
@@ -71,7 +73,7 @@ public final class SliceTermPrefix {
      */
     void add(List<IndexableField> out, IndexableField field) {
         final IndexableFieldType type = field.fieldType();
-        if (type.indexOptions() == IndexOptions.NONE || SliceIndexing.prefixesTerms(field.name()) == false) {
+        if (type.indexOptions() == IndexOptions.NONE || SliceIndexing.prefixesTerms(field.name()) == false || encodesItsOwnTerms(field)) {
             out.add(field);
             return;
         }
@@ -87,6 +89,17 @@ public final class SliceTermPrefix {
                 }
             }
         }
+    }
+
+    /**
+     * Whether the field lays out its own terms rather than deriving them from a value the mapped field type also uses to build
+     * queries. {@code sparse_vector} and {@code rank_features} put the feature name in the term and its weight in the term
+     * frequency, and {@code completion} encodes the surface form for a finite state transducer; queries for both are built from
+     * that same encoding instead of through the field type, so prefixing would move the terms and leave the lookups behind.
+     * Such a field keeps plain terms, and so keeps no slice locality.
+     */
+    private static boolean encodesItsOwnTerms(IndexableField field) {
+        return field instanceof FeatureField || field instanceof SuggestField;
     }
 
     /**
