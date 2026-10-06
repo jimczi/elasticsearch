@@ -1218,9 +1218,9 @@ public final class TextFieldMapper extends FieldMapper {
                 context,
                 () -> fuzzyIntervals(term, maxDistance, prefixLength, transpositions, name(), context),
                 slice -> fuzzyIntervals(
-                    slice + (char) org.elasticsearch.index.SliceIndexing.SLICE_TERM_SEPARATOR + term,
+                    org.elasticsearch.index.SliceIndexing.termPrefix(slice) + term,
                     maxDistance,
-                    prefixLength + slice.length() + 1,
+                    prefixLength + org.elasticsearch.index.SliceIndexing.TERM_PREFIX_LENGTH,
                     transpositions,
                     name(),
                     context

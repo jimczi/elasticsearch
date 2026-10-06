@@ -57,7 +57,11 @@ import static org.hamcrest.Matchers.sameInstance;
 public class SliceTermPrefixTests extends MapperServiceTestCase {
 
     private static final String SLICE = "tenant-1";
-    private static final String PREFIX = SLICE + "|";
+    private static final String PREFIX = SliceIndexing.termPrefix(SLICE);
+
+    private static String prefix(String slice) {
+        return SliceIndexing.termPrefix(slice);
+    }
 
     @Before
     public void requireSliceIndexing() {
@@ -205,11 +209,16 @@ public class SliceTermPrefixTests extends MapperServiceTestCase {
                     );
                 }
             }
-        },
-            reader -> {
-                assertThat(terms(reader, "field"), contains("tenant-1|alpha", "tenant-1|beta", "tenant-2|alpha", "tenant-2|beta"));
+        }, reader -> {
+            final List<String> expected = new ArrayList<>();
+            for (String slice : List.of("tenant-1", "tenant-2")) {
+                expected.add(prefix(slice) + "alpha");
+                expected.add(prefix(slice) + "beta");
             }
-        );
+            // slices group by hash prefix, so the runs are adjacent whatever order the hashes fall in
+            expected.sort(String::compareTo);
+            assertThat(terms(reader, "field"), equalTo(expected));
+        });
     }
 
     public void testATextFieldIsIndexedTokenByTokenUnderTheSlice() throws IOException {
@@ -234,7 +243,13 @@ public class SliceTermPrefixTests extends MapperServiceTestCase {
                 };
                 writer.addDocument(mapperService.documentMapper().parse(source(slice, b -> b.field("field", word), slice)).rootDoc());
             }
-        }, reader -> assertThat(terms(reader, "field"), contains("tenant-1|one", "tenant-2|two", "tenant-3|three")));
+        }, reader -> {
+            final List<String> expected = new ArrayList<>(
+                List.of(prefix("tenant-1") + "one", prefix("tenant-2") + "two", prefix("tenant-3") + "three")
+            );
+            expected.sort(String::compareTo);
+            assertThat(terms(reader, "field"), equalTo(expected));
+        });
     }
 
     public void testMultiFieldsAndCopyToAreIndexedUnderTheSlice() throws IOException {

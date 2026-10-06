@@ -27,6 +27,7 @@ import org.elasticsearch.index.SliceIndexing;
 
 import java.io.IOException;
 import java.io.Reader;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
@@ -52,11 +53,12 @@ public final class SliceTermPrefix {
 
     public SliceTermPrefix(String slice) {
         this.slice = slice;
-        this.bytePrefix = SliceIndexing.termPrefix(slice);
-        this.charPrefix = (slice + (char) SliceIndexing.SLICE_TERM_SEPARATOR).toCharArray();
-        // Slice values are restricted to ASCII, so prefixing a token stream character by character and prefixing a BytesRef
-        // byte by byte produce the same term.
-        assert charPrefix.length == bytePrefix.length : slice;
+        final String prefix = SliceIndexing.termPrefix(slice);
+        this.bytePrefix = prefix.getBytes(StandardCharsets.US_ASCII);
+        this.charPrefix = prefix.toCharArray();
+        // The prefix is hex, so prefixing a token stream character by character and a BytesRef byte by byte produce the
+        // same term.
+        assert charPrefix.length == bytePrefix.length : prefix;
     }
 
     public String slice() {

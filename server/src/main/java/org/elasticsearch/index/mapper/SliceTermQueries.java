@@ -178,7 +178,7 @@ public final class SliceTermQueries {
 
     /** The exclusive end of a slice's range in the dictionary, for a range left open at the top. */
     public static BytesRef sliceEnd(String slice) {
-        final byte[] end = SliceIndexing.termPrefix(slice);
+        final byte[] end = SliceIndexing.termPrefixBytes(slice);
         end[end.length - 1]++;
         return new BytesRef(end);
     }
@@ -314,19 +314,27 @@ public final class SliceTermQueries {
 
     /** {@code slice|<plain>}. */
     private static Automaton confineTo(String slice, Automaton plain) {
-        return determinize(Operations.concatenate(Automata.makeBinary(new BytesRef(SliceIndexing.termPrefix(slice))), plain));
+        return determinize(Operations.concatenate(Automata.makeBinary(new BytesRef(SliceIndexing.termPrefixBytes(slice))), plain));
     }
 
     /** {@code <any slice>|<plain>}, where the slice part holds no separator. */
+    /** Any slice's prefix followed by {@code plain}: {@code ANY^TERM_PREFIX_LENGTH plain}. */
     private static Automaton confineToAny(Automaton plain) {
-        final Automaton slice = new Automaton();
-        final int state = slice.createState();
-        slice.setAccept(state, true);
-        slice.addTransition(state, state, 0, SliceIndexing.SLICE_TERM_SEPARATOR - 1);
-        slice.addTransition(state, state, SliceIndexing.SLICE_TERM_SEPARATOR + 1, 0xFF);
-        slice.finishState();
-        final Automaton separator = Automata.makeBinary(new BytesRef(new byte[] { SliceIndexing.SLICE_TERM_SEPARATOR }));
-        return determinize(Operations.concatenate(List.of(slice, separator, plain)));
+        return determinize(Operations.concatenate(anySlicePrefix(), plain));
+    }
+
+    /** Exactly {@link SliceIndexing#TERM_PREFIX_LENGTH} arbitrary bytes, which is what any slice's prefix looks like. */
+    public static Automaton anySlicePrefix() {
+        final Automaton any = new Automaton();
+        int from = any.createState();
+        for (int i = 0; i < SliceIndexing.TERM_PREFIX_LENGTH; i++) {
+            final int to = any.createState();
+            any.addTransition(from, to, 0, 0xFF);
+            from = to;
+        }
+        any.setAccept(from, true);
+        any.finishState();
+        return any;
     }
 
     private static Automaton determinize(Automaton automaton) {

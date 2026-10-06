@@ -26,7 +26,6 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.lessThan;
-import static org.hamcrest.Matchers.not;
 
 public class SliceIndexingTests extends ESTestCase {
 
@@ -112,76 +111,77 @@ public class SliceIndexingTests extends ESTestCase {
         assertNull(SliceIndexing.sliceToRouting(SliceIndexing.SLICE_ALL));
     }
 
-    public void testPrefixTermPutsTheSliceFirst() {
-        BytesRef prefixed = SliceIndexing.prefixTerm("tenant-1", new BytesRef("error"));
-        assertThat(prefixed.utf8ToString(), equalTo("tenant-1|error"));
+    private static void assertInvalid(String value) {
+        IllegalArgumentException ex = expectThrows(IllegalArgumentException.class, () -> SliceIndexing.validateUserSliceValue(value));
+        assertThat(ex.getMessage(), containsString("invalid [slice] value"));
+    }
+
+    public void testPrefixTermPutsTheSlicePrefixFirst() {
+        final BytesRef prefixed = SliceIndexing.prefixTerm("tenant-a", new BytesRef("value"));
+        assertThat(prefixed.utf8ToString(), equalTo(SliceIndexing.termPrefix("tenant-a") + "value"));
+    }
+
+    /** The prefix is the slice hash as hex, so it is the same width for every slice and shares the key's identity. */
+    public void testTermPrefixIsTheSliceHashInFixedWidthHex() {
+        for (String slice : List.of("a", "tenant-a", "0123456789abcdef", randomAlphaOfLengthBetween(1, 64))) {
+            final String prefix = SliceIndexing.termPrefix(slice);
+            assertThat(prefix.length(), equalTo(SliceIndexing.TERM_PREFIX_LENGTH));
+            assertThat(prefix, equalTo(String.format(java.util.Locale.ROOT, "%08x", SliceIndexing.sliceHash(slice))));
+            // one byte a character, which is what lets the token-stream and bytes paths agree
+            assertThat(SliceIndexing.termPrefixBytes(slice).length, equalTo(SliceIndexing.TERM_PREFIX_LENGTH));
+            // the same hash the slice key is built from
+            assertThat(SliceIndexing.sliceHashFromKey(SliceIndexing.encodeSliceKey(slice)), equalTo(SliceIndexing.sliceHash(slice)));
+        }
     }
 
     public void testStripTermPrefixRoundTrips() {
-        for (String slice : new String[] { "a", "tenant-1", "A.b_c:d-9", randomAlphaOfLength(128) }) {
-            for (String term : new String[] { "", "x", "error", "has|a|separator", randomUnicodeOfLength(20) }) {
-                BytesRef term0 = new BytesRef(term);
-                BytesRef roundTripped = SliceIndexing.stripTermPrefix(SliceIndexing.prefixTerm(slice, term0));
-                assertThat("slice [" + slice + "] term [" + term + "]", roundTripped, equalTo(term0));
+        for (String slice : List.of("a", "tenant-a", randomAlphaOfLengthBetween(1, 32))) {
+            for (String term : List.of("", "x", "value", "a|b", randomAlphaOfLengthBetween(1, 32))) {
+                final BytesRef original = new BytesRef(term);
+                final BytesRef roundTripped = SliceIndexing.stripTermPrefix(SliceIndexing.prefixTerm(slice, original));
+                assertThat(roundTripped, equalTo(original));
             }
         }
     }
 
-    /**
-     * A term may contain the separator, so stripping must cut at the first one. Slice values cannot contain it, which is what makes
-     * the first occurrence unambiguous.
-     */
-    public void testStripCutsAtTheFirstSeparator() {
-        BytesRef prefixed = SliceIndexing.prefixTerm("s1", new BytesRef("a|b"));
-        assertThat(prefixed.utf8ToString(), equalTo("s1|a|b"));
-        assertThat(SliceIndexing.stripTermPrefix(prefixed).utf8ToString(), equalTo("a|b"));
+    /** A fixed width means a term containing the prefix characters is still stripped at the right place. */
+    public void testStripCutsAtTheFixedWidth() {
+        final BytesRef prefixed = SliceIndexing.prefixTerm("s1", new BytesRef("00000000value"));
+        assertThat(SliceIndexing.stripTermPrefix(prefixed).utf8ToString(), equalTo("00000000value"));
     }
 
-    public void testSeparatorIsNotAValidSliceCharacter() {
-        String separator = String.valueOf((char) SliceIndexing.SLICE_TERM_SEPARATOR);
-        assertInvalid(separator);
-        assertInvalid("a" + separator + "b");
-    }
-
-    /**
-     * Distinct slices never produce the same prefixed term, which is what keeps their postings disjoint. This holds only because a
-     * slice value cannot contain the separator: {@code prefixTerm("a", "b|c")} and {@code prefixTerm("a|b", "c")} would both be
-     * {@code a|b|c}, and it is {@link #testSeparatorIsNotAValidSliceCharacter} that rules the second one out.
-     */
-    public void testPrefixedTermsAreUnambiguousAcrossValidSlices() {
-        assertThat(SliceIndexing.prefixTerm("ab", new BytesRef("c")), not(equalTo(SliceIndexing.prefixTerm("a", new BytesRef("bc")))));
-        assertThat(SliceIndexing.prefixTerm("a", new BytesRef("b")), not(equalTo(SliceIndexing.prefixTerm("b", new BytesRef("a")))));
-        // A term may contain the separator without creating ambiguity, precisely because the slice cannot.
-        assertThat(SliceIndexing.prefixTerm("a", new BytesRef("b|c")), not(equalTo(SliceIndexing.prefixTerm("ab", new BytesRef("c")))));
-    }
-
-    /** Prefixing preserves term order within a slice, which is what makes range and prefix queries translate unchanged. */
     public void testPrefixingPreservesOrderWithinASlice() {
-        String slice = "tenant-1";
-        for (int i = 0; i < 50; i++) {
-            BytesRef a = new BytesRef(randomAlphaOfLengthBetween(0, 12));
-            BytesRef b = new BytesRef(randomAlphaOfLengthBetween(0, 12));
-            int plain = a.compareTo(b);
-            int withPrefix = SliceIndexing.prefixTerm(slice, a).compareTo(SliceIndexing.prefixTerm(slice, b));
-            assertThat("a=" + a.utf8ToString() + " b=" + b.utf8ToString(), Integer.signum(withPrefix), equalTo(Integer.signum(plain)));
+        final List<String> terms = List.of("a", "aa", "ab", "b", "z");
+        final List<BytesRef> prefixed = terms.stream().map(t -> SliceIndexing.prefixTerm("tenant-a", new BytesRef(t))).toList();
+        final List<BytesRef> sorted = prefixed.stream().sorted(BytesRef::compareTo).toList();
+        assertThat(sorted, equalTo(prefixed));
+    }
+
+    /** Terms group by slice prefix, so each slice occupies a contiguous run of the dictionary. */
+    public void testSlicesSortAsContiguousRuns() {
+        final List<String> slices = List.of("s1", "s2", "s3");
+        final List<BytesRef> all = new java.util.ArrayList<>();
+        for (String slice : slices) {
+            for (String term : List.of("a", "b")) {
+                all.add(SliceIndexing.prefixTerm(slice, new BytesRef(term)));
+            }
+        }
+        all.sort(BytesRef::compareTo);
+        // whichever order the hashes fall in, the two terms of a slice are adjacent
+        for (int i = 0; i < all.size(); i += 2) {
+            final BytesRef first = all.get(i);
+            final BytesRef second = all.get(i + 1);
+            assertThat(prefixOf(first), equalTo(prefixOf(second)));
         }
     }
 
-    /** A slice's terms sort together: every term of an earlier slice precedes every term of a later one. */
-    public void testSlicesSortAsContiguousRuns() {
-        BytesRef lastOfFirst = SliceIndexing.prefixTerm("s1", new BytesRef("zzzzzzzz"));
-        BytesRef firstOfSecond = SliceIndexing.prefixTerm("s2", new BytesRef(""));
-        assertTrue(lastOfFirst.compareTo(firstOfSecond) < 0);
+    private static String prefixOf(BytesRef term) {
+        return new BytesRef(term.bytes, term.offset, SliceIndexing.TERM_PREFIX_LENGTH).utf8ToString();
     }
 
-    public void testStripLeavesAnUnprefixedTermAlone() {
-        BytesRef plain = new BytesRef("error");
+    public void testStripLeavesATooShortTermAlone() {
+        final BytesRef plain = new BytesRef("short");
         assertThat(SliceIndexing.stripTermPrefix(plain), equalTo(plain));
-    }
-
-    private static void assertInvalid(String value) {
-        IllegalArgumentException ex = expectThrows(IllegalArgumentException.class, () -> SliceIndexing.validateUserSliceValue(value));
-        assertThat(ex.getMessage(), containsString("invalid [slice] value"));
     }
 
     private static String randomSliceValue() {

@@ -61,7 +61,14 @@ public class SliceReadPathTests extends MapperServiceTestCase {
             );
         }, reader -> {
             // What was indexed carries the slice.
-            assertThat(terms(reader.termVectors().get(0, "body").iterator()), contains("tenant-a|brown", "tenant-a|fox", "tenant-a|quick"));
+            assertThat(
+                terms(reader.termVectors().get(0, "body").iterator()),
+                contains(
+                    SliceIndexing.termPrefix("tenant-a") + "brown",
+                    SliceIndexing.termPrefix("tenant-a") + "fox",
+                    SliceIndexing.termPrefix("tenant-a") + "quick"
+                )
+            );
             // What the API hands back does not, and the order survives because a document holds one slice.
             assertThat(
                 terms(SliceTermVectors.withoutSlice(reader.termVectors().get(0)).terms("body").iterator()),

@@ -21,15 +21,19 @@ import org.apache.lucene.index.TermState;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.automaton.Automata;
 import org.apache.lucene.util.automaton.Automaton;
 import org.apache.lucene.util.automaton.CompiledAutomaton;
 import org.apache.lucene.util.automaton.Operations;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.core.Assertions;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.index.mapper.SliceTermQueries;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * Fails a search that asks a slice index for a term without the slice.
@@ -99,7 +103,7 @@ public final class SliceTermsVerifier extends FilterDirectoryReader {
                 final String[] slices = Strings.splitStringByCommaToArray(sliceRouting);
                 this.prefixes = new byte[slices.length][];
                 for (int i = 0; i < slices.length; i++) {
-                    this.prefixes[i] = SliceIndexing.termPrefix(slices[i]);
+                    this.prefixes[i] = SliceIndexing.termPrefixBytes(slices[i]);
                 }
             }
         }
@@ -143,7 +147,7 @@ public final class SliceTermsVerifier extends FilterDirectoryReader {
 
         @Override
         public TermsEnum intersect(CompiledAutomaton compiled, BytesRef startTerm) throws IOException {
-            if (compiled.type == CompiledAutomaton.AUTOMATON_TYPE.NORMAL && acceptsUnprefixed(compiled.automaton)) {
+            if (compiled.type == CompiledAutomaton.AUTOMATON_TYPE.NORMAL && acceptsOutsideSlices(compiled.automaton)) {
                 throw unconfined();
             }
             if (startTerm != null) {
@@ -153,18 +157,25 @@ public final class SliceTermsVerifier extends FilterDirectoryReader {
         }
 
         /**
-         * Whether the automaton would accept a term with no separator in it. A confined one cannot, because every term
-         * of this field starts with {@code slice|}.
+         * Whether the automaton accepts any term outside the slices the search targets. A confined one cannot: every
+         * term of this field begins with a slice prefix, so the automaton must too.
          */
-        private static boolean acceptsUnprefixed(Automaton automaton) {
-            final Automaton noSeparator = new Automaton();
-            final int state = noSeparator.createState();
-            noSeparator.setAccept(state, true);
-            noSeparator.addTransition(state, state, 0, SliceIndexing.SLICE_TERM_SEPARATOR - 1);
-            noSeparator.addTransition(state, state, SliceIndexing.SLICE_TERM_SEPARATOR + 1, 0xFF);
-            noSeparator.finishState();
+        private boolean acceptsOutsideSlices(Automaton automaton) {
+            final Automaton allowed;
+            if (prefixes == null) {
+                allowed = Operations.concatenate(SliceTermQueries.anySlicePrefix(), Automata.makeAnyBinary());
+            } else {
+                final List<Automaton> perSlice = new ArrayList<>(prefixes.length);
+                for (byte[] prefix : prefixes) {
+                    perSlice.add(Operations.concatenate(Automata.makeBinary(new BytesRef(prefix)), Automata.makeAnyBinary()));
+                }
+                allowed = Operations.union(perSlice);
+            }
             return Operations.isEmpty(
-                Operations.determinize(Operations.intersection(automaton, noSeparator), Operations.DEFAULT_DETERMINIZE_WORK_LIMIT)
+                Operations.determinize(
+                    Operations.minus(automaton, allowed, Operations.DEFAULT_DETERMINIZE_WORK_LIMIT),
+                    Operations.DEFAULT_DETERMINIZE_WORK_LIMIT
+                )
             ) == false;
         }
 
@@ -221,7 +232,7 @@ public final class SliceTermsVerifier extends FilterDirectoryReader {
     /** The term must carry the prefix of a slice the search targets, or of some slice when it targets all of them. */
     private static void verify(BytesRef term, String field, @Nullable byte[][] prefixes) {
         if (prefixes == null) {
-            if (separatorAt(term) < 0) {
+            if (term.length < SliceIndexing.TERM_PREFIX_LENGTH) {
                 throw missing(term, field, "any slice");
             }
             return;
@@ -232,15 +243,6 @@ public final class SliceTermsVerifier extends FilterDirectoryReader {
             }
         }
         throw missing(term, field, Arrays.stream(prefixes).map(p -> new BytesRef(p).utf8ToString()).toList().toString());
-    }
-
-    private static int separatorAt(BytesRef term) {
-        for (int i = 0; i < term.length; i++) {
-            if (term.bytes[term.offset + i] == SliceIndexing.SLICE_TERM_SEPARATOR) {
-                return i;
-            }
-        }
-        return -1;
     }
 
     private static boolean startsWith(BytesRef term, byte[] prefix) {
