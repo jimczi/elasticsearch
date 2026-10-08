@@ -138,6 +138,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.IntSupplier;
 import java.util.function.LongSupplier;
@@ -1091,6 +1092,25 @@ public class ComputeService {
         PlanTimeProfile planTimeProfile,
         ActionListener<Result> listener
     ) {
+        execute(sessionId, rootTask, flags, physicalPlan, configuration, foldContext, execInfo, planTimeProfile, null, listener);
+    }
+
+    /**
+     * Runs a plan, sending its pages to {@code pageSinkFactory} instead of collecting them when one is given. The
+     * factory takes the plan's output, which is the schema the sink needs to read the rows against.
+     */
+    public void execute(
+        String sessionId,
+        CancellableTask rootTask,
+        EsqlFlags flags,
+        PhysicalPlan physicalPlan,
+        Configuration configuration,
+        FoldContext foldContext,
+        EsqlExecutionInfo execInfo,
+        PlanTimeProfile planTimeProfile,
+        @Nullable Function<List<Attribute>, Consumer<Page>> pageSinkFactory,
+        ActionListener<Result> listener
+    ) {
         assert ThreadPool.assertCurrentThreadPool(
             ThreadPool.Names.SYSTEM_READ,
             ThreadPool.Names.SEARCH,
@@ -1131,23 +1151,34 @@ public class ComputeService {
                     null,
                     initialClusterStatuses,
                     planTimeProfile,
-                    warnIndexCoordinatorOnce
-                );
-                case SubPlan.Merge merge -> new SubPlansExecutor(
-                    this,
-                    exchangeService,
-                    sessionId,
-                    rootTask,
-                    flags,
-                    configuration,
-                    foldContext,
-                    execInfo,
-                    initialClusterStatuses,
                     warnIndexCoordinatorOnce,
-                    planTimeProfile,
-                    merge,
-                    dispatchListener
-                ).executePlan();
+                    SiblingPlacement.SINGLE,
+                    pageSinkFactory
+                );
+                case SubPlan.Merge merge -> {
+                    if (pageSinkFactory != null) {
+                        // The merge path wires its own sink as it is built, so this one would be ignored.
+                        dispatchListener.onFailure(
+                            new IllegalArgumentException("INTO is not supported in a query with FORK or UNION branches")
+                        );
+                        return;
+                    }
+                    new SubPlansExecutor(
+                        this,
+                        exchangeService,
+                        sessionId,
+                        rootTask,
+                        flags,
+                        configuration,
+                        foldContext,
+                        execInfo,
+                        initialClusterStatuses,
+                        warnIndexCoordinatorOnce,
+                        planTimeProfile,
+                        merge,
+                        dispatchListener
+                    ).executePlan();
+                }
             }
         } catch (Exception e) {
             // executePlan does planning work outside its own try/catch (breakPlanBetweenCoordinatorAndDataNode, getIndices), so a
@@ -1186,7 +1217,8 @@ public class ComputeService {
             initialClusterStatuses,
             planTimeProfile,
             warnIndexCoordinatorOnce,
-            SiblingPlacement.SINGLE
+            SiblingPlacement.SINGLE,
+            null
         );
     }
 
@@ -1209,6 +1241,42 @@ public class ComputeService {
         PlanTimeProfile planTimeProfile,
         Runnable warnIndexCoordinatorOnce,
         SiblingPlacement placement
+    ) {
+        executePlan(
+            sessionId,
+            rootTask,
+            flags,
+            physicalPlan,
+            configuration,
+            foldContext,
+            execInfo,
+            profileQualifier,
+            listener,
+            exchangeSinkSupplier,
+            initialClusterStatuses,
+            planTimeProfile,
+            warnIndexCoordinatorOnce,
+            placement,
+            null
+        );
+    }
+
+    public void executePlan(
+        String sessionId,
+        CancellableTask rootTask,
+        EsqlFlags flags,
+        PhysicalPlan physicalPlan,
+        Configuration configuration,
+        FoldContext foldContext,
+        EsqlExecutionInfo execInfo,
+        String profileQualifier,
+        ActionListener<Result> listener,
+        Supplier<ExchangeSink> exchangeSinkSupplier,
+        Map<String, EsqlExecutionInfo.Cluster.Status> initialClusterStatuses,
+        PlanTimeProfile planTimeProfile,
+        Runnable warnIndexCoordinatorOnce,
+        SiblingPlacement placement,
+        @Nullable Function<List<Attribute>, Consumer<Page>> pageSinkFactory
     ) {
         final long splitDiscoveryStart = System.nanoTime();
         ExternalPlanningReservation reservation = execInfo == null ? null : execInfo.externalPlanning();
@@ -1241,7 +1309,8 @@ public class ComputeService {
                         planTimeProfile,
                         warnIndexCoordinatorOnce,
                         splitDiscoveryStart,
-                        placement
+                        placement,
+                        pageSinkFactory
                     ),
                     releasing
                 ),
@@ -1343,7 +1412,8 @@ public class ComputeService {
         PlanTimeProfile planTimeProfile,
         Runnable warnIndexCoordinatorOnce,
         long splitDiscoveryStart,
-        SiblingPlacement placement
+        SiblingPlacement placement,
+        @Nullable Function<List<Attribute>, Consumer<Page>> pageSinkFactory
     ) {
         final ExternalDistributionResult distributionResult;
         try {
@@ -1386,7 +1456,10 @@ public class ComputeService {
             ? streaming.pageStream()
             : null;
         if (exchangeSinkSupplier == null && coordinatorPlan instanceof StreamingOutputExec == false) {
-            coordinatorPlan = new OutputExec(coordinatorPlan, collectedPages::add);
+            coordinatorPlan = new OutputExec(
+                coordinatorPlan,
+                pageSinkFactory == null ? collectedPages::add : pageSinkFactory.apply(resolvedPlan.output())
+            );
         }
 
         PhysicalPlan dataNodePlan = coordinatorAndDataNode.v2();
