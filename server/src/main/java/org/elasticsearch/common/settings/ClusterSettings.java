@@ -145,6 +145,8 @@ import org.elasticsearch.search.aggregations.AggregatorFactories;
 import org.elasticsearch.search.aggregations.MultiBucketConsumerService;
 import org.elasticsearch.search.aggregations.metrics.TDigestExecutionHint;
 import org.elasticsearch.search.fetch.subphase.highlight.FastVectorHighlighter;
+import org.elasticsearch.search.scheduling.QueryAdmission;
+import org.elasticsearch.search.scheduling.QueryScheduler;
 import org.elasticsearch.snapshots.InternalSnapshotsInfoService;
 import org.elasticsearch.snapshots.RestoreService;
 import org.elasticsearch.snapshots.SnapshotShutdownProgressTracker;
@@ -159,8 +161,11 @@ import org.elasticsearch.transport.TransportService;
 import org.elasticsearch.transport.TransportSettings;
 import org.elasticsearch.watcher.ResourceWatcherService;
 
+import java.util.Collection;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Encapsulates all valid cluster level settings.
@@ -231,7 +236,7 @@ public final class ClusterSettings extends AbstractScopedSettings {
         }
     }
 
-    public static final Set<Setting<?>> BUILT_IN_CLUSTER_SETTINGS = Set.of(
+    private static final Set<Setting<?>> ALWAYS_BUILT_IN_CLUSTER_SETTINGS = Set.of(
         AllocationService.PRESERVE_DECISION_LABELS_SETTING,
         AllocationBalancingRoundSummaryService.ENABLE_BALANCER_ROUND_SUMMARIES_METRICS_SETTING,
         AllocationBalancingRoundSummaryService.ENABLE_BALANCER_ROUND_SUMMARIES_LOGGING_SETTING,
@@ -730,4 +735,10 @@ public final class ClusterSettings extends AbstractScopedSettings {
         SystemIndices.NUMBER_OF_REPLICAS_SETTING,
         SystemIndices.AUTO_EXPAND_REPLICAS_SETTING
     );
+
+    public static final Set<Setting<?>> BUILT_IN_CLUSTER_SETTINGS = Stream.of(
+        ALWAYS_BUILT_IN_CLUSTER_SETTINGS,
+        QueryScheduler.settings(),
+        QueryAdmission.settings()
+    ).flatMap(Collection::stream).collect(Collectors.toUnmodifiableSet());
 }

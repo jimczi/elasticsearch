@@ -1375,6 +1375,8 @@ class NodeConstruction {
             onlinePrewarmingService
         );
         searchTransportService.setSearchService(searchService);
+        searchService.queryScheduler().registerMetrics(telemetryProvider.getMeterRegistry());
+        searchService.queryAdmission().registerMetrics(telemetryProvider.getMeterRegistry());
 
         final SearchTaskWatchdog searchTaskWatchdog = new SearchTaskWatchdog(
             settingsModule.getClusterSettings(),

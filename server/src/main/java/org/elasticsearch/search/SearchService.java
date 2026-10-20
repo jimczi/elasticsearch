@@ -135,6 +135,8 @@ import org.elasticsearch.search.rank.feature.RankFeatureResult;
 import org.elasticsearch.search.rank.feature.RankFeatureShardPhase;
 import org.elasticsearch.search.rank.feature.RankFeatureShardRequest;
 import org.elasticsearch.search.rescore.RescorerBuilder;
+import org.elasticsearch.search.scheduling.QueryAdmission;
+import org.elasticsearch.search.scheduling.QueryScheduler;
 import org.elasticsearch.search.searchafter.SearchAfterBuilder;
 import org.elasticsearch.search.slice.SliceBuilder;
 import org.elasticsearch.search.sort.FieldSortBuilder;
@@ -430,6 +432,8 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     private static final StackTraceElement[] EMPTY_STACK_TRACE_ARRAY = new StackTraceElement[0];
 
     private final ThreadPool threadPool;
+    private final QueryScheduler queryScheduler;
+    private final QueryAdmission queryAdmission;
 
     private final ClusterService clusterService;
 
@@ -503,6 +507,20 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         this.activeReaders = new ActiveReaders(this.sessionId);
         this.threadPool = threadPool;
         this.clusterService = clusterService;
+        int processors = EsExecutors.allocatedProcessors(settings);
+        this.queryScheduler = new QueryScheduler(
+            ThreadPool.searchOrGetThreadPoolSize(processors),
+            threadPool.getThreadContext(),
+            clusterService.getClusterSettings(),
+            threadPool::relativeTimeInNanos
+        );
+        this.queryAdmission = new QueryAdmission(
+            Math.max(1, processors / 2),
+            threadPool.executor(Names.SEARCH),
+            threadPool.getThreadContext(),
+            clusterService.getClusterSettings(),
+            threadPool::relativeTimeInNanos
+        );
         this.indicesService = indicesService;
         this.scriptService = scriptService;
         this.bigArrays = bigArrays;
@@ -3014,4 +3032,17 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         };
     }
 
+    /**
+     * Shares the processors of this node between the search queries running on it.
+     */
+    public QueryScheduler queryScheduler() {
+        return queryScheduler;
+    }
+
+    /**
+     * Caps how many search queries read data on this node at once.
+     */
+    public QueryAdmission queryAdmission() {
+        return queryAdmission;
+    }
 }
