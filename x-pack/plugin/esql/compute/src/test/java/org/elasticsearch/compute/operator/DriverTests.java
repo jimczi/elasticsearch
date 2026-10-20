@@ -21,6 +21,7 @@ import org.elasticsearch.common.util.MockBigArrays;
 import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
+import org.elasticsearch.common.util.concurrent.YieldingExecutor;
 import org.elasticsearch.common.util.set.Sets;
 import org.elasticsearch.compute.data.Block;
 import org.elasticsearch.compute.data.BlockFactory;
@@ -55,6 +56,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -907,6 +909,104 @@ public class DriverTests extends ESTestCase {
         assertThat(driver.status().status(), equalTo(DriverStatus.Status.DONE));
         assertThat(driver.status().cpuNanos(), equalTo(beforeRun + inRun));
         assertThat(driverContext.cpuNanos(), equalTo(beforeRun + inRun + afterRun));
+    }
+
+    /**
+     * A driver whose intervals end after every iteration keeps its thread while a {@link YieldingExecutor} has no
+     * other task waiting: it is submitted once and continues inline.
+     */
+    public void testYieldingDriverContinuesInlineWithoutWaiters() {
+        CountingYieldingExecutor executor = new CountingYieldingExecutor(false);
+        int pages = between(2, 20);
+        runYieldingDriver(executor, pages);
+        assertThat(executor.submissions.get(), equalTo(1));
+        assertThat(executor.skippedYields.get(), greaterThanOrEqualTo(pages - 1));
+    }
+
+    /**
+     * When a task waits for a thread, a driver gives its thread back at the end of every interval.
+     */
+    public void testYieldingDriverYieldsToWaiters() {
+        CountingYieldingExecutor executor = new CountingYieldingExecutor(true);
+        int pages = between(2, 20);
+        runYieldingDriver(executor, pages);
+        assertThat(executor.submissions.get(), greaterThanOrEqualTo(pages));
+        assertThat(executor.skippedYields.get(), equalTo(0));
+    }
+
+    /**
+     * An iteration longer than the interval cannot be cut, so the driver reports it.
+     */
+    public void testIterationLongerThanTheYieldIntervalIsReported() {
+        CountingYieldingExecutor executor = new CountingYieldingExecutor(false, TimeValue.timeValueNanos(1));
+        runYieldingDriver(executor, between(1, 5));
+        assertThat(executor.lateYields.get(), greaterThanOrEqualTo(1));
+    }
+
+    private void runYieldingDriver(Executor executor, int pages) {
+        DriverContext driverContext = driverContext();
+        List<Page> inPages = new ArrayList<>();
+        for (int i = 0; i < pages; i++) {
+            inPages.add(new Page(driverContext.blockFactory().newConstantIntBlockWith(i, 1)));
+        }
+        List<Page> outPages = new ArrayList<>();
+        Driver driver = TestDriverFactory.create(
+            driverContext,
+            new CannedSourceOperator(inPages.iterator()),
+            List.of(),
+            new TestResultPageSinkOperator(outPages::add)
+        );
+        PlainActionFuture<Void> future = new PlainActionFuture<>();
+        // One iteration per interval, so every page ends an interval.
+        Driver.start(new ThreadContext(Settings.EMPTY), executor, driver, 1, future);
+        future.actionGet(30, TimeUnit.SECONDS);
+        assertThat(driver.status().status(), equalTo(DriverStatus.Status.DONE));
+        assertThat(outPages.size(), equalTo(pages));
+        outPages.forEach(Page::releaseBlocks);
+    }
+
+    /** Runs tasks inline and counts them. */
+    private static class CountingYieldingExecutor implements YieldingExecutor {
+        private final boolean pendingWork;
+        private final TimeValue yieldInterval;
+        private final AtomicInteger submissions = new AtomicInteger();
+        private final AtomicInteger skippedYields = new AtomicInteger();
+        private final AtomicInteger lateYields = new AtomicInteger();
+
+        CountingYieldingExecutor(boolean pendingWork) {
+            this(pendingWork, TimeValue.timeValueMinutes(1));
+        }
+
+        CountingYieldingExecutor(boolean pendingWork, TimeValue yieldInterval) {
+            this.pendingWork = pendingWork;
+            this.yieldInterval = yieldInterval;
+        }
+
+        @Override
+        public void execute(Runnable command) {
+            submissions.incrementAndGet();
+            command.run();
+        }
+
+        @Override
+        public TimeValue yieldInterval() {
+            return yieldInterval;
+        }
+
+        @Override
+        public boolean hasWaitingTasks() {
+            return pendingWork;
+        }
+
+        @Override
+        public void onYieldSkipped() {
+            skippedYields.incrementAndGet();
+        }
+
+        @Override
+        public void onLateYield(long iterationNanos) {
+            lateYields.incrementAndGet();
+        }
     }
 
     private static void assertRunningWithRegularUser(ThreadPool threadPool) {

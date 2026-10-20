@@ -943,6 +943,23 @@ final class DataNodeComputeHandler implements TransportRequestHandler<DataNodeRe
     @Override
     public void messageReceived(DataNodeRequest request, TransportChannel channel, Task task) {
         ActionListener<DataNodeComputeResponse> channelListener = new ChannelActionListener<>(channel);
+        // Admitted before acquiring anything, and held until the response is sent.
+        computeService.admitDataNodeRequest(request.sessionId(), (CancellableTask) task, ActionListener.wrap(permit -> {
+            ActionListener<DataNodeComputeResponse> admitted = ActionListener.releaseAfter(channelListener, permit);
+            ActionListener.run(admitted, a -> handleDataNodeRequest(request, channel, task, a));
+        }, e -> {
+            // Not admitted: close the exchange the coordinator opened for this request, as a failed compute would.
+            exchangeService.finishSinkHandler(request.sessionId(), e);
+            channelListener.onFailure(e);
+        }));
+    }
+
+    private void handleDataNodeRequest(
+        DataNodeRequest request,
+        TransportChannel channel,
+        Task task,
+        ActionListener<DataNodeComputeResponse> channelListener
+    ) {
         // Old coordinators receive warnings as transport response headers rather than the ESQL_DRIVER_WARNINGS
         // wire field. Emit them here — before the channel serialises its ThreadContext — so they are included.
         final ActionListener<DataNodeComputeResponse> listener = channel.getVersion().supports(DriverCompletionInfo.ESQL_DRIVER_WARNINGS)

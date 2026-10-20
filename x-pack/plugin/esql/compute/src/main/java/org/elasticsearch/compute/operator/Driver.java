@@ -14,6 +14,7 @@ import org.elasticsearch.action.support.SubscribableListener;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.util.concurrent.AbstractRunnable;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
+import org.elasticsearch.common.util.concurrent.YieldingExecutor;
 import org.elasticsearch.compute.Describable;
 import org.elasticsearch.compute.data.Page;
 import org.elasticsearch.compute.operator.exchange.ExchangeSinkOperator;
@@ -109,6 +110,8 @@ public class Driver implements Releasable, Describable {
     private final DriverScheduler scheduler = new DriverScheduler();
     /** Reusable list to collect blocked results, avoiding new allocation on every driver loop. */
     private final List<IsBlockedResult> blockedResults = new ArrayList<>();
+    /** The longest loop iteration since {@link #takeLongestIterationNanos()}. */
+    private long longestIterationNanos;
 
     /**
      * Status reported to the tasks API. We write the status at most once every
@@ -215,6 +218,8 @@ public class Driver implements Releasable, Describable {
         int iterationsSinceLastStatusUpdate = 0;
         // The time passed since the last status update.
         long lastStatusUpdateTime = startTime;
+        // The start of the current iteration.
+        long iterationStart = startTime;
         while (true) {
             IsBlockedResult isBlocked = Operator.NOT_BLOCKED;
             try {
@@ -249,6 +254,8 @@ public class Driver implements Releasable, Describable {
             iterationsSinceLastStatusUpdate++;
 
             long now = currentTimeNanosSupplier.getAsLong();
+            longestIterationNanos = Math.max(longestIterationNanos, now - iterationStart);
+            iterationStart = now;
             if (isBlocked.listener().isDone() == false) {
                 updateStatus(
                     now - lastStatusUpdateTime,
@@ -489,7 +496,7 @@ public class Driver implements Releasable, Describable {
             driver.updateStatus(0, 0, DriverStatus.Status.STARTING, "driver starting", currentTimeNanosSupplier.getAsLong());
             initializeEarlyTerminationChecker(driver);
             schedule(
-                DEFAULT_TIME_BEFORE_YIELDING,
+                executor instanceof YieldingExecutor yielding ? yielding.yieldInterval() : DEFAULT_TIME_BEFORE_YIELDING,
                 maxIterations,
                 threadContext,
                 executor,
@@ -567,6 +574,49 @@ public class Driver implements Releasable, Describable {
         Releasables.closeWhileHandlingException(releasable, driverContext.getSnapshot());
     }
 
+    /**
+     * Runs the driver on the same thread, interval after interval, until a {@link YieldingExecutor} has another task
+     * waiting.
+     */
+    private static SubscribableListener<Void> runUntilYield(
+        Driver driver,
+        Executor executor,
+        TimeValue maxTime,
+        int maxIterations,
+        LongSupplier currentTimeNanosSupplier
+    ) {
+        while (true) {
+            SubscribableListener<Void> fut = driver.run(maxTime, maxIterations, currentTimeNanosSupplier);
+            if ((executor instanceof YieldingExecutor) == false) {
+                return fut;
+            }
+            YieldingExecutor yielding = (YieldingExecutor) executor;
+            long longest = driver.takeLongestIterationNanos();
+            if (longest > maxTime.nanos()) {
+                LOGGER.debug(
+                    "driver [{}] ran one iteration for [{}] with a [{}] yield interval",
+                    driver.shortDescription,
+                    TimeValue.timeValueNanos(longest),
+                    maxTime
+                );
+                yielding.onLateYield(longest);
+            }
+            if (fut.isDone() == false || driver.isFinished() || yielding.hasWaitingTasks()) {
+                return fut;
+            }
+            yielding.onYieldSkipped();
+        }
+    }
+
+    /**
+     * The longest loop iteration since the previous call.
+     */
+    long takeLongestIterationNanos() {
+        long longest = longestIterationNanos;
+        longestIterationNanos = 0;
+        return longest;
+    }
+
     private static void schedule(
         TimeValue maxTime,
         int maxIterations,
@@ -579,7 +629,7 @@ public class Driver implements Releasable, Describable {
         AbstractRunnable task = new AbstractRunnable() {
             @Override
             protected void doRun() {
-                SubscribableListener<Void> fut = driver.run(maxTime, maxIterations, currentTimeNanosSupplier);
+                SubscribableListener<Void> fut = runUntilYield(driver, executor, maxTime, maxIterations, currentTimeNanosSupplier);
                 if (driver.isFinished()) {
                     onComplete(listener);
                     return;

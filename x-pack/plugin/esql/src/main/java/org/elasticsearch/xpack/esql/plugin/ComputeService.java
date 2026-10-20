@@ -55,6 +55,7 @@ import org.elasticsearch.iplocation.api.IpLocationService;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.search.SearchService;
+import org.elasticsearch.search.scheduling.QueryScheduler;
 import org.elasticsearch.tasks.CancellableTask;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.tasks.TaskCancelledException;
@@ -1937,6 +1938,46 @@ public class ComputeService {
         PlanTimeProfile planTimeProfile,
         ActionListener<DriverCompletionInfo> listener
     ) {
+        // Only phases that read data may wait for admission, never phases that consume exchanges. Data phases on data
+        // nodes were admitted with their request, before acquiring search contexts.
+        boolean mayWait = plan.anyMatch(ExchangeSourceExec.class::isInstance) == false
+            && DATA_DESCRIPTION.equals(context.description()) == false;
+        searchService.queryAdmission()
+            .admit(querySession(context.sessionId()), mayWait, task, listener.delegateFailureAndWrap((l, permit) -> {
+                ActionListener<DriverCompletionInfo> admitted = ActionListener.releaseAfter(l, permit);
+                ActionListener.run(
+                    admitted,
+                    a -> admittedRunCompute(
+                        task,
+                        context,
+                        plan,
+                        plannerSettings,
+                        localPhysicalOptimization,
+                        coordinatorExternalSplits,
+                        planTimeProfile,
+                        a
+                    )
+                );
+            }));
+    }
+
+    /**
+     * Admits a data-node request of a query before it acquires anything. The permit is held until the request completes.
+     */
+    void admitDataNodeRequest(String sessionId, CancellableTask task, ActionListener<Releasable> listener) {
+        searchService.queryAdmission().admit(querySession(sessionId), true, task, listener);
+    }
+
+    private void admittedRunCompute(
+        CancellableTask task,
+        ComputeContext context,
+        PhysicalPlan plan,
+        PlannerSettings plannerSettings,
+        LocalPhysicalOptimization localPhysicalOptimization,
+        List<ExternalSplit> coordinatorExternalSplits,
+        PlanTimeProfile planTimeProfile,
+        ActionListener<DriverCompletionInfo> listener
+    ) {
         QueryWarnings singleValueQueryWarnings = QueryWarnings.EMIT;
         var shardContexts = context.searchContexts().map(csc -> csc.shardContext(singleValueQueryWarnings));
         LongSupplier directoryBytesRead = directoryBytesReadSupplier(searchService.getIndicesService());
@@ -2122,19 +2163,23 @@ public class ComputeService {
                 planningBytesRead,
                 approximationApplied
             );
-            driverRunner.executeDrivers(
-                task,
-                drivers,
-                transportService.getThreadPool().executor(EsqlPlugin.computePool()),
-                ActionListener.releaseAfter(driverListener, () -> {
+            QueryScheduler.QueryExecutor driverExecutor = searchService.queryScheduler()
+                .executor(querySession(context.sessionId()), transportService.getThreadPool().executor(EsqlPlugin.computePool()));
+            try {
+                driverRunner.executeDrivers(task, drivers, driverExecutor, ActionListener.releaseAfter(driverListener, () -> {
                     if (hookExecInfo != null) {
                         for (BooleanSupplier hook : registeredStopHooks) {
                             hookExecInfo.removeStopHook(hook);
                         }
                     }
-                    Releasables.close(drivers);
-                })
-            );
+                    try (driverExecutor) {
+                        Releasables.close(drivers);
+                    }
+                }));
+            } catch (Exception e) {
+                driverExecutor.close();
+                throw e;
+            }
         } catch (Exception e) {
             if (context.description().equals(DATA_DESCRIPTION)) {
                 Releasables.close(context.searchContexts().iterable());
@@ -2287,6 +2332,19 @@ public class ComputeService {
 
     String newChildSession(String session) {
         return session + "/" + childSessionIdGenerator.incrementAndGet();
+    }
+
+    /**
+     * The session of the query, shared by all its child and internal sessions. Those append {@code /} or {@code [} to it.
+     */
+    static String querySession(String session) {
+        for (int i = 0; i < session.length(); i++) {
+            char c = session.charAt(i);
+            if (c == '/' || c == '[') {
+                return session.substring(0, i);
+            }
+        }
+        return session;
     }
 
     String profileDescription(String qualifier, String label) {
